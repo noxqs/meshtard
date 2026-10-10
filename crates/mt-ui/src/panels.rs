@@ -1289,3 +1289,127 @@ fn paint_details(p: &Painter, r: Rect, ink: Color32) {
         Stroke::NONE,
     ));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ComponentRow, EntityInfo, Frame};
+    use mt_spec::Spec;
+
+    /// Runs one 1600x900 frame of the whole shell with `events`.
+    fn run(
+        ctx: &egui::Context,
+        s: &mut Shell,
+        spec: &Spec,
+        events: Vec<egui::Event>,
+    ) -> Vec<Event> {
+        let info = EntityInfo::no_selection();
+        let frame = Frame {
+            spec,
+            active_tool: "tool.select",
+            status: "",
+            measurements_label: "Measurements",
+            measurements_value: "",
+            is_enabled: &|_| true,
+            is_checked: &|_| false,
+            entity_info: &info,
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1600.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out_events = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| out_events = s.show(ui, &frame, |_| {}));
+        out.textures_delta.clear();
+        out_events
+    }
+
+    fn click(pos: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    /// Expands only the Components panel (clicks while scanning may toggle headers).
+    fn only_components(s: &mut Shell) {
+        for p in &mut s.panels {
+            p.shown = true;
+            p.expanded = p.id == "window.components";
+        }
+    }
+
+    /// Clicks down the tray (so the test does not depend on exact pixel layout) to
+    /// pick a definition, then to focus the Edit tab's name field and rename it.
+    #[test]
+    fn pick_and_edit_component() {
+        let spec = Spec::builtin().unwrap();
+        let ctx = egui::Context::default();
+        let mut s = Shell::new(&spec);
+        only_components(&mut s);
+        let row = |name: &str, instances| ComponentRow {
+            name: name.into(),
+            description: String::new(),
+            instances,
+        };
+        s.set_tray_data(TrayData {
+            components: vec![row("Door", 1), row("Window", 0)],
+            ..TrayData::default()
+        });
+        assert!(run(&ctx, &mut s, &spec, vec![]).is_empty());
+
+        // Click down the tray until a list row is hit: picks a definition.
+        let x = 1450.0;
+        let mut picked = None;
+        for y in (150..600).step_by(6) {
+            only_components(&mut s);
+            let ev = run(&ctx, &mut s, &spec, click(pos2(x, y as f32)));
+            if let Some(Event::ComponentPick(i)) = ev.first() {
+                picked = Some(*i);
+                break;
+            }
+            // Leave the Edit tab if a click switched to it.
+            s.tray_ui.component_tab = ComponentTab::Select;
+        }
+        let i = picked.expect("a click on the list picks a definition");
+        assert_eq!(s.tray_data().current_component, Some(i));
+
+        // Edit tab: focus the name field by clicking down the panel, type, Enter.
+        s.tray_ui.component_tab = ComponentTab::Edit;
+        run(&ctx, &mut s, &spec, vec![]);
+        let mut edited = None;
+        for y in (150..600).step_by(6) {
+            only_components(&mut s);
+            run(&ctx, &mut s, &spec, click(pos2(x, y as f32)));
+            if !ctx.egui_wants_keyboard_input() {
+                continue;
+            }
+            let key = |key| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let typed = vec![key(egui::Key::End), egui::Event::Text("X".into())];
+            run(&ctx, &mut s, &spec, typed);
+            let ev = run(&ctx, &mut s, &spec, vec![key(egui::Key::Enter)]);
+            edited = ev.into_iter().next();
+            break;
+        }
+        let name = format!("{}X", ["Door", "Window"][i]);
+        assert_eq!(
+            edited,
+            Some(Event::ComponentEdit {
+                index: i,
+                name: name.clone(),
+                description: String::new(),
+            })
+        );
+        assert_eq!(s.tray_data().components[i].name, name);
+    }
+}

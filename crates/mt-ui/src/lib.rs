@@ -624,6 +624,49 @@ mod tests {
     }
 
     #[test]
+    fn components_panel_draws() {
+        let spec = Spec::builtin().unwrap();
+        let mut s = Shell::new(&spec);
+        assert!(s.open_panel("window.components"));
+        s.set_tray_data(TrayData {
+            components: vec![ComponentRow {
+                name: "Door".into(),
+                description: "Single door".into(),
+                instances: 2,
+            }],
+            current_component: Some(0),
+            ..TrayData::default()
+        });
+        let info = EntityInfo::no_selection();
+        let frame = Frame {
+            spec: &spec,
+            active_tool: "tool.select",
+            status: "",
+            measurements_label: "Measurements",
+            measurements_value: "",
+            is_enabled: &|_| true,
+            is_checked: &|_| false,
+            entity_info: &info,
+        };
+        let ctx = egui::Context::default();
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                events.extend(s.show(ui, &frame, |_| {}));
+            });
+            out.textures_delta.clear();
+        }
+        assert!(events.is_empty(), "no events without user input");
+    }
+
+    #[test]
     fn window_menu_command_opens_tray_panel() {
         let mut s = shell();
         assert!(!s.panel_expanded("window.materials"));

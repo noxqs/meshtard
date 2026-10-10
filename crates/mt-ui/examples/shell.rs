@@ -9,8 +9,8 @@
 use eframe::egui;
 use mt_spec::Spec;
 use mt_ui::{
-    EntityInfo, Event, Frame, MaterialRow, OutlinerKind, OutlinerNode, SelectMode, Shell, TagRow,
-    TrayData,
+    ComponentRow, EntityInfo, Event, Frame, MaterialRow, OutlinerKind, OutlinerNode, SelectMode,
+    Shell, TagRow, TrayData,
 };
 
 fn main() -> eframe::Result {
@@ -66,6 +66,14 @@ fn material(name: &str, color: [u8; 3], opacity: u8) -> MaterialRow {
     }
 }
 
+fn component(name: &str, description: &str, instances: usize) -> ComponentRow {
+    ComponentRow {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        instances,
+    }
+}
+
 fn node(name: &str, definition: Option<&str>, children: Vec<OutlinerNode>) -> OutlinerNode {
     OutlinerNode {
         name: name.to_owned(),
@@ -118,6 +126,14 @@ fn sample_data() -> TrayData {
         ],
         scenes: vec!["Scene 1".into(), "Front view".into(), "Top".into()],
         active_scene: Some(1),
+        components: vec![
+            component("Door", "Single interior door, 900 mm", 1),
+            component("Window", "", 2),
+            component("Chair", "Dining chair", 1),
+            component("Tree", "Deciduous tree, 2D face-me", 1),
+            component("Lamp", "Unused floor lamp", 0),
+        ],
+        current_component: Some(1),
         ..TrayData::default()
     }
 }
@@ -147,6 +163,21 @@ fn apply(data: &mut TrayData, event: &Event) {
             color,
             opacity,
         } => data.materials[*index] = material(name, *color, *opacity),
+        Event::ComponentPick(i) => data.current_component = Some(*i),
+        Event::ComponentEdit {
+            index,
+            name,
+            description,
+        } => {
+            data.components[*index] =
+                component(name, description, data.components[*index].instances)
+        }
+        Event::ComponentPurge => {
+            let current = data.current_component.map(|i| data.components[i].clone());
+            data.components.retain(|c| c.instances > 0);
+            data.current_component =
+                current.and_then(|c| data.components.iter().position(|d| *d == c));
+        }
         Event::OutlinerSelect { path, mode } => {
             fn walk(nodes: &mut [OutlinerNode], f: &mut dyn FnMut(&mut OutlinerNode)) {
                 for n in nodes {
