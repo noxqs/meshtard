@@ -1,101 +1,146 @@
-# meshtard: a SketchUp-style modeler in Rust
+# meshtard: a SketchUp clone in Rust
+
+## Goal
+
+A modeler that behaves exactly like SketchUp: same GUI layout, same menus, same hotkeys, same tools, and reads/writes real `.skp` files.
+
+- **Platform:** Linux first (X11 and Wayland). Windows/macOS later.
+- **GPU:** Vulkan via `wgpu` for drawing. CUDA for heavy compute, with a CPU fallback for machines without an NVIDIA GPU.
+- **Plugins (Ruby API):** kept in view, not in scope yet. The data model is designed so a Ruby bridge can be added later.
 
 ## Approach
 
-Clean-room reimplementation of SketchUp's *behavior*, not disassembly of its binaries.
+Rebuild the application from scratch by matching observable behavior (clean room). No disassembly of SketchUp binaries; its EULA forbids it.
 
-- SketchUp's EULA prohibits decompiling, and copying its code would taint the project.
-- What makes SketchUp useful is observable from the outside: the push/pull workflow, "sticky" edges that auto-form faces, and the inference (snapping) engine. All of it can be studied by using the app and rebuilt from scratch.
-- The `.skp` format is proprietary. Trimble ships an official C SDK for reading/writing it. Whether its license permits use in this project is unverified; check before relying on it. Until then, use open formats (glTF, OBJ, STL).
+- **File format:** port OpenSKP (MIT) to Rust. It already reverse-engineered both containers, so we reuse their work instead of redoing it.
+- **GUI, menus, hotkeys:** replicate from the running application. SketchUp has no Linux build, so the Windows version is the reference.
+- **Icons and name:** Trimble's icons and the "SketchUp" name are protected. We draw our own icons in the same style, same size and position. Menu structure, layout and shortcuts can be matched exactly.
 
-## Core design decisions
+## Reference sources
 
-| Area | Choice | Why |
+| Source | License | Use |
 |---|---|---|
-| Geometry kernel | Custom non-manifold boundary representation (radial-edge style): vertices, edges, loops, faces | SketchUp allows an edge shared by 3+ faces, dangling edges and faces with holes. A plain half-edge mesh cannot represent that. |
-| Numbers | `f64` + a global merge tolerance | Simple and fast. Exact arithmetic is not worth the cost for this kind of modeler. |
-| Math | `glam` (DVec3, DMat4) | Fast, f64 support, widely used. |
-| Storage | Generational arenas (`slotmap`) for entities | Stable IDs, cheap deletes, easy undo diffs. |
-| Undo/redo | Every tool emits a transaction (list of entity inserts/removes/changes); undo replays it in reverse | Matches SketchUp's one-step-per-operation undo. |
-| Windowing | `winit` | Standard. |
-| Rendering | `wgpu` | Cross-platform (Vulkan/Metal/DX12/WebGPU). |
-| UI | `egui` (toolbar, entity info, outliner) | Fast to build, integrates with wgpu. |
-| Face triangulation | `earcutr` or `spade` (constrained Delaunay) | Faces with holes need constrained triangulation. |
-| Picking | CPU ray cast against a BVH (`parry3d` or own) | Needed for inference anyway; GPU ID buffer can come later. |
-| File format | Own format via `serde` (RON for debugging, binary for release) | Versionable, easy to test. |
+| [OpenSKP](https://github.com/iamahsanmehmood/openskp) | MIT | Primary. Port its C++ implementation (`core.cpp`, `legacy.cpp`, `create.cpp`, `edit.cpp`, about 5,200 lines) and `docs/BINARY_FORMAT.md` to Rust. Keep its copyright notice. Use its Python package as a test oracle. |
+| skppy (Blender Artists forum) | Not checked | Writes 2026-format (VFF) files, which OpenSKP cannot. Check its license before reading its code. Otherwise use it only as a black box to produce test files. |
+| Real SketchUp (Windows) | n/a | Ground truth for GUI, menus, hotkeys, tool behavior. Screenshots and recorded behavior go in `spec/`. |
 
-## Workspace layout
+## Architecture
+
+### Data model mirrors `.skp`
+
+The in-memory model matches SketchUp's own entity model 1:1 so files round-trip without loss:
+Vertex, Edge, EdgeUse, Loop, Face, Curve/ArcCurve, ComponentDefinition, ComponentInstance, Group, Layer (Tag), Material, Style, Page (Scene), AttributeDictionary, guides, section planes, dimensions, text.
+
+SketchUp's EdgeUse is a radial-edge structure: one edge can border any number of faces. So the kernel is a non-manifold boundary representation, not a plain triangle mesh.
+
+### Workspace layout
 
 ```
 crates/
-  mt-kernel/     geometry + topology, no graphics deps (most tests live here)
-  mt-ops/        modeling operations: split, merge, push/pull, follow me, offset, intersect
-  mt-infer/      inference/snapping engine
-  mt-scene/      model, groups, components, layers/tags, materials, undo stack
-  mt-render/     wgpu renderer: faces, edges, profiles, selection highlight
-  mt-tools/      interactive tools (state machines driven by input events)
-  mt-io/         native format, glTF/OBJ/STL import/export
-  mt-app/        winit + egui shell, camera, tool palette
+  mt-kernel/   entities, topology, invariant checker (no graphics deps)
+  mt-ops/      split/merge edges, auto-face, push/pull, follow me, offset, intersect
+  mt-infer/    inference (snapping) engine
+  mt-model/    model, components, tags, materials, styles, scenes, undo stack
+  mt-skp/      .skp read/write: port of OpenSKP (VFF 2021+ and legacy 2013-2020)
+  mt-cuda/     CUDA kernels behind a cargo feature, CPU fallback for each
+  mt-render/   wgpu (Vulkan) renderer: faces, edges, profiles, styles, shadows
+  mt-tools/    interactive tools as state machines
+  mt-ui/       menus, toolbars, trays/panels, status bar, Measurements box
+  mt-app/      winit shell, keymap, preferences
+spec/
+  menus.toml   every menu and item, in order, with its default shortcut
+  keymap.toml  default hotkeys
+  tools/       per-tool behavior notes and screenshots from real SketchUp
+  ui/          layout screenshots and measurements
 ```
+
+Menus, toolbars and keymap are data files read at startup, so matching SketchUp is a matter of editing `spec/`, not code.
+
+### Key libraries
+
+| Need | Crate |
+|---|---|
+| Window, input (X11/Wayland) | `winit` |
+| Rendering | `wgpu` (Vulkan backend on Linux) |
+| GUI | `egui` with a custom theme to match SketchUp's look |
+| Math | `glam` (f64) |
+| Entity storage | `slotmap` |
+| CUDA | `cudarc` (driver API + NVRTC), feature flag `cuda` |
+| Face triangulation | `spade` (constrained Delaunay, handles holes) |
+| ZIP (VFF container) | `zip` |
+| XML (materials, styles) | `quick-xml` |
+| Tests | `proptest`, `insta` (snapshot tests) |
+
+### Where CUDA is used
+
+Only where the work is large and parallel. Each kernel has a CPU version with the same result, tested against each other.
+
+| Task | Why it is heavy |
+|---|---|
+| Triangulating all faces on load | Large files have hundreds of thousands of faces |
+| BVH build for picking and inference | Rebuilt after every edit on big models |
+| Intersect Faces / solid tools (union, subtract) | Pairwise face-face tests |
+| Smooth normals, soften edges | Per-vertex work over the whole model |
+| Shadow and ambient occlusion precompute | Per-pixel/per-sample work |
+
+The renderer itself stays on Vulkan. CUDA results are shared with Vulkan through external memory interop (`VK_KHR_external_memory_fd`) to avoid copies, if `wgpu` exposes it well enough; otherwise copy through host memory first and optimize later.
 
 ## Milestones
 
-### M0: Skeleton
-- Cargo workspace, CI (fmt, clippy, test).
-- Window with orbit/pan/zoom camera, ground grid, red/green/blue axes.
+### M0: Skeleton and spec capture
+- Cargo workspace, CI (fmt, clippy, test) on Linux, optional CUDA job.
+- Capture from real SketchUp: full menu tree, default shortcuts (Preferences > Shortcuts), toolbar layout, default tray panels, status bar, Measurements box. Write into `spec/`.
+- Window with SketchUp's default camera, axes and ground.
 
-### M1: Kernel
-- Entities: Vertex, Edge, Loop, Face (outer loop + inner loops), with radial edge links.
-- Invariants checker (`kernel.validate()`), run after every op in tests.
-- Core ops:
-  - Add edge: merge with existing vertices within tolerance, split crossing edges.
-  - Auto-face: when a new edge closes a coplanar loop, create a face. If the loop lies inside an existing face, split that face or create a hole.
-  - Erase edge: remove faces that depend on it, heal coplanar neighbours.
-- Property-based tests (`proptest`) for random edge soups.
+### M1: `.skp` reading (port of OpenSKP)
+- VFF container (2021+) and legacy MFC CArchive (2013-2020).
+- Load into `mt-kernel` entities, including components, tags, materials, styles, scenes.
+- Test: for every file in the test corpus, our parse matches OpenSKP Python's JSON export.
 
-This is the hardest milestone. Everything else depends on it being robust.
+Reading first means real SketchUp models are available for testing everything else.
 
-### M2: Rendering and selection
-- Triangulate faces, draw front/back face colors (SketchUp's white/blue-grey convention).
-- Draw edges as screen-space thick lines; profile edges thicker.
-- Click/shift/ctrl selection, window vs crossing box select.
+### M2: Kernel
+- Add edge (vertex merge, edge split), auto-face on closed coplanar loops, faces with holes, erase with healing.
+- Invariant checker after every operation; property-based tests.
 
-### M3: Inference engine
-- Snap targets: endpoint, midpoint, on-edge, on-face, center, intersection.
-- Directional inferences: parallel to axes, parallel/perpendicular to an edge, "from point" (hover to acquire, track along axis).
-- Axis locking with arrow keys and shift-lock.
-- Typed input (Value Control Box): enter exact lengths after starting a tool.
+### M3: Renderer and GUI shell
+- Faces, edges, profiles, front/back face colors, default style.
+- Menu bar, toolbars, Default Tray, status bar, Measurements box, all built from `spec/`.
+- Selection: click, shift, ctrl, window vs crossing, double/triple click.
+- CUDA: triangulation and BVH build.
 
-### M4: Drawing tools
-- Line, Rectangle, Circle, Polygon, Arc (2-point), Eraser.
-- Curves are edge chains with a "curve" tag so they select and edit as one unit.
+### M4: Inference engine
+- Endpoint, midpoint, on-edge, on-face, center, intersection.
+- Axis, parallel, perpendicular, "from point" tracking, arrow-key and shift locking.
+- Typed values in the Measurements box.
 
-### M5: Modeling tools
-- Push/Pull: extrude a face along its normal, merge with coplanar geometry, cut through when pushing to the opposite face.
-- Move/Copy (with array copies like `5x`), Rotate, Scale.
-- Offset, Follow Me, Tape Measure + guide lines.
-- Intersect Faces.
+### M5: Drawing tools
+- Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arc variants, Eraser.
 
-### M6: Scene structure
-- Groups and Components (definition + instances, edit in place, make unique).
-- Tags (layers), visibility, outliner panel.
-- Materials and colors, Paint Bucket.
+### M6: Modeling tools
+- Push/Pull, Move/Copy (arrays), Rotate, Scale, Offset, Follow Me, Tape Measure, Protractor, Dimensions, Text, Intersect Faces.
+- CUDA: intersection and solid tools.
 
-### M7: I/O and polish
-- Native save/load with versioning.
-- glTF, OBJ, STL export; OBJ/STL import.
-- Scenes (saved camera views), section planes, X-ray/hidden-line styles.
-- `.skp` import if the SDK license allows.
+### M7: Scene structure
+- Groups and components (edit in place, make unique), Outliner, Tags, Materials, Styles, Scenes, section planes, shadows.
+
+### M8: `.skp` writing
+- Legacy format (2013-2020) via the OpenSKP port.
+- VFF (2021+) writing: not covered by OpenSKP. Needs own research, or skppy if its license allows.
+- Test: files we write open in real SketchUp and in OpenSKP.
+
+### Later
+- Ruby plugin API (kept in view).
+- Windows and macOS builds.
 
 ## Risks
 
-1. **Kernel robustness.** Floating-point tolerance bugs (near-coplanar faces, tiny edges) are where most effort will go. Mitigate with the invariant checker and property-based tests from day one.
-2. **Inference feel.** SketchUp's usability comes from snapping priorities and timing. Expect lots of iteration; build a debug overlay showing candidate snaps and their scores.
-3. **Scope.** M0 to M5 already gives a usable modeler. M6 and M7 are optional extensions.
+1. **Kernel robustness.** Floating-point tolerance bugs are where most effort goes. Invariant checker and property tests from day one.
+2. **Matching behavior exactly.** Inference priorities, tool edge cases and menu enable/disable rules need constant comparison with the real app. Everything observed goes into `spec/` so it is checked, not remembered.
+3. **VFF writing.** No MIT source covers it yet.
+4. **CUDA interop with wgpu.** May need raw Vulkan (`ash`) for external memory.
 
-## First steps
+## Open questions
 
-1. Create the workspace and `mt-kernel` with entity types and the invariant checker.
-2. Implement "add edge" with vertex merging and edge splitting, fully tested.
-3. Implement auto-face for planar closed loops.
-4. Only then start the renderer.
+- Which SketchUp version is the reference? Menus and tools differ between releases. Proposed: SketchUp 2026, Windows.
+- Is a test corpus of real `.skp` files available, across versions 2013 to 2026?
