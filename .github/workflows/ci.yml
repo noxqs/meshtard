@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -29,3 +29,40 @@ jobs:
       # tests skip without a device.
       - run: cargo clippy -p mt-cuda --all-targets --features cuda
       - run: cargo test -p mt-cuda --features cuda
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+      # Headless render tests use whatever adapter exists (WARP on DX12) or skip;
+      # the OpenSKP oracle tests skip without the Python package.
+      - run: cargo test --workspace
+      # A release binary to try on Windows, with the CUDA pick index (loaded at run
+      # time; the app falls back to the CPU without an NVIDIA driver).
+      - run: cargo build --release -p mt-app --features cuda
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshtard-windows-x64
+          path: target/release/meshtard.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      # No CUDA on macOS.
+      - run: cargo build --release -p mt-app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshtard-macos-arm64
+          path: target/release/meshtard

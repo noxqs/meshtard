@@ -1,0 +1,5 @@
+# One compiler for local builds, CI and the CUDA test machine, so new lints in a
+# newer stable don't break CI unannounced. Bump deliberately.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
