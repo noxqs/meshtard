@@ -8,6 +8,7 @@ pub mod bvh;
 pub mod entities;
 pub mod follow_me;
 pub mod geom;
+pub mod group;
 pub mod import;
 pub mod intersect;
 pub mod model;
@@ -21,7 +22,9 @@ pub mod validate;
 pub use entities::*;
 pub use follow_me::follow_me;
 pub use intersect::intersect_faces;
-pub use model::{Definition, Layer, Material, Model};
+pub use model::{
+    Definition, FaceStyle, Layer, Material, Model, Page, ShadowSettings, StyleSettings,
+};
 pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};
 pub use push_pull::push_pull;

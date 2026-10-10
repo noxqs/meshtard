@@ -18,7 +18,7 @@ use crate::entities::{
     Arc, CoEdge, Curve, CurveId, EdgeAttrs, EdgeId, Entities, FaceAttrs, FaceId, Loop, VertexId,
 };
 use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
-use crate::ops::{face_from_cell, insert_line, update_faces};
+use crate::ops::{face_from_cell, face_is_sound, insert_line, update_faces};
 
 /// Vertices used by the given edges and faces (all loops), without duplicates.
 pub fn vertices_of(ents: &Entities, edges: &[EdgeId], faces: &[FaceId]) -> Vec<VertexId> {
@@ -76,6 +76,7 @@ pub fn transform_vertices(ents: &mut Entities, vertices: &[VertexId], xf: DMat4)
     update_arcs(ents, &moves, xf);
     if !try_in_place(ents, &moves, &flip) {
         rebuild(ents, &moves, &flip);
+        drop_unsound_faces(ents);
     }
 }
 
@@ -170,6 +171,7 @@ pub fn copy_geometry(
     // Loops closed by copied edges alone get faces, as when drawing.
     created.retain(|&e| ents.edges.contains_key(e));
     update_faces(ents, &created, true);
+    drop_unsound_faces(ents);
 
     let on_copy = |p: DVec3| {
         segments
@@ -250,7 +252,7 @@ pub(crate) fn fill(
             match taken {
                 None => {
                     let f = face_from_cell(ents, &d.plane, cell, d.plane.normal, d.attrs.clone());
-                    if face_is_planar(ents, f, TOL) {
+                    if face_is_sound(ents, f) {
                         made.push(f);
                     } else {
                         ents.remove_face(f);
@@ -425,6 +427,28 @@ pub(crate) fn face_sample(ents: &Entities, f: FaceId) -> DVec3 {
     let q = arrangement::interior_point(&outer, &holes);
     let (u, v) = plane.basis();
     u * q.x + v * q.y + plane.normal * plane.d
+}
+
+/// Removes faces that tolerance effects left unsound: a loop visiting a vertex twice (a
+/// sliver folded onto itself), off its plane, or wound the wrong way. Removing a face
+/// never breaks the other invariants; these faces are narrower than the tolerance.
+pub(crate) fn drop_unsound_faces(ents: &mut Entities) {
+    let bad: Vec<FaceId> = ents
+        .faces
+        .iter()
+        .filter(|(f, face)| {
+            let repeats = face.loops().any(|l| {
+                let mut vs = ents.loop_vertices(l);
+                vs.sort();
+                vs.windows(2).any(|w| w[0] == w[1])
+            });
+            repeats || !face_is_sound(ents, *f)
+        })
+        .map(|(f, _)| f)
+        .collect();
+    for f in bad {
+        ents.remove_face(f);
+    }
 }
 
 /// Reverses a face: loops run the other way and the normal flips.
@@ -709,21 +733,9 @@ fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId
         ents.remove_vertex_if_unused(v);
     }
 
-    if std::env::var("MTDBG").is_ok() {
-        eprintln!(
-            "DBG before: {:?}",
-            crate::validate::validate(ents, crate::validate::Checks::ALL)
-        );
-    }
     for (a, b, attrs) in &segments {
         for e in insert_line(ents, *a, *b, false).1 {
             ents.edges[e].attrs = attrs.clone();
-        }
-        if std::env::var("MTDBG").is_ok() {
-            let errs = crate::validate::validate(ents, crate::validate::Checks::ALL);
-            if !errs.is_empty() {
-                eprintln!("DBG insert {a:.5?} {b:.5?}: {errs:?}");
-            }
         }
     }
     let desired = desired_faces(ents, &records);

@@ -8,7 +8,7 @@ use glam::{DVec2, DVec3};
 use crate::TOL;
 use crate::arrangement::{self, Cell};
 use crate::entities::{CoEdge, EdgeId, Entities, FaceAttrs, FaceId, Loop, VertexId};
-use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment};
+use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
 
 /// Adds a straight line from `a` to `b` and returns the edges covering it, in order.
 ///
@@ -69,7 +69,7 @@ pub(crate) fn insert_line(
         .filter(|(id, _)| *id != va && *id != vb)
         .filter_map(|(id, v)| {
             let (d, t) = point_segment(v.pos, pa, pb);
-            (d <= TOL && t * len > TOL && (1.0 - t) * len > TOL).then_some((t, id))
+            (d <= TOL && t > 0.0 && t < 1.0).then_some((t, id))
         })
         .collect();
     on_line.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -170,9 +170,10 @@ fn vertex_at(ents: &mut Entities, p: DVec3) -> VertexId {
         (d <= TOL).then_some((id, a + (b - a) * t))
     });
     match on_edge {
-        Some((e, q)) => {
-            let w = ents.add_vertex(q);
-            ents.split_edge(e, w);
+        Some((_, q)) => {
+            // The foot on the edge may be within tolerance of a vertex `p` was not.
+            let w = ents.find_vertex(q).unwrap_or_else(|| ents.add_vertex(q));
+            snap_edges_to(ents, w);
             w
         }
         None => ents.add_vertex(p),
@@ -207,7 +208,8 @@ fn candidate_planes(ents: &Entities, e: EdgeId, out: &mut Vec<Plane>) {
             let other = ents.pos(ents.edges[e2].other(v));
             let d2 = (other - ents.pos(v)).normalize();
             let n = dir.cross(d2);
-            if n.length() > 1e-6 {
+            // Nearly collinear edges span no reliable plane.
+            if n.length() > 1e-3 {
                 push(Plane::new(n, a));
             }
         }
@@ -283,6 +285,22 @@ pub(crate) fn face_from_cell(
     };
     let holes = cell.holes.iter().map(fix).collect();
     ents.add_raw_face(fix(&cell.outer), holes, normal, attrs)
+}
+
+/// Whether a new face is planar about its own plane (through its first vertex) and its
+/// loops wind properly there. Edges within tolerance of a cell's plane, or a sliver cell
+/// of almost no area, can fail this; such cells get no face.
+pub(crate) fn face_is_sound(ents: &Entities, f: FaceId) -> bool {
+    let plane = ents.face_plane(f);
+    let face = &ents.faces[f];
+    if !face
+        .loops()
+        .all(|l| ents.loop_points(l).iter().all(|p| plane.contains(*p)))
+    {
+        return false;
+    }
+    let (outer, holes) = ents.face_polygons(f, &plane);
+    signed_area2(&outer) > 0.0 && holes.iter().all(|h| signed_area2(h) < 0.0)
 }
 
 /// Front normal for a brand-new face (unverified rules):
@@ -362,12 +380,18 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
             let region = Region::of(ents, f);
             let face = ents.remove_face(f).expect("face exists");
             for cell in cells.iter().filter(|c| region.contains(&plane, c.sample)) {
-                face_from_cell(ents, &plane, cell, face.normal, face.attrs.clone());
+                let g = face_from_cell(ents, &plane, cell, face.normal, face.attrs.clone());
+                if !face_is_sound(ents, g) {
+                    ents.remove_face(g);
+                }
             }
         }
         for i in to_create {
             let normal = new_face_normal(ents, &plane, &cells[i]);
-            face_from_cell(ents, &plane, &cells[i], normal, FaceAttrs::default());
+            let f = face_from_cell(ents, &plane, &cells[i], normal, FaceAttrs::default());
+            if !face_is_sound(ents, f) {
+                ents.remove_face(f);
+            }
         }
     }
 }

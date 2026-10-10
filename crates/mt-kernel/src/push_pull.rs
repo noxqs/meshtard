@@ -7,7 +7,8 @@ use crate::entities::{Entities, FaceId};
 use crate::geom::Plane;
 use crate::ops::insert_line;
 use crate::transform::{
-    Desired, face_edges, face_sample, fill, flip_face, transform_vertices, vertices_of,
+    Desired, drop_unsound_faces, face_edges, face_sample, fill, flip_face, transform_vertices,
+    vertices_of,
 };
 
 /// SketchUp's Push/Pull of `face` by `distance` along its normal (negative pushes in).
@@ -100,5 +101,9 @@ pub fn push_pull(
         }
     }
     let made = fill(ents, &desired, true);
-    made[0].first().copied()
+    drop_unsound_faces(ents);
+    made[0]
+        .first()
+        .copied()
+        .filter(|f| ents.faces.contains_key(*f))
 }

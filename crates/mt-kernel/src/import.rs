@@ -84,6 +84,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
             name: d.name.clone(),
             guid: d.guid.clone(),
             entities: Entities::new(),
+            is_group: d.name.starts_with("Group#"),
         });
         maps.definitions.insert(id, key);
     }
@@ -93,6 +94,23 @@ pub fn from_skp(src: &skp::Model) -> Model {
     }
     model.root = entities(&src.root, &maps);
     model.root.guides = guides(&src.root);
+    for p in &src.pages {
+        let (Some(eye), Some(target)) = (p.eye, p.target) else {
+            continue;
+        };
+        model.pages.push(crate::model::Page {
+            name: p.name.clone(),
+            eye: DVec3::from_array(eye),
+            target: DVec3::from_array(target),
+            fov_deg: p.fov,
+            perspective: !p.parallel,
+            hidden_layers: p
+                .hidden_layers
+                .iter()
+                .filter_map(|n| maps.layers.get(n.as_str()).copied())
+                .collect(),
+        });
+    }
     model
 }
 
