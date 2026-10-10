@@ -14,6 +14,7 @@ mt-spec.workspace = true
 mt-render.workspace = true
 mt-skp.workspace = true
 mt-kernel.workspace = true
+mt-infer.workspace = true
 mt-ui = { path = "../mt-ui" }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 eframe.workspace = true

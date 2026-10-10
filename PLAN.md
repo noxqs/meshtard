@@ -133,9 +133,11 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] Not yet: dockable toolbars, other tray panels' contents, component-aligned selection boxes.
 
 ### M4: Inference engine
-- Endpoint, midpoint, on-edge, on-face, center, intersection.
-- Axis, parallel, perpendicular, "from point" tracking, arrow-key and shift locking.
-- Typed values in the Measurements box.
+- [x] `mt-infer`: endpoint, midpoint, origin, on edge, on axis, on face.
+- [x] Directions from the start point: red/green/blue axes, parallel and perpendicular to the reference edge, "from point" tracking; arrow-key locks (right red, left green, up blue, down parallel) and Shift lock.
+- [x] Typed lengths in the Measurements box (mm, cm, m, ", ', feet and inches; model units by default).
+- [x] Line tool (brought forward from M5 to exercise inference): chained segments, ends when a face closes, Esc cancels.
+- [ ] Not yet: center and intersection inferences, the hover delay SketchUp uses before acquiring points, inference on component geometry while editing inside it.
 
 ### M5: Drawing tools
 - Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arc variants, Eraser.

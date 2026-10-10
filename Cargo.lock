@@ -1452,12 +1452,22 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
+ "mt-infer",
  "mt-kernel",
  "mt-render",
  "mt-skp",
  "mt-spec",
  "mt-ui",
  "rfd",
+]
+
+[[package]]
+name = "mt-infer"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "mt-kernel",
+ "mt-render",
 ]
 
 [[package]]

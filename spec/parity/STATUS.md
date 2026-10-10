@@ -40,3 +40,8 @@
 | Select | Edge pick aperture 5 px | unverified | |
 | View | Profiles (width 2, borders and silhouettes) | unverified | |
 | View | Selection highlight (blue edges, dotted faces, component box) | unverified | box is world-aligned, SketchUp's follows component axes |
+| Inference | Point kinds, priorities, colors, tooltip names | unverified | endpoint green, midpoint cyan, on edge red, on face blue |
+| Inference | Pick distances (10 px points, 6 px edges, 10 px directions) | unverified | |
+| Inference | Arrow keys and Shift locking | unverified | |
+| Line tool | Chain continues until a face closes; Esc cancels | unverified | |
+| Measurements | Length entry formats | unverified | |

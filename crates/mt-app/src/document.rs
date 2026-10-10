@@ -16,6 +16,8 @@ pub struct Document {
     pub model: Model,
     /// The view the file was saved with.
     saved_camera: Option<mt_skp::ViewCamera>,
+    /// Unit for typed and displayed lengths.
+    pub units: mt_infer::units::LengthUnit,
 }
 
 /// A top-level entity of the model root: what a click selects.
@@ -45,8 +47,23 @@ impl Document {
         Ok(Self {
             path: path.to_owned(),
             model: import::from_skp(&src),
+            units: src
+                .units
+                .as_deref()
+                .and_then(mt_infer::units::LengthUnit::from_name)
+                .unwrap_or(mt_infer::units::LengthUnit::Inch),
             saved_camera: src.camera,
         })
+    }
+
+    /// A new empty model, as SketchUp shows at startup.
+    pub fn untitled() -> Self {
+        Self {
+            path: PathBuf::from("Untitled.skp"),
+            model: Model::default(),
+            saved_camera: None,
+            units: mt_infer::units::LengthUnit::Inch,
+        }
     }
 
     pub fn title(&self) -> String {

@@ -7,6 +7,7 @@ use mt_render::Camera;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Select,
+    Line,
     Orbit,
     Pan,
     Zoom,
@@ -16,6 +17,7 @@ impl Tool {
     pub fn from_command(id: &str) -> Option<Self> {
         Some(match id {
             "tool.select" => Self::Select,
+            "tool.line" => Self::Line,
             "camera.orbit" => Self::Orbit,
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,
@@ -27,6 +29,7 @@ impl Tool {
     pub fn command(self) -> &'static str {
         match self {
             Self::Select => "tool.select",
+            Self::Line => "tool.line",
             Self::Orbit => "camera.orbit",
             Self::Pan => "camera.pan",
             Self::Zoom => "camera.zoom",
@@ -39,6 +42,7 @@ impl Tool {
             Self::Select => {
                 "Select objects. Shift to extend select. Drag mouse to select multiple."
             }
+            Self::Line => "Select start point.",
             Self::Orbit => "Drag in direction to orbit. Shift = Pan, Ctrl = suspend gravity.",
             Self::Pan => "Drag in direction to pan.",
             Self::Zoom => "Drag up or down to zoom.",
@@ -67,7 +71,7 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
     }
     if input.left_drag != DVec2::ZERO {
         match tool {
-            Tool::Select => {}
+            Tool::Select | Tool::Line => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
             Tool::Orbit => camera.orbit(input.left_drag),
             Tool::Pan => camera.pan(input.left_drag, viewport),

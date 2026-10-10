@@ -1,12 +1,13 @@
 //! meshtard desktop application.
 
 mod document;
+mod line_tool;
 mod nav;
 mod selection;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 use mt_kernel::bvh::Bvh;
 use mt_render::{Camera, FaceVertex, Segment, Style, Viewport};
 use mt_spec::{Shortcut, Spec};
@@ -26,6 +27,7 @@ const IMPLEMENTED: &[&str] = &[
     "file.open",
     "file.exit",
     "tool.select",
+    "tool.line",
     "edit.select_all",
     "edit.select_none",
     "edit.delete",
@@ -91,6 +93,13 @@ struct App {
     selection: Selection,
     /// Where a selection box drag started, in viewport pixels.
     box_start: Option<DVec2>,
+    /// Snappable geometry and the inference state for drawing tools.
+    geometry: mt_infer::Geometry,
+    engine: mt_infer::Engine,
+    inference: Option<mt_infer::Inference>,
+    line: line_tool::LineTool,
+    /// The direction lock comes from holding Shift (released with it).
+    shift_lock: bool,
     /// Error from the last command, shown in the status bar until the next one.
     message: Option<String>,
 }
@@ -105,7 +114,7 @@ impl App {
                 Some((shortcut, key, id))
             })
             .collect();
-        Self {
+        let mut app = Self {
             shell: Some(mt_ui::Shell::new(&spec)),
             camera: Camera::from_spec(&spec.default_model.camera),
             tool: Tool::Select,
@@ -118,8 +127,17 @@ impl App {
             bvh: Bvh::default(),
             selection: Selection::default(),
             box_start: None,
+            geometry: mt_infer::Geometry::default(),
+            engine: mt_infer::Engine::default(),
+            inference: None,
+            line: line_tool::LineTool::default(),
+            shift_lock: false,
             message: None,
-        }
+        };
+        // SketchUp starts with an empty model ready to draw in.
+        app.document = Some(Document::untitled());
+        app.rebuild(&render_state.device);
+        app
     }
 
     /// Rebuilds the drawn scene and pick index after the model changed.
@@ -130,6 +148,15 @@ impl App {
             .map(Document::scene)
             .unwrap_or_default();
         self.bvh = Bvh::build(self.scene.triangles.clone());
+        let v3 = |p: [f32; 3]| DVec3::new(p[0].into(), p[1].into(), p[2].into());
+        self.geometry = mt_infer::Geometry::from_edges(
+            self.scene
+                .edges
+                .iter()
+                .map(|s| [v3(s.a), v3(s.b)])
+                .collect(),
+        );
+        self.engine.reference_edge = None;
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
         self.update_highlight(device);
@@ -249,6 +276,9 @@ impl App {
     fn run_command(&mut self, ctx: &egui::Context, frame: &eframe::Frame, id: &str) {
         if let Some(tool) = Tool::from_command(id) {
             self.tool = tool;
+            self.line = line_tool::LineTool::default();
+            self.engine.unlock();
+            self.inference = None;
         } else if id == "file.exit" {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -339,8 +369,12 @@ impl App {
             },
         };
         nav::apply(self.tool, &mut self.camera, &input, viewport_px);
-        if self.tool == Tool::Select {
-            self.select_tool(ui, &response, rect, viewport_px, &render_state.device);
+        match self.tool {
+            Tool::Select => {
+                self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
+            }
+            Tool::Line => self.line_tool(ui, &response, rect, viewport_px, &render_state.device),
+            _ => self.inference = None,
         }
 
         self.viewport.render(
@@ -377,6 +411,111 @@ impl App {
             egui::Color32::WHITE,
         );
         self.draw_selection_box(ui, &response, rect);
+        if let Some(inf) = &self.inference {
+            let camera = &self.camera;
+            let to_screen = |p: DVec3| {
+                camera
+                    .project(p, viewport_px)
+                    .map(|q| rect.min + egui::vec2(q.x as f32, q.y as f32) / ppp)
+            };
+            line_tool::paint(
+                &ui.painter().with_clip_rect(rect),
+                to_screen,
+                self.line.anchor,
+                inf,
+            );
+        }
+    }
+
+    /// Mouse and keys of the Line tool.
+    fn line_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        viewport_px: DVec2,
+        device: &wgpu::Device,
+    ) {
+        let ppp = ui.ctx().pixels_per_point();
+        let (keys, shift) = ui.input(|i| {
+            let k = |key| i.key_pressed(key);
+            (
+                [
+                    k(egui::Key::ArrowRight),
+                    k(egui::Key::ArrowLeft),
+                    k(egui::Key::ArrowUp),
+                    k(egui::Key::ArrowDown),
+                    k(egui::Key::Escape),
+                ],
+                i.modifiers.shift,
+            )
+        });
+        let [right, left, up, down, escape] = keys;
+        if right {
+            self.engine.toggle_axis_lock(mt_infer::Axis::Red);
+        }
+        if left {
+            self.engine.toggle_axis_lock(mt_infer::Axis::Green);
+        }
+        if up {
+            self.engine.toggle_axis_lock(mt_infer::Axis::Blue);
+        }
+        if down {
+            self.engine.toggle_parallel_lock(&self.geometry);
+        }
+        if escape {
+            self.line.anchor = None;
+            self.engine.unlock();
+        }
+        // Holding Shift locks the current direction; releasing it unlocks.
+        if shift && !self.shift_lock {
+            if let (Some(inf), Some(a)) = (&self.inference, self.line.anchor) {
+                self.engine.lock_current(inf, a);
+            }
+            self.shift_lock = self.engine.is_locked();
+        } else if !shift && self.shift_lock {
+            self.engine.unlock();
+            self.shift_lock = false;
+        }
+
+        let cursor = response.hover_pos().map(|p| {
+            DVec2::new(
+                f64::from((p.x - rect.min.x) * ppp),
+                f64::from((p.y - rect.min.y) * ppp),
+            )
+        });
+        self.inference = cursor.map(|c| {
+            let view = mt_infer::View {
+                camera: &self.camera,
+                viewport: viewport_px,
+            };
+            self.engine
+                .infer(&self.geometry, &self.bvh, view, c, self.line.anchor)
+        });
+        if response.clicked_by(egui::PointerButton::Primary)
+            && let Some(p) = self.inference.map(|i| i.point)
+        {
+            self.commit_point(p, device);
+        }
+    }
+
+    /// A clicked or typed point for the Line tool: starts a segment, or ends one and
+    /// continues from its end. A segment that closes a face ends the chain.
+    fn commit_point(&mut self, p: DVec3, device: &wgpu::Device) {
+        let Some(a) = self.line.anchor else {
+            self.line.anchor = Some(p);
+            return;
+        };
+        let Some(doc) = &mut self.document else {
+            return;
+        };
+        let faces_before = doc.model.root.faces.len();
+        mt_kernel::add_line(&mut doc.model.root, a, p);
+        let closed = doc.model.root.faces.len() > faces_before;
+        self.line.anchor = (!closed).then_some(p);
+        self.engine.unlock();
+        self.shift_lock = false;
+        self.rebuild(device);
     }
 
     /// Clicks and box drags of the Select tool.
@@ -549,17 +688,31 @@ impl eframe::App for App {
         self.handle_shortcuts(ui.ctx(), frame, shell.is_typing());
 
         let info = self.entity_info();
-        let status = self
-            .message
-            .clone()
-            .unwrap_or_else(|| self.tool.hint().to_owned());
+        let status = self.message.clone().unwrap_or_else(|| match self.tool {
+            Tool::Line => self.line.status().to_owned(),
+            t => t.hint().to_owned(),
+        });
+        let units = self
+            .document
+            .as_ref()
+            .map_or(mt_infer::units::LengthUnit::Inch, |d| d.units);
+        let (label, value) = match self.tool {
+            Tool::Line => (
+                "Length",
+                self.line
+                    .length(self.inference.as_ref())
+                    .map(|l| units.format(l))
+                    .unwrap_or_default(),
+            ),
+            _ => ("Measurements", String::new()),
+        };
         let spec = self.spec.clone();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
             active_tool: self.tool.command(),
             status: &status,
-            measurements_label: "Measurements",
-            measurements_value: "",
+            measurements_label: label,
+            measurements_value: &value,
             is_enabled: &|id| IMPLEMENTED.contains(&id),
             is_checked: &|_| false,
             entity_info: &info,
@@ -569,8 +722,16 @@ impl eframe::App for App {
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
-                // Typed values go to the active tool once drawing tools exist (M4).
-                mt_ui::Event::Measurements(_) => {}
+                mt_ui::Event::Measurements(text) => {
+                    if self.tool == Tool::Line
+                        && let Some(len) = mt_infer::units::parse_length(&text, units)
+                        && let Some(end) = self.line.typed_end(self.inference.as_ref(), len)
+                        && let Some(rs) = frame.wgpu_render_state()
+                    {
+                        let device = rs.device.clone();
+                        self.commit_point(end, &device);
+                    }
+                }
             }
         }
     }
