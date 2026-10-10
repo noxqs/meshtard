@@ -190,6 +190,7 @@ pub fn pick(
 
     let mut best: Option<(f64, Owner)> = None;
     for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
+        let Some(owner) = owner else { continue };
         let (a, b) = (v3(seg.a), v3(seg.b));
         let (Some(pa), Some(pb)) = (camera.project(a, viewport), camera.project(b, viewport))
         else {
@@ -206,7 +207,7 @@ pub fn pick(
         }
     }
     best.map(|(_, o)| o)
-        .or_else(|| face_hit.map(|h| scene.tri_owner[h.triangle]))
+        .or_else(|| face_hit.and_then(|h| scene.tri_owner[h.triangle]))
 }
 
 /// Parameter along the ray (unit `dir`) of the point closest to segment `a-b`.
@@ -300,6 +301,7 @@ pub fn box_select(
     };
     let proj = |p: DVec3| camera.project(p, viewport);
     for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
+        let Some(owner) = owner else { continue };
         match (proj(v3(seg.a)), proj(v3(seg.b))) {
             (Some(a), Some(b)) => note(
                 *owner,
@@ -310,6 +312,7 @@ pub fn box_select(
         }
     }
     for (tri, owner) in scene.triangles.iter().zip(&scene.tri_owner) {
+        let Some(owner) = owner else { continue };
         match (proj(tri[0]), proj(tri[1]), proj(tri[2])) {
             (Some(a), Some(b), Some(c)) => note(
                 *owner,

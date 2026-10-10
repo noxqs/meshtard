@@ -72,6 +72,13 @@ items = [
     { id = "edit.intersect_selection", label = "With Selection" },
     { id = "edit.intersect_context", label = "With Context" },
   ] },
+  { separator = true },
+  # SketchUp shows a dynamic item here named after the selection ("Group", "Component",
+  # "2 Entities") whose submenu holds the selection's context menu. Static stand-in.
+  { label = "Entity", items = [
+    { id = "edit.explode", label = "Explode" },
+    { id = "edit.make_unique", label = "Make Unique" },
+  ] },
 ]
 
 [[menu]]

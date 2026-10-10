@@ -18,21 +18,24 @@ pub struct Document {
     saved_camera: Option<mt_skp::ViewCamera>,
     /// Unit for typed and displayed lengths.
     pub units: mt_infer::units::LengthUnit,
-    /// Root geometry before each edit, most recent last (Edit > Undo).
-    undo: Vec<Entities>,
+    /// The model and edit context before each edit, most recent last (Edit > Undo).
+    undo: Vec<(Model, Vec<usize>)>,
     /// Undone states, most recent last (Edit > Redo).
-    redo: Vec<Entities>,
+    redo: Vec<(Model, Vec<usize>)>,
+    /// The group or component open for editing: instance indices from the root down
+    /// (empty: editing the model root).
+    pub context: Vec<usize>,
 }
 
 /// Undo steps kept.
 const UNDO_LIMIT: usize = 100;
 
-/// A top-level entity of the model root: what a click selects.
+/// A top-level entity of the active edit context: what a click selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Owner {
     Face(FaceId),
     Edge(EdgeId),
-    /// Index into `model.root.instances`.
+    /// Index into the context's `instances`.
     Instance(usize),
 }
 
@@ -40,14 +43,36 @@ pub enum Owner {
 #[derive(Default)]
 pub struct Scene {
     pub edges: Vec<Segment>,
-    pub edge_owner: Vec<Owner>,
+    /// `None` for geometry outside the open group or component (not selectable).
+    pub edge_owner: Vec<Option<Owner>>,
     pub vertices: Vec<FaceVertex>,
     pub indices: Vec<u32>,
     /// World-space triangles for picking; triangle `i` is `indices[3 * i..3 * i + 3]`.
     pub triangles: Vec<[DVec3; 3]>,
-    pub tri_owner: Vec<Owner>,
+    pub tri_owner: Vec<Option<Owner>>,
     /// Construction guides drawn as dashed lines (not pickable as edges).
     pub guides: Vec<Segment>,
+}
+
+/// Where entities being collected sit relative to the open context.
+#[derive(Clone, Copy)]
+enum Level<'a> {
+    /// On the path to the context; the remaining instance indices (empty: this is it).
+    Context(&'a [usize]),
+    /// Inside a top-level instance of the context: selected as that instance.
+    Inside(Owner),
+    /// Elsewhere: faded and not selectable.
+    Outside,
+}
+
+/// Edge color outside the open group or component (draft; SketchUp fades the rest of
+/// the model, amount unverified).
+const FADED_EDGE: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
+
+/// Lightens a face color for geometry outside the open context.
+fn fade(c: [f32; 4]) -> [f32; 4] {
+    let l = |x: f32| x + (1.0 - x) * 0.55;
+    [l(c[0]), l(c[1]), l(c[2]), c[3]]
 }
 
 /// Half-length of drawn guide lines, in inches.
@@ -69,6 +94,7 @@ impl Document {
             saved_camera: src.camera,
             undo: Vec::new(),
             redo: Vec::new(),
+            context: Vec::new(),
         })
     }
 
@@ -81,20 +107,91 @@ impl Document {
             units: mt_infer::units::LengthUnit::Inch,
             undo: Vec::new(),
             redo: Vec::new(),
+            context: Vec::new(),
         }
     }
 
-    /// Runs an edit of the model root; when `f` reports a change, the state before it
-    /// becomes an undo step.
+    /// Definitions along a context path; `None` if the path is no longer valid.
+    fn path_definitions(model: &Model, path: &[usize]) -> Option<Vec<DefinitionId>> {
+        let mut ents = &model.root;
+        let mut out = Vec::new();
+        for &i in path {
+            let d = ents.instances.get(i)?.definition;
+            ents = &model.definitions.get(d)?.entities;
+            out.push(d);
+        }
+        Some(out)
+    }
+
+    /// The entities being edited: the root, or the open group's or component's
+    /// definition.
+    pub fn active(&self) -> &Entities {
+        match Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied()) {
+            Some(d) => &self.model.definitions[d].entities,
+            None => &self.model.root,
+        }
+    }
+
+    /// Context space to world space.
+    pub fn context_transform(&self) -> DMat4 {
+        let mut ents = &self.model.root;
+        let mut xf = DMat4::IDENTITY;
+        for &i in &self.context {
+            let Some(inst) = ents.instances.get(i) else { break };
+            xf *= inst.transform;
+            ents = &self.model.definitions[inst.definition].entities;
+        }
+        xf
+    }
+
+    /// Opens instance `index` of the active context for editing.
+    pub fn open_instance(&mut self, index: usize) -> bool {
+        if index >= self.active().instances.len() {
+            return false;
+        }
+        self.context.push(index);
+        true
+    }
+
+    /// Closes the open group or component (Edit > Close Group/Component).
+    pub fn close_instance(&mut self) -> bool {
+        self.context.pop().is_some()
+    }
+
+    fn fix_context(&mut self) {
+        while Self::path_definitions(&self.model, &self.context).is_none() {
+            self.context.pop();
+        }
+    }
+
+    /// Runs an edit of the active context; when `f` reports a change, the state before
+    /// it becomes an undo step.
     pub fn edit(&mut self, f: impl FnOnce(&mut Entities) -> bool) -> bool {
-        let before = self.model.root.clone();
-        let changed = f(&mut self.model.root);
+        self.edit_model(|_, ents| f(ents))
+    }
+
+    /// Like `edit`, with the rest of the model too. The active context's entities are
+    /// taken out of the model while `f` runs (the model holds an empty one there).
+    pub fn edit_model(&mut self, f: impl FnOnce(&mut Model, &mut Entities) -> bool) -> bool {
+        let before = (self.model.clone(), self.context.clone());
+        let def = Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied());
+        let mut ents = match def {
+            Some(d) => std::mem::take(&mut self.model.definitions[d].entities),
+            None => std::mem::take(&mut self.model.root),
+        };
+        let changed = f(&mut self.model, &mut ents);
+        match def.and_then(|d| self.model.definitions.get_mut(d)) {
+            Some(d) => d.entities = ents,
+            None if def.is_none() => self.model.root = ents,
+            None => {}
+        }
         if changed {
             self.undo.push(before);
             if self.undo.len() > UNDO_LIMIT {
                 self.undo.remove(0);
             }
             self.redo.clear();
+            self.fix_context();
         }
         changed
     }
@@ -108,20 +205,22 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(prev) = self.undo.pop() else {
+        let Some((model, context)) = self.undo.pop() else {
             return false;
         };
-        self.redo
-            .push(std::mem::replace(&mut self.model.root, prev));
+        let now = (std::mem::replace(&mut self.model, model), std::mem::replace(&mut self.context, context));
+        self.redo.push(now);
+        self.fix_context();
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else {
+        let Some((model, context)) = self.redo.pop() else {
             return false;
         };
-        self.undo
-            .push(std::mem::replace(&mut self.model.root, next));
+        let now = (std::mem::replace(&mut self.model, model), std::mem::replace(&mut self.context, context));
+        self.undo.push(now);
+        self.fix_context();
         true
     }
 
@@ -153,13 +252,18 @@ impl Document {
 
     /// Visible faces and edges in world space. Hidden entities, entities on hidden tags,
     /// and soft edges are left out.
-    /// Visible faces and edges in world space. Hidden entities, entities on hidden tags,
-    /// and soft edges are left out.
     pub fn scene(&self) -> Scene {
         let mut scene = Scene::default();
         let mut active = HashSet::new();
         let root = &self.model.root;
-        self.collect(root, DMat4::IDENTITY, None, None, &mut active, &mut scene);
+        self.collect(
+            root,
+            DMat4::IDENTITY,
+            None,
+            Level::Context(&self.context),
+            &mut active,
+            &mut scene,
+        );
         let f = |p: DVec3| p.as_vec3().to_array();
         for g in &root.guides {
             match g.dir {
@@ -207,10 +311,18 @@ impl Document {
         ents: &Entities,
         xf: DMat4,
         inherited: Option<MaterialId>,
-        owner: Option<Owner>,
+        level: Level,
         active: &mut HashSet<DefinitionId>,
         out: &mut Scene,
     ) {
+        // Outside the open context: faded, not selectable.
+        let faded = matches!(level, Level::Outside | Level::Context([_, ..]));
+        let owner_of = |own: Owner| match level {
+            Level::Context([]) => Some(own),
+            Level::Inside(o) => Some(o),
+            _ => None,
+        };
+        let edge_color = if faded { FADED_EDGE } else { EDGE_COLOR };
         let world = |p: DVec3| {
             let q = xf.transform_point3(p);
             [q.x as f32, q.y as f32, q.z as f32]
@@ -226,7 +338,7 @@ impl Document {
             let mut seg = Segment::line(
                 world(ents.pos(e.start)),
                 world(ents.pos(e.end)),
-                EDGE_COLOR,
+                edge_color,
                 [EDGE_WIDTH, 0.0],
             );
             match e.faces[..] {
@@ -242,18 +354,22 @@ impl Document {
                 }
             }
             out.edges.push(seg);
-            out.edge_owner.push(owner.unwrap_or(Owner::Edge(id)));
+            out.edge_owner.push(owner_of(Owner::Edge(id)));
         }
 
         for (f, face) in &ents.faces {
             if face.attrs.hidden || !self.layer_visible(face.attrs.layer) {
                 continue;
             }
-            let front = self.color(face.attrs.material.or(inherited), self.model.front_color);
-            let back = self.color(
+            let mut front = self.color(face.attrs.material.or(inherited), self.model.front_color);
+            let mut back = self.color(
                 face.attrs.back_material.or(inherited),
                 self.model.back_color,
             );
+            if faded {
+                front = fade(front);
+                back = fade(back);
+            }
             let n = world_normal(f);
             for [a, b, c] in tessellate::triangulate(ents, f) {
                 let (a, b, c) = (
@@ -278,7 +394,7 @@ impl Document {
                     });
                 }
                 out.triangles.push(tri);
-                out.tri_owner.push(owner.unwrap_or(Owner::Face(f)));
+                out.tri_owner.push(owner_of(Owner::Face(f)));
             }
         }
 
@@ -293,16 +409,14 @@ impl Document {
             if !active.insert(i.definition) {
                 continue;
             }
-            let child_owner = owner.or(Some(Owner::Instance(index)));
+            let child = match level {
+                Level::Context([]) => Level::Inside(Owner::Instance(index)),
+                Level::Context([first, rest @ ..]) if *first == index => Level::Context(rest),
+                Level::Inside(o) => Level::Inside(o),
+                _ => Level::Outside,
+            };
             let material = i.material.or(inherited);
-            self.collect(
-                &def.entities,
-                xf * i.transform,
-                material,
-                child_owner,
-                active,
-                out,
-            );
+            self.collect(&def.entities, xf * i.transform, material, child, active, out);
             active.remove(&i.definition);
         }
     }
@@ -446,6 +560,43 @@ mod tests {
         doc.undo();
         doc.edit(|root| !mt_kernel::add_line(root, a, DVec3::Y).is_empty());
         assert!(!doc.can_redo(), "a new edit clears redo");
+    }
+
+    #[test]
+    fn edit_inside_group_and_undo() {
+        let mut doc = Document::untitled();
+        let p = [DVec3::ZERO, DVec3::X * 10.0, DVec3::new(10.0, 10.0, 0.0), DVec3::Y * 10.0];
+        doc.edit(|root| {
+            for i in 0..4 {
+                mt_kernel::add_line(root, p[i], p[(i + 1) % 4]);
+            }
+            true
+        });
+        doc.edit_model(|model, ents| {
+            let sel = mt_kernel::group::Selection {
+                edges: ents.edges.keys().collect(),
+                faces: ents.faces.keys().collect(),
+                instances: vec![],
+            };
+            mt_kernel::group::make_group(&mut model.definitions, ents, &sel, "Group#1".into(), true)
+                .is_some()
+        });
+        // Move the group so context space differs from world space.
+        doc.model.root.instances[0].transform = DMat4::from_translation(DVec3::Z * 5.0);
+        assert!(doc.open_instance(0));
+        assert_eq!(doc.context_transform().transform_point3(DVec3::ZERO), DVec3::Z * 5.0);
+        // A diagonal drawn inside splits the group's face, not the (empty) root.
+        doc.edit(|ents| !mt_kernel::add_line(ents, p[0], p[2]).is_empty());
+        assert_eq!(doc.active().faces.len(), 2);
+        assert!(doc.model.root.faces.is_empty());
+        let scene = doc.scene();
+        assert!(scene.tri_owner.iter().all(|o| matches!(o, Some(Owner::Face(_)))));
+        assert!(scene.vertices.iter().all(|v| (v.position[2] - 5.0).abs() < 1e-6));
+        doc.close_instance();
+        assert!(doc.scene().tri_owner.iter().all(|o| *o == Some(Owner::Instance(0))));
+        assert!(doc.undo(), "undo the diagonal; reopens the group");
+        assert_eq!(doc.context, vec![0]);
+        assert_eq!(doc.active().faces.len(), 1);
     }
 
     #[test]

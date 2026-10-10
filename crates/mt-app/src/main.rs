@@ -47,8 +47,14 @@ const IMPLEMENTED: &[&str] = &[
     "tool.scale",
     "tool.offset",
     "tool.follow_me",
+    "tool.paint_bucket",
     "edit.intersect_model",
     "edit.intersect_selection",
+    "edit.create_group",
+    "edit.make_component",
+    "edit.close_group",
+    "edit.explode",
+    "edit.make_unique",
     "edit.delete_guides",
     "edit.undo",
     "edit.redo",
@@ -123,6 +129,8 @@ struct App {
     inference: Option<mt_infer::Inference>,
     /// The active drawing tool, when `tool` is `Tool::Draw`.
     draw: Option<Box<dyn tools::DrawTool>>,
+    /// Open group or component space to world space (identity at the root).
+    ctx_xf: glam::DMat4,
     /// The active modify tool, when `tool` is `Tool::Modify`.
     modify: Option<Box<dyn modify::ModifyTool>>,
     /// Edges picked during an Eraser drag, erased on release.
@@ -161,6 +169,7 @@ impl App {
             inference: None,
             draw: None,
             modify: None,
+            ctx_xf: glam::DMat4::IDENTITY,
             erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
@@ -195,6 +204,10 @@ impl App {
                 }
             }
         }
+        self.ctx_xf = self
+            .document
+            .as_ref()
+            .map_or(glam::DMat4::IDENTITY, Document::context_transform);
         self.engine.reference_edge = None;
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
@@ -206,7 +219,7 @@ impl App {
         let mut edges = self.scene.edges.clone();
         let guides = self.scene.guides.clone();
         for (seg, owner) in edges.iter_mut().zip(&self.scene.edge_owner) {
-            if self.selection.contains(owner) {
+            if owner.is_some_and(|o| self.selection.contains(&o)) {
                 seg.color = SELECTED;
             }
         }
@@ -219,9 +232,9 @@ impl App {
         };
         let mut vertices: Vec<FaceVertex> = Vec::new();
         for (t, owner) in self.scene.tri_owner.iter().enumerate() {
-            if !self.selection.contains(owner) {
+            let Some(owner) = owner.filter(|o| self.selection.contains(o)) else {
                 continue;
-            }
+            };
             match owner {
                 Owner::Face(_) => {
                     for k in 0..3 {
@@ -229,12 +242,12 @@ impl App {
                         vertices.push(self.scene.vertices[i]);
                     }
                 }
-                Owner::Instance(i) => self.scene.triangles[t].iter().for_each(|p| grow(*i, *p)),
+                Owner::Instance(i) => self.scene.triangles[t].iter().for_each(|p| grow(i, *p)),
                 Owner::Edge(_) => {}
             }
         }
         for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
-            if let Owner::Instance(i) = owner
+            if let Some(owner @ Owner::Instance(i)) = owner
                 && self.selection.contains(owner)
             {
                 for p in [seg.a, seg.b] {
@@ -290,7 +303,7 @@ impl App {
             .tri_owner
             .iter()
             .chain(&self.scene.edge_owner)
-            .copied()
+            .filter_map(|o| *o)
             .filter(|o| seen.insert(*o))
             .collect()
     }
@@ -335,6 +348,11 @@ impl App {
                     | "edit.delete_guides"
                     | "edit.intersect_model"
                     | "edit.intersect_selection"
+                    | "edit.create_group"
+                    | "edit.make_component"
+                    | "edit.close_group"
+                    | "edit.explode"
+                    | "edit.make_unique"
             )
         {
             let device = rs.device.clone();
@@ -348,6 +366,82 @@ impl App {
                     if let Some(doc) = &mut self.document
                         && doc.edit(|root| !std::mem::take(&mut root.guides).is_empty())
                     {
+                        self.rebuild(&device);
+                    }
+                }
+                "edit.create_group" | "edit.make_component" => {
+                    let sel = kernel_selection(self.selection.items());
+                    let group = id == "edit.create_group";
+                    if let Some(doc) = &mut self.document {
+                        let mut made = None;
+                        doc.edit_model(|model, ents| {
+                            // SketchUp names group definitions Group#n and asks for a
+                            // component name in a dialog (not implemented: Component#n).
+                            let base = if group { "Group#1" } else { "Component#1" };
+                            let name = model.unique_definition_name(base);
+                            made = mt_kernel::group::make_group(
+                                &mut model.definitions,
+                                ents,
+                                &sel,
+                                name,
+                                group,
+                            );
+                            made.is_some()
+                        });
+                        if let Some(i) = made {
+                            self.selection.clear();
+                            self.selection.apply(Mode::Replace, [Owner::Instance(i)]);
+                            self.rebuild(&device);
+                        }
+                    }
+                }
+                "edit.close_group" => {
+                    if let Some(doc) = &mut self.document
+                        && doc.close_instance()
+                    {
+                        self.selection.clear();
+                        self.rebuild(&device);
+                    }
+                }
+                "edit.explode" | "edit.make_unique" => {
+                    let mut instances: Vec<usize> = self
+                        .selection
+                        .items()
+                        .iter()
+                        .filter_map(|o| match o {
+                            Owner::Instance(i) => Some(*i),
+                            _ => None,
+                        })
+                        .collect();
+                    instances.sort_unstable();
+                    if let Some(doc) = &mut self.document
+                        && !instances.is_empty()
+                        && doc.edit_model(|model, ents| {
+                            let mut any = false;
+                            for &i in instances.iter().rev() {
+                                any |= if id == "edit.explode" {
+                                    mt_kernel::group::explode(&model.definitions, ents, i)
+                                } else {
+                                    let Some(d) = ents
+                                        .instances
+                                        .get(i)
+                                        .and_then(|x| model.definitions.get(x.definition))
+                                    else {
+                                        continue;
+                                    };
+                                    let name = model.unique_definition_name(&d.name);
+                                    mt_kernel::group::make_unique(
+                                        &mut model.definitions,
+                                        ents,
+                                        i,
+                                        name,
+                                    )
+                                };
+                            }
+                            any
+                        })
+                    {
+                        self.selection.clear();
                         self.rebuild(&device);
                     }
                 }
@@ -527,16 +621,25 @@ impl App {
                     .project(p, viewport_px)
                     .map(|q| rect.min + egui::vec2(q.x as f32, q.y as f32) / ppp)
             };
+            // Tools work in the open context's space.
+            let xf = self.ctx_xf;
+            let local = to_local(inf, xf);
             let mut previews = self
                 .draw
                 .as_ref()
-                .map(|d| d.preview(inf))
+                .map(|d| d.preview(&local))
                 .unwrap_or_default();
             let mut anchor = self.draw.as_ref().and_then(|d| d.anchor());
             if let (Some(m), Some(doc)) = (&self.modify, &self.document) {
-                previews = m.preview(&doc.model.root, inf);
+                previews = m.preview(doc.active(), &local);
                 anchor = m.anchor();
             }
+            for line in &mut previews {
+                for p in line.iter_mut() {
+                    *p = xf.transform_point3(*p);
+                }
+            }
+            let anchor = anchor.map(|a| xf.transform_point3(a));
             overlay::paint(
                 &ui.painter().with_clip_rect(rect),
                 to_screen,
@@ -594,7 +697,8 @@ impl App {
         // Holding Shift locks the current direction; releasing it unlocks.
         if shift && !self.shift_lock {
             if let (Some(inf), Some(a)) = (&self.inference, draw.anchor()) {
-                self.engine.lock_current(inf, a);
+                self.engine
+                    .lock_current(inf, self.ctx_xf.transform_point3(a));
             }
             self.shift_lock = self.engine.is_locked();
         } else if !shift && self.shift_lock {
@@ -611,7 +715,7 @@ impl App {
                     f64::from((p.y - rect.min.y) * ppp),
                 )
             });
-        let anchor = draw.anchor();
+        let anchor = draw.anchor().map(|a| self.ctx_xf.transform_point3(a));
         self.inference = cursor.map(|c| {
             let view = mt_infer::View {
                 camera: &self.camera,
@@ -623,6 +727,7 @@ impl App {
         let (Some(inf), Some(doc)) = (self.inference, self.document.as_mut()) else {
             return;
         };
+        let inf = to_local(&inf, self.ctx_xf);
         let primary = egui::PointerButton::Primary;
         let changed = if response.clicked_by(primary) {
             doc.edit(|root| draw.click(root, &inf))
@@ -683,8 +788,10 @@ impl App {
             self.engine.unlock();
         }
         if let Some(dir) = tool.constraint() {
-            self.engine
-                .lock_direction(dir, mt_infer::Kind::Perpendicular);
+            self.engine.lock_direction(
+                self.ctx_xf.transform_vector3(dir),
+                mt_infer::Kind::Perpendicular,
+            );
         }
         let cursor = response
             .hover_pos()
@@ -695,7 +802,7 @@ impl App {
                     f64::from((p.y - rect.min.y) * ppp),
                 )
             });
-        let anchor = tool.anchor();
+        let anchor = tool.anchor().map(|a| self.ctx_xf.transform_point3(a));
         self.inference = cursor.map(|c| {
             let view = mt_infer::View {
                 camera: &self.camera,
@@ -708,17 +815,20 @@ impl App {
         else {
             return;
         };
+        let inf = to_local(&inf, self.ctx_xf);
         if !response.clicked_by(egui::PointerButton::Primary) {
             return;
         }
         let picked = selection::pick(&self.scene, &self.bvh, &self.camera, c, viewport_px);
         let selection = self.selection.items().to_vec();
+        let eye = self.ctx_xf.inverse().transform_point3(self.camera.eye);
         let changed = doc.edit(|root| {
             let mut ctx = modify::Ctx {
                 ents: root,
                 picked,
                 selection: &selection,
                 ctrl,
+                eye,
             };
             tool.click(&mut ctx, &inf)
         });
@@ -798,6 +908,14 @@ impl App {
         };
         let mods = ui.input(|i| i.modifiers);
         let mode = Mode::from_modifiers(mods.command, mods.shift);
+        // Esc closes the open group or component (unverified for SketchUp 2026).
+        if ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && let Some(doc) = self.document.as_mut()
+            && doc.close_instance()
+        {
+            self.selection.clear();
+            self.rebuild(device);
+        }
 
         if response.drag_started_by(egui::PointerButton::Primary) {
             self.box_start = ui.input(|i| i.pointer.press_origin()).map(to_px);
@@ -831,11 +949,30 @@ impl App {
                 1
             };
             let hit = selection::pick(&self.scene, &self.bvh, &self.camera, cursor, viewport_px);
-            let items = match (hit, &self.document) {
-                (Some(h), Some(doc)) => selection::expand(&doc.model.root, h, clicks),
-                _ => Vec::new(),
+            let Some(doc) = self.document.as_mut() else {
+                return;
             };
-            self.select(device, mode, items);
+            match hit {
+                // Double click on a group or component opens it for editing.
+                Some(Owner::Instance(i)) if clicks == 2 => {
+                    if doc.open_instance(i) {
+                        self.selection.clear();
+                        self.rebuild(device);
+                    }
+                }
+                // A click outside the open group or component closes it (also on
+                // empty space; unverified that SketchUp closes on empty space).
+                None if !doc.context.is_empty() && mode == Mode::Replace => {
+                    doc.close_instance();
+                    self.selection.clear();
+                    self.rebuild(device);
+                }
+                Some(h) => {
+                    let items = selection::expand(doc.active(), h, clicks);
+                    self.select(device, mode, items);
+                }
+                None => self.select(device, mode, Vec::new()),
+            }
         }
     }
 
@@ -870,6 +1007,36 @@ impl App {
 }
 
 /// Wheel movement this frame in notches; positive is away from the user (zoom in).
+/// An inference in the open context's space.
+fn to_local(inf: &mt_infer::Inference, ctx_xf: glam::DMat4) -> mt_infer::Inference {
+    if ctx_xf == glam::DMat4::IDENTITY {
+        return *inf;
+    }
+    let inv = ctx_xf.inverse();
+    let p = |q: DVec3| inv.transform_point3(q);
+    let normal_xf = glam::DMat3::from_mat4(ctx_xf).transpose();
+    mt_infer::Inference {
+        point: p(inf.point),
+        guide: inf.guide.map(|(a, b)| (p(a), p(b))),
+        normal: inf.normal.map(|n| (normal_xf * n).normalize_or_zero()),
+        segment: inf.segment.map(|[a, b]| [p(a), p(b)]),
+        ..*inf
+    }
+}
+
+/// The kernel's view of a selection.
+fn kernel_selection(items: &[Owner]) -> mt_kernel::group::Selection {
+    let mut sel = mt_kernel::group::Selection::default();
+    for o in items {
+        match *o {
+            Owner::Edge(e) => sel.edges.push(e),
+            Owner::Face(f) => sel.faces.push(f),
+            Owner::Instance(i) => sel.instances.push(i),
+        }
+    }
+    sel
+}
+
 fn wheel_notches(events: &[egui::Event]) -> f32 {
     events
         .iter()
@@ -890,7 +1057,7 @@ impl App {
         let Some(doc) = &self.document else {
             return mt_ui::EntityInfo::no_selection();
         };
-        let root = &doc.model.root;
+        let root = doc.active();
         let inches = |v: f64| format!("{v:.3}\"");
         // All selected edges belong to one curve: describe the curve.
         let curve = items.first().and_then(|o| match o {
@@ -941,8 +1108,9 @@ impl App {
             [Owner::Instance(i)] if *i < root.instances.len() => {
                 let inst = &root.instances[*i];
                 let def = doc.model.definitions.get(inst.definition);
+                let group = def.is_some_and(|d| d.is_group);
                 mt_ui::EntityInfo {
-                    title: "Component".into(),
+                    title: if group { "Group" } else { "Component" }.into(),
                     rows: vec![
                         ("Instance".into(), inst.name.clone()),
                         (
@@ -1016,7 +1184,8 @@ impl eframe::App for App {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
                 mt_ui::Event::Measurements(text) => {
                     if let (Some(draw), Some(doc)) = (self.draw.as_mut(), self.document.as_mut())
-                        && doc.edit(|root| draw.typed(root, self.inference.as_ref(), &text, units))
+                        && let local = self.inference.map(|i| to_local(&i, self.ctx_xf))
+                        && doc.edit(|root| draw.typed(root, local.as_ref(), &text, units))
                         && let Some(rs) = frame.wgpu_render_state()
                     {
                         let device = rs.device.clone();
@@ -1030,8 +1199,10 @@ impl eframe::App for App {
                                 picked: None,
                                 selection: &[],
                                 ctrl: false,
+                                eye: DVec3::ZERO,
                             };
-                            tool.typed(&mut ctx, self.inference.as_ref(), &text, units)
+                            let local = self.inference.map(|i| to_local(&i, self.ctx_xf));
+                            tool.typed(&mut ctx, local.as_ref(), &text, units)
                         })
                         && let Some(rs) = frame.wgpu_render_state()
                     {
@@ -1041,6 +1212,7 @@ impl eframe::App for App {
                         self.rebuild(&device);
                     }
                 }
+                _ => {}
             }
         }
     }

@@ -20,6 +20,8 @@ pub struct Ctx<'a> {
     pub selection: &'a [Owner],
     /// Ctrl held: copy (Move, Rotate), new faces (Push/Pull).
     pub ctrl: bool,
+    /// Camera position in the context's space (which side of a face is clicked).
+    pub eye: DVec3,
 }
 
 pub trait ModifyTool {
@@ -43,6 +45,8 @@ pub trait ModifyTool {
     /// Polylines to preview.
     fn preview(&self, ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>>;
     fn cancel(&mut self);
+    /// The material picked in the Materials panel (Paint Bucket).
+    fn set_material(&mut self, _material: Option<usize>) {}
 }
 
 pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
@@ -53,6 +57,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.scale" => Box::new(Transform::new(Kind::Scale)),
         "tool.offset" => Box::new(Offset::default()),
         "tool.follow_me" => Box::new(FollowMe),
+        "tool.paint_bucket" => Box::new(PaintBucket::default()),
         _ => return None,
     })
 }
@@ -715,6 +720,76 @@ impl ModifyTool for FollowMe {
     fn cancel(&mut self) {}
 }
 
+// ------------------------------------------------------------------ Paint Bucket
+
+/// Paints the clicked face side, or the clicked group or component. When the clicked
+/// entity is selected, the whole selection is painted. Alt-sampling and Ctrl/Shift fill
+/// modes are not implemented yet.
+#[derive(Debug, Default)]
+pub struct PaintBucket {
+    material: Option<usize>,
+}
+
+impl ModifyTool for PaintBucket {
+    fn status(&self) -> String {
+        if self.material.is_some() {
+            "Select a face or object to paint."
+        } else {
+            "Pick a material in the Materials panel, then select a face or object to paint."
+        }
+        .into()
+    }
+
+    fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        ("", String::new())
+    }
+
+    fn anchor(&self) -> Option<DVec3> {
+        None
+    }
+
+    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        let Some(picked) = ctx.picked else { return false };
+        let targets: Vec<Owner> = if ctx.selection.contains(&picked) { ctx.selection.to_vec() } else { vec![picked] };
+        let m = self.material;
+        let mut changed = false;
+        for t in targets {
+            match t {
+                Owner::Face(f) => {
+                    let Some(face) = ctx.ents.faces.get_mut(f) else { continue };
+                    // The side facing the camera.
+                    let front = (ctx.eye - inf.point).dot(face.normal) >= 0.0 || t != picked;
+                    let slot = if front { &mut face.attrs.material } else { &mut face.attrs.back_material };
+                    changed |= *slot != m;
+                    *slot = m;
+                }
+                Owner::Instance(i) => {
+                    if let Some(inst) = ctx.ents.instances.get_mut(i) {
+                        changed |= inst.material != m;
+                        inst.material = m;
+                    }
+                }
+                Owner::Edge(_) => {}
+            }
+        }
+        changed
+    }
+
+    fn typed(&mut self, _ctx: &mut Ctx, _cur: Option<&Inference>, _text: &str, _units: LengthUnit) -> bool {
+        false
+    }
+
+    fn preview(&self, _ents: &Entities, _cur: &Inference) -> Vec<Vec<DVec3>> {
+        Vec::new()
+    }
+
+    fn cancel(&mut self) {}
+
+    fn set_material(&mut self, material: Option<usize>) {
+        self.material = material;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +852,7 @@ mod tests {
             picked: Some(Owner::Face(f)),
             selection: &[],
             ctrl: false,
+            eye: DVec3::ZERO,
         };
         assert!(!pp.click(&mut ctx, &inf(DVec3::new(5.0, 5.0, 0.0))));
         assert!(pp.typed(
@@ -795,6 +871,7 @@ mod tests {
             picked: None,
             selection: &all,
             ctrl: true,
+            eye: DVec3::ZERO,
         };
         mv.click(&mut ctx, &inf(DVec3::ZERO));
         assert!(mv.click(&mut ctx, &inf(DVec3::new(20.0, 0.0, 0.0))));
@@ -819,6 +896,7 @@ mod tests {
             picked: None,
             selection: &sel,
             ctrl: false,
+            eye: DVec3::ZERO,
         };
         mv.click(&mut ctx, &inf(DVec3::ZERO));
         assert!(mv.typed(
@@ -835,6 +913,7 @@ mod tests {
             picked: None,
             selection: &sel,
             ctrl: false,
+            eye: DVec3::ZERO,
         };
         rot.click(&mut ctx, &inf(DVec3::new(0.0, 0.0, 5.0)));
         rot.click(&mut ctx, &inf(DVec3::new(1.0, 0.0, 5.0)));
