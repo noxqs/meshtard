@@ -74,3 +74,5 @@
 | Components | In Model list, place, edit, Purge Unused | differs | list with icons instead of thumbnails; no gluing or cursor rotation when placing |
 | File | Save / Save As writes .skp (SketchUp 2017 format) | differs | SketchUp 2026 saves its own (VFF) format; view, scenes, styles not saved |
 | File | Unsaved-changes asterisk in title | unverified | |
+| Platform | Windows build | unverified | CI-built, not yet run by hand |
+| Platform | macOS menu bar (native), Cmd shortcuts | unverified | Windows menu layout used; SketchUp for Mac's differs |

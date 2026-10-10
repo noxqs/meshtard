@@ -173,9 +173,12 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] VFF (2021+) writing: no reference implementation; needs own research against real SketchUp.
 
 ### M9: Windows and macOS
-- Windows: Vulkan or DX12 via wgpu, CUDA works the same.
-- macOS: Metal via wgpu. No CUDA on macOS, so the CPU fallback (or a Metal compute path) is used there.
-- Native menu bar on macOS, matching the macOS SketchUp menus.
+- [x] Builds and tests on Linux, Windows and macOS in CI (GitHub Actions); release binaries for Windows (with the CUDA option) and macOS are attached to every run. Rust pinned (`rust-toolchain.toml`).
+- [x] Linux release build tested on the RTX 4070 SUPER machine (Vulkan, CUDA on).
+- [x] CUDA falls back to the CPU when the NVIDIA driver or NVRTC is missing (Windows needs the CUDA Toolkit's NVRTC for the GPU path).
+- [x] macOS: native menu bar from `menus.toml` (Cmd shortcuts, enabled and checked states), Cmd for Ctrl shortcuts, Mac symbols in menus.
+- [x] A `.skp` dropped on the window opens; a `.skp` path on the command line opens.
+- [ ] Not yet: tried by hand on Windows and macOS hardware; SketchUp for Mac's own menu layout and shortcuts (the spec covers Windows); installers and app bundles (on hold); HiDPI check on Windows/macOS.
 
 ### Later
 - Ruby plugin API (kept in view).
