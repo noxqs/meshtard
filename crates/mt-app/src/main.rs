@@ -1,5 +1,6 @@
 //! meshtard desktop application.
 
+mod confirm;
 mod document;
 #[cfg(target_os = "macos")]
 mod macos_menu;
@@ -159,6 +160,10 @@ struct App {
     /// The macOS menu bar (the shell draws the menus itself elsewhere).
     #[cfg(target_os = "macos")]
     native_menu: macos_menu::NativeMenu,
+    /// An action waiting for the "Save changes?" answer.
+    pending: Option<confirm::Pending>,
+    /// The window may close (the question was answered or not needed).
+    closing: bool,
     /// Window title last sent (it changes when the model gets unsaved changes).
     last_title: String,
     /// Tray state the model does not hold.
@@ -235,6 +240,8 @@ impl App {
             ctx_xf: glam::DMat4::IDENTITY,
             active_tag: 0,
             last_title: String::new(),
+            pending: None,
+            closing: false,
             #[cfg(target_os = "macos")]
             native_menu,
             cut_lines: Vec::new(),
@@ -515,7 +522,7 @@ impl App {
             let device = rs.device.clone();
             self.rebuild(&device);
         } else if id == "file.exit" {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.request(ctx, frame, confirm::Pending::Exit);
         } else if let Some(rs) = frame.wgpu_render_state()
             && matches!(
                 id,
@@ -676,7 +683,17 @@ impl App {
                 }
             }
         } else if id == "file.new" {
-            // SketchUp asks to save unsaved changes first (not implemented yet).
+            self.request(ctx, frame, confirm::Pending::New);
+        } else if matches!(id, "file.save" | "file.save_as" | "file.save_copy_as") {
+            self.save(ctx, id);
+        } else if id == "file.open" {
+            self.request(ctx, frame, confirm::Pending::Open(None));
+        }
+    }
+
+    /// File > New without asking (see `confirm`).
+    fn new_document(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        {
             if let Some(rs) = frame.wgpu_render_state() {
                 let device = rs.device.clone();
                 let doc = Document::untitled();
@@ -686,23 +703,15 @@ impl App {
                 self.camera = Camera::from_spec(&self.spec.default_model.camera);
                 self.rebuild(&device);
             }
-        } else if matches!(id, "file.save" | "file.save_as" | "file.save_copy_as") {
-            self.save(ctx, id);
-        } else if id == "file.open" {
-            let picked = rfd::FileDialog::new()
-                .add_filter("SketchUp Models", &["skp"])
-                .pick_file();
-            if let (Some(path), Some(rs)) = (picked, frame.wgpu_render_state()) {
-                self.open(ctx, &rs.device, &path);
-            }
         }
     }
 
     /// File > Save, Save As, Save A Copy As. Files are written in the SketchUp 2017
     /// format (the only one the writer produces); SketchUp 2026 opens them.
-    fn save(&mut self, ctx: &egui::Context, id: &str) {
+    /// Returns whether the file was written.
+    fn save(&mut self, ctx: &egui::Context, id: &str) -> bool {
         let Some(doc) = self.document.as_mut() else {
-            return;
+            return false;
         };
         let path = if id == "file.save" && doc.has_file {
             Some(doc.path.clone())
@@ -724,7 +733,7 @@ impl App {
                 })
         };
         let Some(path) = path else {
-            return;
+            return false;
         };
         let result = mt_kernel::export::to_skp(&doc.model)
             .map_err(|e| e.to_string())
@@ -736,8 +745,12 @@ impl App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 }
                 self.message = Some(format!("Saved {} (SketchUp 2017 format).", path.display()));
+                true
             }
-            Err(e) => self.message = Some(format!("Could not save {}: {e}", path.display())),
+            Err(e) => {
+                self.message = Some(format!("Could not save {}: {e}", path.display()));
+                false
+            }
         }
     }
 
@@ -1461,8 +1474,8 @@ impl eframe::App for App {
             return;
         };
         shell.capture_typing(ui.ctx());
-        // A .skp file dropped on the window opens it (SketchUp asks to save unsaved
-        // changes first; not implemented yet).
+        self.intercept_close(ui.ctx(), frame);
+        // A .skp file dropped on the window opens it (after asking to save changes).
         let dropped = ui.ctx().input(|i| {
             i.raw
                 .dropped_files
@@ -1470,9 +1483,8 @@ impl eframe::App for App {
                 .map(|f| f.path().to_path_buf())
                 .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("skp")))
         });
-        if let (Some(path), Some(rs)) = (dropped, frame.wgpu_render_state()) {
-            let device = rs.device.clone();
-            self.open(ui.ctx(), &device, &path);
+        if let Some(path) = dropped {
+            self.request(ui.ctx(), frame, confirm::Pending::Open(Some(path)));
         }
         if let Some(doc) = &self.document
             && doc.title() != self.last_title
@@ -1542,6 +1554,7 @@ impl eframe::App for App {
             self.run_command(ui.ctx(), frame, &id);
         }
         self.shell = Some(shell);
+        self.confirm_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
