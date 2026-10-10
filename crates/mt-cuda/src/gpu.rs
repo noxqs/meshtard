@@ -408,6 +408,16 @@ fn len_u32(n: usize) -> Result<u32, Error> {
 impl Gpu {
     /// Opens device 0 and compiles the kernels (NVRTC, a fraction of a second).
     pub fn new() -> Result<Self, Error> {
+        // cudarc panics when it first touches a library it cannot load, so check that
+        // the driver and NVRTC are installed before using either (machines without an
+        // NVIDIA driver then fall back to the CPU instead of crashing).
+        // SAFETY: only tries to load the shared libraries; no CUDA calls are made.
+        let present = unsafe {
+            cudarc::driver::sys::is_culib_present() && cudarc::nvrtc::sys::is_culib_present()
+        };
+        if !present {
+            return Err(err("CUDA driver or NVRTC library not found"));
+        }
         let ctx = CudaContext::new(0)?;
         let name = ctx.name()?;
         let opts = CompileOptions {
