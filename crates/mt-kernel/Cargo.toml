@@ -1,0 +1,18 @@
+[package]
+name = "mt-kernel"
+description = "Non-manifold boundary representation with SketchUp's sticky-geometry behavior"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+slotmap = "1"
+earcutr = "0.5"
+mt-skp.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

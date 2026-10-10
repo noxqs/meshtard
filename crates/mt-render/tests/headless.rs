@@ -4,7 +4,7 @@
 
 use egui_wgpu::wgpu;
 use glam::{DVec2, DVec3};
-use mt_render::{Camera, Style, Viewport};
+use mt_render::{Camera, FaceVertex, Segment, Style, Viewport};
 use mt_spec::Spec;
 
 const SIZE: [u32; 2] = [640, 400];
@@ -139,5 +139,359 @@ fn negative_axis_is_dotted() {
         on > left.len() / 4 && on < left.len() * 3 / 4,
         "-X axis should be dotted: {on}/{}",
         left.len()
+    );
+}
+
+// ---------------------------------------------------------------- faces
+
+const HALF: f64 = 50.0;
+
+/// A quad of a cube centered at the origin (size 100): outward normal and its four
+/// corners, counter-clockwise around the normal.
+fn cube_quads() -> Vec<(DVec3, [DVec3; 4])> {
+    let mut out = Vec::new();
+    for axis in 0..3 {
+        for sign in [-1.0, 1.0] {
+            let n = DVec3::AXES[axis] * sign;
+            let (mut u, mut v) = (DVec3::AXES[(axis + 1) % 3], DVec3::AXES[(axis + 2) % 3]);
+            if sign < 0.0 {
+                std::mem::swap(&mut u, &mut v);
+            }
+            let c = n * HALF;
+            let corners = [-u - v, u - v, u + v, -u + v].map(|d| c + d * HALF);
+            out.push((n, corners));
+        }
+    }
+    out
+}
+
+fn quads_mesh(
+    quads: &[(DVec3, [DVec3; 4])],
+    front: [f32; 4],
+    back: [f32; 4],
+) -> (Vec<FaceVertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (n, corners) in quads {
+        let base = vertices.len() as u32;
+        for p in corners {
+            vertices.push(FaceVertex {
+                position: p.as_vec3().into(),
+                normal: n.as_vec3().into(),
+                front,
+                back,
+            });
+        }
+        indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+    }
+    (vertices, indices)
+}
+
+/// The cube's 12 edges with the normals of their two faces.
+fn cube_edges() -> Vec<(DVec3, DVec3, [DVec3; 2])> {
+    let mut out = Vec::new();
+    for axis in 0..3 {
+        let (u, v) = (DVec3::AXES[(axis + 1) % 3], DVec3::AXES[(axis + 2) % 3]);
+        for su in [-1.0, 1.0] {
+            for sv in [-1.0, 1.0] {
+                let mid = (u * su + v * sv) * HALF;
+                let along = DVec3::AXES[axis] * HALF;
+                out.push((mid - along, mid + along, [u * su, v * sv]));
+            }
+        }
+    }
+    out
+}
+
+/// Spec style without axes, so they do not cross the test geometry.
+fn face_style() -> Style {
+    let spec = Spec::builtin().unwrap().default_model;
+    Style {
+        axes: None,
+        ..Style::from_spec(&spec)
+    }
+}
+
+fn render(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    viewport: &mut Viewport,
+    camera: &Camera,
+    name: &str,
+) -> image::RgbaImage {
+    let texture = viewport.render(device, queue, camera, SIZE, 1.0).clone();
+    let img = read_back(device, queue, &texture);
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.png"));
+    img.save(&out).unwrap();
+    eprintln!("saved {}", out.display());
+    img
+}
+
+fn pixel_at(img: &image::RgbaImage, camera: &Camera, p: DVec3) -> image::Rgba<u8> {
+    let px = camera.project(p, viewport_px()).unwrap();
+    *img.get_pixel(px.x.round() as u32, px.y.round() as u32)
+}
+
+fn viewport_px() -> DVec2 {
+    DVec2::new(f64::from(SIZE[0]), f64::from(SIZE[1]))
+}
+
+fn luma(px: &image::Rgba<u8>) -> i32 {
+    (i32::from(px[0]) + i32::from(px[1]) + i32::from(px[2])) / 3
+}
+
+const RED: [f32; 4] = [0.9, 0.2, 0.2, 1.0];
+const BLUE: [f32; 4] = [0.2, 0.2, 0.9, 1.0];
+
+#[test]
+fn faces_show_front_outside_and_back_inside() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    let (vertices, indices) = quads_mesh(&cube_quads(), RED, BLUE);
+    viewport.set_faces(&device, &vertices, &indices);
+
+    let outside = Camera::from_spec(&Spec::builtin().unwrap().default_model.camera);
+    let img = render(&device, &queue, &mut viewport, &outside, "faces_outside");
+    for center in [-DVec3::X, -DVec3::Y, DVec3::Z] {
+        let px = pixel_at(&img, &outside, center * HALF);
+        assert!(
+            px[0] > 100 && px[2] < 100,
+            "front (red) at {center}, got {px:?}"
+        );
+    }
+
+    let inside = Camera {
+        eye: DVec3::new(-10.0, -20.0, 5.0),
+        target: DVec3::new(50.0, 10.0, 0.0),
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(&device, &queue, &mut viewport, &inside, "faces_inside");
+    let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
+    assert!(px[2] > 100 && px[0] < 100, "back (blue) inside, got {px:?}");
+
+    viewport.set_faces(&device, &[], &[]);
+    let img = render(&device, &queue, &mut viewport, &inside, "faces_cleared");
+    let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
+    assert!(
+        px[0] > 150 && px[1] > 150,
+        "cleared faces show the background, got {px:?}"
+    );
+}
+
+#[test]
+fn visible_sides_are_shaded_differently() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    let white = [1.0; 4];
+    let (vertices, indices) = quads_mesh(&cube_quads(), white, white);
+    viewport.set_faces(&device, &vertices, &indices);
+    let camera = Camera::from_spec(&Spec::builtin().unwrap().default_model.camera);
+    let img = render(&device, &queue, &mut viewport, &camera, "faces_shading");
+    let sides = [-DVec3::X, -DVec3::Y, DVec3::Z].map(|n| luma(&pixel_at(&img, &camera, n * HALF)));
+    eprintln!("-X, -Y, +Z brightness: {sides:?}");
+    for i in 0..3 {
+        for j in i + 1..3 {
+            assert!(
+                (sides[i] - sides[j]).abs() >= 15,
+                "sides should differ clearly: {sides:?}"
+            );
+        }
+    }
+}
+
+/// Distance from `p` to the segment `a`-`b`, in pixels.
+fn distance_to_segment(p: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+/// Renders the cube with its edges and checks that every visible edge is solid dark
+/// and every hidden edge is covered.
+fn check_edges(camera: &Camera, name: &str) {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    // Red back sides: they must never show from outside, not even along silhouettes.
+    let gray = [0.85, 0.85, 0.85, 1.0];
+    let (vertices, indices) = quads_mesh(&cube_quads(), gray, [1.0, 0.0, 0.0, 1.0]);
+    viewport.set_faces(&device, &vertices, &indices);
+    let edges = cube_edges();
+    let segments: Vec<Segment> = edges
+        .iter()
+        .map(|(a, b, _)| Segment {
+            a: a.as_vec3().into(),
+            b: b.as_vec3().into(),
+            color: [0.0, 0.0, 0.0, 1.0],
+            style: [1.0, 0.0],
+        })
+        .collect();
+    viewport.set_edges(&device, &segments);
+    let img = render(&device, &queue, &mut viewport, camera, name);
+
+    let view = viewport_px();
+    let faces_camera = |n: DVec3| n.dot(camera.eye - n * HALF) > 0.0;
+    let visible = |normals: &[DVec3; 2]| normals.iter().any(|&n| faces_camera(n));
+    let project = |p: DVec3| camera.project(p, view).unwrap();
+    let visible_2d: Vec<(DVec2, DVec2)> = edges
+        .iter()
+        .filter(|e| visible(&e.2))
+        .map(|(a, b, _)| (project(*a), project(*b)))
+        .collect();
+    // Darkest and brightest luma in the 3x3 block around a pixel.
+    let block = |p: DVec2| {
+        let (x, y) = (p.x.round() as i64, p.y.round() as i64);
+        let mut range = (i32::MAX, i32::MIN);
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let l = luma(img.get_pixel((x + dx) as u32, (y + dy) as u32));
+                range = (range.0.min(l), range.1.max(l));
+            }
+        }
+        range
+    };
+    let on_screen = |p: DVec2| p.x >= 3.0 && p.y >= 3.0 && p.x < view.x - 3.0 && p.y < view.y - 3.0;
+
+    let (mut shown, mut hidden) = (0, 0);
+    for (a, b, normals) in &edges {
+        for i in 1..40 {
+            let p = project(a.lerp(*b, f64::from(i) / 40.0));
+            if !on_screen(p) {
+                continue;
+            }
+            // A 1 px line may straddle two pixels at half coverage each, so a visible
+            // edge only has to darken some pixel nearby to about half its surroundings.
+            let (dark, light) = block(p);
+            if visible(normals) {
+                assert!(
+                    dark * 100 < light * 60,
+                    "{name}: visible edge at {p} not dark ({dark}..{light})"
+                );
+                shown += 1;
+            } else if visible_2d
+                .iter()
+                .all(|&(va, vb)| distance_to_segment(p, va, vb) > 4.0)
+            {
+                assert!(
+                    dark > 100 && dark * 100 > light * 90,
+                    "{name}: hidden edge shows at {p} ({dark}..{light})"
+                );
+                hidden += 1;
+            }
+        }
+    }
+    eprintln!("{name}: {shown} visible and {hidden} hidden edge samples");
+    // Parallel projection spreads depth over +-1e4 camera distances, too coarse to keep
+    // back sides from showing in antialiased silhouette pixels. Known, not checked.
+    if camera.perspective {
+        let reddish = img
+            .pixels()
+            .filter(|p| p[0] > p[1].saturating_add(30))
+            .count();
+        assert_eq!(reddish, 0, "{name}: back sides show");
+    }
+    assert!(
+        shown > 50 && hidden > 20,
+        "{name}: too few samples ({shown}, {hidden})"
+    );
+}
+
+/// Eye on the default view direction at `distance` from the cube center, with a field
+/// of view that keeps the cube about the same size on screen.
+fn cube_camera(distance: f64, perspective: bool) -> Camera {
+    let dir = DVec3::new(-300.0, -500.0, 220.0).normalize();
+    let half_angle = (17.5_f64.to_radians().tan() * 300.0 / distance).atan();
+    Camera {
+        eye: dir * distance,
+        target: DVec3::ZERO,
+        fov_deg: (2.0 * half_angle).to_degrees(),
+        perspective,
+    }
+}
+
+#[test]
+fn edges_on_faces_near() {
+    // 100 inches from the nearest corner: strong perspective, the cube overflows the view.
+    let corner = DVec3::new(-HALF, -HALF, HALF);
+    let dir = DVec3::new(-300.0, -500.0, 220.0).normalize();
+    check_edges(
+        &Camera {
+            eye: corner + dir * 100.0,
+            target: corner,
+            fov_deg: 35.0,
+            perspective: true,
+        },
+        "edges_near",
+    );
+    check_edges(&cube_camera(200.0, true), "edges_close");
+}
+
+#[test]
+fn edges_on_faces_far() {
+    check_edges(&cube_camera(100_000.0, true), "edges_far");
+}
+
+#[test]
+fn edges_on_faces_parallel() {
+    check_edges(&cube_camera(600.0, false), "edges_parallel");
+}
+
+#[test]
+fn translucent_face_blends() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    let up = DVec3::Z;
+    let quad = |x0: f64, x1: f64, z: f64| {
+        let c = [(x0, -50.0), (x1, -50.0), (x1, 50.0), (x0, 50.0)];
+        (up, c.map(|(x, y)| DVec3::new(x, y, z)))
+    };
+    // Opaque red across the whole width; translucent blue above its right half and
+    // past it. The translucent quad comes first to check the opaque pass runs first.
+    let (mut vertices, mut indices) = quads_mesh(
+        &[quad(0.0, 150.0, 10.0)],
+        [0.2, 0.2, 0.9, 0.5],
+        [0.2, 0.2, 0.9, 0.5],
+    );
+    let (red_v, red_i) = quads_mesh(&[quad(-100.0, 100.0, 0.0)], RED, RED);
+    let base = vertices.len() as u32;
+    vertices.extend(red_v);
+    indices.extend(red_i.iter().map(|i| i + base));
+    viewport.set_faces(&device, &vertices, &indices);
+
+    let camera = Camera {
+        eye: DVec3::new(0.0, 0.0, 500.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(&device, &queue, &mut viewport, &camera, "faces_translucent");
+    let red = pixel_at(&img, &camera, DVec3::new(-50.0, 0.0, 0.0));
+    let both = pixel_at(&img, &camera, DVec3::new(50.0, 0.0, 10.0));
+    let blue_over_sky = pixel_at(&img, &camera, DVec3::new(125.0, 0.0, 10.0));
+    eprintln!("red {red:?}, blue over red {both:?}, blue over background {blue_over_sky:?}");
+    assert!(red[0] > 150 && red[2] < 60, "opaque red, got {red:?}");
+    // Half red, half blue (both shaded alike).
+    let expect = (f32::from(red[0]) + f32::from(red[2])) / 2.0;
+    for c in [both[0], both[2]] {
+        assert!(
+            (f32::from(c) - expect).abs() < 12.0,
+            "blend of red and blue, got {both:?}, expected ~{expect}"
+        );
+    }
+    assert!(
+        blue_over_sky[2] > blue_over_sky[0] + 30 && blue_over_sky[0] > 80,
+        "blue blended over background, got {blue_over_sky:?}"
     );
 }

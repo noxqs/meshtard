@@ -12,6 +12,7 @@ rust-version = "1.90"
 mt-spec = { path = "crates/mt-spec" }
 mt-render = { path = "crates/mt-render" }
 mt-skp = { path = "crates/mt-skp" }
+mt-kernel = { path = "crates/mt-kernel" }
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
 egui = "0.36"
 egui-wgpu = "0.36"

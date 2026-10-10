@@ -28,3 +28,16 @@ z = [0.0, 0.0, 1.0]
 # Positive half solid, negative half dotted.
 dotted_negative = true
 width_px = 1.5
+
+# Flat diffuse face shading: color * (ambient + (1 - ambient) * max(0, n . light)).
+# DRAFT: values picked so a box's three visible sides read clearly distinct
+# (top lightest), not measured from SketchUp.
+[shading]
+ambient = 0.55
+# true: the light follows the camera; false: fixed world `light_direction`.
+light_from_camera = true
+# [yaw, pitch]: the direction towards the camera turned yaw degrees towards the
+# camera's right, then pitch degrees up.
+light_offset_deg = [15.0, 45.0]
+# Towards the light, world Z-up. Used when light_from_camera = false.
+light_direction = [-0.3, -0.8, 0.5]

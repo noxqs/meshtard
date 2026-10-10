@@ -29,6 +29,7 @@ The render tests in `crates/mt-render/tests/headless.rs` need a Vulkan adapter. 
 | `mt-spec` | Loads `spec/*.toml` (menus, keymap, default model) and checks consistency |
 | `mt-render` | Camera and wgpu viewport renderer |
 | `mt-skp` | `.skp` reader (VFF 2021+ and legacy), a Rust port of OpenSKP |
+| `mt-kernel` | Geometry kernel: entities, SketchUp modeling behavior, `.skp` import, triangulation |
 | `mt-app` | The application: window, menus, navigation, opening `.skp` files |
 
 ## Credits

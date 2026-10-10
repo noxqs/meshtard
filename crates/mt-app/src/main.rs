@@ -102,7 +102,10 @@ impl App {
     fn open(&mut self, ctx: &egui::Context, device: &wgpu::Device, path: &std::path::Path) {
         match Document::open(path) {
             Ok(doc) => {
-                self.viewport.set_edges(device, &doc.edge_segments());
+                let scene = doc.scene();
+                self.viewport.set_edges(device, &scene.edges);
+                self.viewport
+                    .set_faces(device, &scene.vertices, &scene.indices);
                 if let Some(camera) = doc
                     .saved_camera()
                     .or_else(|| doc.extents_camera(self.camera.fov_deg))

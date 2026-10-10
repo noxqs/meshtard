@@ -216,6 +216,7 @@ pub struct DefaultModel {
     pub sky: SkySpec,
     pub ground: GroundSpec,
     pub axes: AxesSpec,
+    pub shading: ShadingSpec,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -252,6 +253,18 @@ pub struct AxesSpec {
     pub z: [f32; 3],
     pub dotted_negative: bool,
     pub width_px: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadingSpec {
+    /// Brightness of a face turned away from the light, 0..1.
+    pub ambient: f32,
+    pub light_from_camera: bool,
+    /// Yaw (towards camera right) and pitch (up) of the light from the view direction.
+    pub light_offset_deg: [f32; 2],
+    /// World direction towards the light, used when `light_from_camera` is false.
+    pub light_direction: [f32; 3],
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-// Viewport shaders: background (sky + ground) and screen-space lines.
+// Viewport shaders: background (sky + ground), shaded faces and screen-space lines.
 // Colors are sRGB values written straight to an Rgba8Unorm target.
 
 struct Globals {
@@ -14,6 +14,10 @@ struct Globals {
     ground: vec4<f32>,
     // w: 1 when the ground is visible from below.
     background: vec4<f32>,
+    // xyz: unit direction towards the light, w: ambient fraction.
+    light: vec4<f32>,
+    // x: perspective radians per pixel, y: parallel NDC depth per pixel (one is 0).
+    line_depth: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -58,6 +62,42 @@ fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
     return vec4<f32>(g.background.rgb, 1.0);
 }
 
+// ---------------------------------------------------------------- faces
+
+struct FaceVertex {
+    @location(0) position: vec3<f32>,
+    // Front normal; triangles wind counter-clockwise around it.
+    @location(1) normal: vec3<f32>,
+    @location(2) front: vec4<f32>,
+    @location(3) back: vec4<f32>,
+};
+
+struct FaceOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) front: vec4<f32>,
+    @location(2) back: vec4<f32>,
+};
+
+@vertex
+fn face_vs(v: FaceVertex) -> FaceOut {
+    var out: FaceOut;
+    out.pos = g.view_proj * vec4<f32>(v.position, 1.0);
+    out.normal = v.normal;
+    out.front = v.front;
+    out.back = v.back;
+    return out;
+}
+
+@fragment
+fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let color = select(in.back, in.front, front);
+    let n = normalize(select(-in.normal, in.normal, front));
+    let ambient = g.light.w;
+    let shade = ambient + (1.0 - ambient) * max(0.0, dot(n, g.light.xyz));
+    return vec4<f32>(color.rgb * shade, color.a);
+}
+
 // ---------------------------------------------------------------- lines
 
 struct Segment {
@@ -85,6 +125,26 @@ fn clip_near(p: vec4<f32>, q: vec4<f32>) -> vec4<f32> {
     }
     let t = (min_w - p.w) / (q.w - p.w);
     return mix(p, q, t);
+}
+
+// Line quads have the edge's depth across their whole width, but a face through the
+// edge seen at a grazing angle gets nearer within that width, which would stipple the
+// edge. So the quad is moved towards the camera by LINE_PULL times its half width, in
+// pixels of lateral size at its depth: enough for faces down to ~1/LINE_PULL radians
+// (about 18 degrees) from edge-on. Measured in pixels, the pull is the same near and
+// far, so hidden edges stay hidden unless within a few pixels' worth of depth behind
+// a face (only right next to the vertex where they come out from behind it).
+const LINE_PULL: f32 = 3.0;
+
+fn pull_depth(c: vec4<f32>, half_px: f32) -> f32 {
+    let px = half_px * LINE_PULL;
+    // Reverse-Z perspective: ndc z = near / distance; moving towards the camera by a
+    // fraction f of the distance divides the distance by (1 - f).
+    let perspective = c.z / max(1.0 - px * g.line_depth.x, 0.5);
+    // Parallel: ndc z is linear in distance.
+    let z = perspective + px * g.line_depth.y * c.w;
+    // Never in front of the near plane, where it would be clipped.
+    return min(z, c.w);
 }
 
 @vertex
@@ -126,7 +186,7 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     let extend = select(-half, half, end > 0.5);
     let screen = base + normal * side * half + dir * extend;
     let ndc = screen / size * 2.0 - 1.0;
-    out.pos = vec4<f32>(ndc * c.w, c.z, c.w);
+    out.pos = vec4<f32>(ndc * c.w, pull_depth(c, half), c.w);
     out.color = s.color;
     // Framebuffer y runs down; everything above uses y up.
     out.start_dir = vec4<f32>(sa.x, size.y - sa.y, dir.x, -dir.y);

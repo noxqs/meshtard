@@ -5,11 +5,12 @@
 
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::wgpu;
-use glam::Mat4;
+use glam::{DVec2, DVec3, Mat4};
 use mt_spec::DefaultModel;
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
+use crate::mesh::{FaceBuffers, FaceVertex};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -29,6 +30,11 @@ struct Globals {
     sky_horizon: [f32; 4],
     ground: [f32; 4],
     background: [f32; 4],
+    /// xyz: unit direction towards the light, w: ambient fraction.
+    light: [f32; 4],
+    /// How far lines are moved towards the camera; see `pull_depth` in the shader. x: perspective
+    /// radians per physical pixel, y: parallel NDC depth per physical pixel.
+    line_depth: [f32; 4],
 }
 
 /// One line segment, drawn as a screen-space quad.
@@ -50,6 +56,7 @@ pub struct Style {
     pub ground: Option<[f32; 3]>,
     pub ground_from_below: bool,
     pub axes: Option<AxesStyle>,
+    pub shading: ShadingStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +64,39 @@ pub struct AxesStyle {
     pub colors: [[f32; 3]; 3],
     pub dotted_negative: bool,
     pub width: f32,
+}
+
+/// Flat diffuse face shading: `color * (ambient + (1 - ambient) * max(0, n·light))`.
+#[derive(Debug, Clone, Copy)]
+pub struct ShadingStyle {
+    pub ambient: f32,
+    pub light: Light,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Light {
+    /// Follows the camera: the direction towards the camera, turned `yaw_deg` towards
+    /// the camera's right and then `pitch_deg` up.
+    Camera { yaw_deg: f32, pitch_deg: f32 },
+    /// Fixed world direction towards the light.
+    World([f32; 3]),
+}
+
+impl ShadingStyle {
+    /// Unit world direction towards the light for this camera.
+    pub fn light_dir(&self, camera: &Camera) -> DVec3 {
+        match self.light {
+            Light::Camera { yaw_deg, pitch_deg } => {
+                let (yaw, pitch) = (
+                    f64::from(yaw_deg).to_radians(),
+                    f64::from(pitch_deg).to_radians(),
+                );
+                let horizontal = -camera.forward() * yaw.cos() + camera.right() * yaw.sin();
+                (horizontal * pitch.cos() + camera.up() * pitch.sin()).normalize()
+            }
+            Light::World(dir) => DVec3::from(dir.map(f64::from)).normalize_or(DVec3::Z),
+        }
+    }
 }
 
 impl Style {
@@ -74,6 +114,15 @@ impl Style {
                 dotted_negative: spec.axes.dotted_negative,
                 width: spec.axes.width_px,
             }),
+            shading: ShadingStyle {
+                ambient: spec.shading.ambient,
+                light: if spec.shading.light_from_camera {
+                    let [yaw_deg, pitch_deg] = spec.shading.light_offset_deg;
+                    Light::Camera { yaw_deg, pitch_deg }
+                } else {
+                    Light::World(spec.shading.light_direction)
+                },
+            },
         }
     }
 }
@@ -153,6 +202,9 @@ pub struct Viewport {
     bind_group: wgpu::BindGroup,
     background: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    faces_opaque: wgpu::RenderPipeline,
+    faces_translucent: wgpu::RenderPipeline,
+    faces: Option<FaceBuffers>,
     axes: Option<wgpu::Buffer>,
     axes_count: u32,
     edges: Option<wgpu::Buffer>,
@@ -197,8 +249,10 @@ impl Viewport {
             immediate_size: 0,
         });
 
+        // Default primitive state: triangle list, counter-clockwise front (in y-up NDC,
+        // which matches `FaceVertex` winding), no culling, so faces are two-sided.
         let pipeline =
-            |label, vs, fs, buffers: &[Option<wgpu::VertexBufferLayout>], depth_write| {
+            |label, vs, fs, buffers: &[Option<wgpu::VertexBufferLayout>], depth_write, blend| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&pipeline_layout),
@@ -227,7 +281,7 @@ impl Viewport {
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: COLOR_FORMAT,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            blend,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -236,7 +290,8 @@ impl Viewport {
                 })
             };
 
-        let background = pipeline("background", "bg_vs", "bg_fs", &[], false);
+        let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let background = pipeline("background", "bg_vs", "bg_fs", &[], false, alpha);
         let segment_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Segment>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -244,13 +299,43 @@ impl Viewport {
                 0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2
             ],
         };
-        let lines = pipeline("lines", "line_vs", "line_fs", &[Some(segment_layout)], true);
+        let lines = pipeline(
+            "lines",
+            "line_vs",
+            "line_fs",
+            &[Some(segment_layout)],
+            true,
+            alpha,
+        );
+        let faces = [Some(FaceVertex::LAYOUT)];
+        let faces_opaque = pipeline(
+            "opaque faces",
+            "face_vs",
+            "face_fs",
+            &faces,
+            true,
+            Some(wgpu::BlendState::REPLACE),
+        );
+        // No depth write: translucent faces neither hide each other nor what is
+        // drawn after them. They are not sorted, so overlapping ones blend in
+        // submission order.
+        let faces_translucent = pipeline(
+            "translucent faces",
+            "face_vs",
+            "face_fs",
+            &faces,
+            false,
+            alpha,
+        );
 
         let mut viewport = Self {
             globals,
             bind_group,
             background,
             lines,
+            faces_opaque,
+            faces_translucent,
+            faces: None,
             axes: None,
             axes_count: 0,
             edges: None,
@@ -272,6 +357,12 @@ impl Viewport {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+    }
+
+    /// Replaces the model's faces: an indexed triangle list. Empty slices clear.
+    /// Triangles with any alpha below 1 are drawn translucent, after everything else.
+    pub fn set_faces(&mut self, device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) {
+        self.faces = FaceBuffers::new(device, vertices, indices);
     }
 
     pub fn set_style(&mut self, device: &wgpu::Device, style: Style) {
@@ -324,6 +415,20 @@ impl Viewport {
             sky_horizon: rgb_w(horizon, style.sky.is_some()),
             ground: rgb_w(style.ground.unwrap_or_default(), style.ground.is_some()),
             background: rgb_w(style.background, style.ground_from_below),
+            light: {
+                let dir = style.shading.light_dir(camera).as_vec3();
+                [dir.x, dir.y, dir.z, style.shading.ambient]
+            },
+            line_depth: if camera.perspective {
+                let rad_per_px =
+                    2.0 * (camera.fov_deg.to_radians() / 2.0).tan() / f64::from(size[1]);
+                [rad_per_px as f32, 0.0, 0.0, 0.0]
+            } else {
+                let viewport = DVec2::new(f64::from(size[0]), f64::from(size[1]));
+                let depth_per_unit = camera.projection(aspect).z_axis.z.abs();
+                let depth_per_px = depth_per_unit * camera.units_per_px(viewport);
+                [0.0, depth_per_px as f32, 0.0, 0.0]
+            },
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -355,6 +460,19 @@ impl Viewport {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_pipeline(&self.background);
             pass.draw(0..3, 0..1);
+            // Order: opaque faces, then edges and axes, which are pulled towards the
+            // camera so lines on a face win the depth test and lines behind it fail.
+            // Translucent faces last (without depth write) so they blend over
+            // everything behind them, including the edges they cover; edges on their
+            // own boundary are in front of them thanks to the same pull.
+            if let Some(faces) = &self.faces {
+                pass.set_vertex_buffer(0, faces.vertices.slice(..));
+                pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+                if !faces.opaque.is_empty() {
+                    pass.set_pipeline(&self.faces_opaque);
+                    pass.draw_indexed(faces.opaque.clone(), 0, 0..1);
+                }
+            }
             if let Some(edges) = &self.edges {
                 pass.set_pipeline(&self.lines);
                 pass.set_vertex_buffer(0, edges.slice(..));
@@ -364,6 +482,12 @@ impl Viewport {
                 pass.set_pipeline(&self.lines);
                 pass.set_vertex_buffer(0, axes.slice(..));
                 pass.draw(0..6, 0..self.axes_count);
+            }
+            if let Some(faces) = self.faces.as_ref().filter(|f| !f.translucent.is_empty()) {
+                pass.set_pipeline(&self.faces_translucent);
+                pass.set_vertex_buffer(0, faces.vertices.slice(..));
+                pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(faces.translucent.clone(), 0, 0..1);
             }
         }
         queue.submit([encoder.finish()]);

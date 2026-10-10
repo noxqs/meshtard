@@ -116,8 +116,13 @@ SketchUp runs only on Windows and macOS, so the trial runs on one of those machi
 Reading first means real SketchUp models are available for testing everything else.
 
 ### M2: Kernel
-- Add edge (vertex merge, edge split), auto-face on closed coplanar loops, faces with holes, erase with healing.
-- Invariant checker after every operation; property-based tests.
+- [x] `mt-kernel`: vertices, edges, faces with holes; an edge can border any number of faces.
+- [x] Add line: endpoint snapping (0.001"), crossing edges split, collinear edges reused, auto-face on closed coplanar loops, faces split by lines across them, holes from nested loops.
+- [x] Erase edge: bounded faces deleted, coplanar neighbors merged, split lines healed.
+- [x] Validity checker after every operation: 16 scenario tests plus random sequences (3,000+ cases per run).
+- [x] `.skp` import into kernel entities (all 25 sample files pass topology checks), triangulation (exact area on every well-formed face).
+- [x] Renderer: shaded two-sided faces with materials, edges drawn on top, translucency. The app draws `.skp` files with faces.
+- [ ] Not yet: undo (transactions), spatial index for large models (lookups are linear today), Intersect Faces.
 
 ### M3: Renderer and GUI shell
 - Faces, edges, profiles, front/back face colors, default style.
