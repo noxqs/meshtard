@@ -32,6 +32,9 @@ pub struct TrayData {
     pub scene_tabs: bool,
     pub style: StyleSettings,
     pub shadows: ShadowSettings,
+    /// Tag of the selected entities, shown as a Tag dropdown in Entity Info; `None`
+    /// hides the row (nothing selected).
+    pub entity_tag: Option<usize>,
 }
 
 impl Default for TrayData {
@@ -52,6 +55,7 @@ impl Default for TrayData {
             scene_tabs: true,
             style: StyleSettings::default(),
             shadows: ShadowSettings::default(),
+            entity_tag: None,
         }
     }
 }

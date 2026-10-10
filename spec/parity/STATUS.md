@@ -59,3 +59,13 @@
 | Offset | Inward/outward, arcs stay arcs | differs | partial collapse cancels the whole offset; SketchUp trims |
 | Follow Me | Select path, click profile; soft joints under 30° | unverified | |
 | Intersect Faces | With Model, With Selection | unverified | With Context missing |
+| Groups | Make Group / Component, origin at selection's bounding-box corner | unverified | component axes dialog missing |
+| Groups | Edit in place: fade rest, Esc / click outside closes | unverified | fade amount a guess |
+| Groups | Explode merges with surroundings | differs | welds vertices and overlapping edges only; no splitting where edges cross |
+| Tags | Panel, Untagged first, visibility, color, Entity Info Tag | unverified | no folders, no dashes |
+| Materials | In Model grid, Create Material, edit color/opacity | differs | egui color picker; no textures; new material color a guess |
+| Paint Bucket | Paints clicked side, or selection when clicking a selected entity | unverified | no Alt sample, Ctrl/Shift fills |
+| Outliner | Tree, selection, filter | unverified | |
+| Scenes | Add/Update/Delete/Activate, tabs | differs | no transition animation, no per-scene property toggles |
+| Shadows | Sun position (NOAA), shadow map, light/dark | unverified | default location and time from memory |
+| Styles | Edges and profiles toggles | unverified | face styles not rendered yet |

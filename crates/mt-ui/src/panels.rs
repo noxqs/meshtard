@@ -308,7 +308,14 @@ impl Shell {
 
         match self.tray_ui.material_tab {
             MaterialTab::Select => {
-                ui.label("In Model");
+                ui.horizontal(|ui| {
+                    ui.label("In Model");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button(ui, &t, "Create Material", true, paint_plus).clicked() {
+                            self.pending.push(Event::MaterialCreate);
+                        }
+                    });
+                });
                 if data.materials.is_empty() {
                     ui.label(RichText::new("No materials in the model.").color(t.text_disabled));
                     return;

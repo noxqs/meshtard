@@ -154,7 +154,10 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] CUDA: intersection and solid tools (mt-cuda in progress on the Linux machine).
 
 ### M7: Scene structure
-- Groups and components (edit in place, make unique), Outliner, Tags, Materials, Styles, Scenes, section planes, shadows.
+- [x] Groups and components: Create Group, Make Component (G), Explode, Make Unique; double-click edits in place (rest of the model faded, not selectable; Esc, click outside or Edit > Close Group/Component closes). Undo covers the whole model and edit context.
+- [x] Tray panels: Tags (add, delete, rename, visibility, color; Entity Info Tag dropdown), Materials (In Model, Create Material, edit color and opacity; Paint Bucket), Outliner, Scenes (add, update, delete, activate; scene tabs), Styles (edges, profiles), Shadows (time, date, light, dark, on faces, on ground; View > Shadows).
+- [x] Renderer: sun shadows (shadow map), section cut clipping and cut lines (renderer API), transparent materials sorted back to front.
+- [ ] Not yet: Section Plane tool and section planes in the model; face styles (wireframe, hidden line, X-ray, monochrome) in the renderer; Components panel and component axes dialog; textures; scene transitions; tag folders and dashes; Entity Info editing beyond Tag.
 
 ### M8: `.skp` writing
 - Legacy format (2013-2020) via the OpenSKP port.

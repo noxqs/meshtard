@@ -74,6 +74,16 @@ impl App {
             },
             x_ray: m.style.xray,
         };
+        let layer_of = |o: &Owner| -> Option<usize> {
+            let ents = doc.active();
+            match *o {
+                Owner::Edge(e) => ents.edges.get(e).map(|x| x.attrs.layer),
+                Owner::Face(f) => ents.faces.get(f).map(|x| x.attrs.layer),
+                Owner::Instance(i) => ents.instances.get(i).map(|x| x.layer),
+            }
+            .map(|l| l.unwrap_or(0))
+        };
+        data.entity_tag = self.selection.items().first().and_then(layer_of);
         let s = &m.shadows;
         data.shadows = mt_ui::ShadowSettings {
             enabled: s.enabled,
@@ -176,6 +186,59 @@ impl App {
                     t.set_material(Some(i));
                 }
                 false
+            }
+            Event::MaterialCreate => {
+                doc.edit_model(|m, _| {
+                    let n = (1..)
+                        .map(|n| {
+                            if n == 1 {
+                                "Material".to_owned()
+                            } else {
+                                format!("Material{n}")
+                            }
+                        })
+                        .find(|name| !m.materials.iter().any(|x| &x.name == name))
+                        .unwrap_or_default();
+                    // SketchUp's new-material color is unverified; a neutral gray here.
+                    m.materials.push(Material {
+                        name: n,
+                        color: [200, 200, 200],
+                        opacity: 1.0,
+                    });
+                    true
+                });
+                let i = doc.model.materials.len() - 1;
+                self.current_material = Some(i);
+                if let Some(t) = self.modify.as_mut() {
+                    t.set_material(Some(i));
+                }
+                false
+            }
+            Event::EntityTag(tag) => {
+                let items = self.selection.items().to_vec();
+                let layer = (tag > 0).then_some(tag);
+                doc.edit(|ents| {
+                    for o in &items {
+                        match *o {
+                            Owner::Edge(e) => {
+                                if let Some(x) = ents.edges.get_mut(e) {
+                                    x.attrs.layer = layer;
+                                }
+                            }
+                            Owner::Face(f) => {
+                                if let Some(x) = ents.faces.get_mut(f) {
+                                    x.attrs.layer = layer;
+                                }
+                            }
+                            Owner::Instance(i) => {
+                                if let Some(x) = ents.instances.get_mut(i) {
+                                    x.layer = layer;
+                                }
+                            }
+                        }
+                    }
+                    !items.is_empty()
+                })
             }
             Event::MaterialEdit {
                 index,

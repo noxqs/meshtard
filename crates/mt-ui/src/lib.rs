@@ -173,6 +173,11 @@ pub enum Event {
     /// Materials: swatch clicked in the "In Model" grid; make it the Paint Bucket's
     /// current material. The shell also shows it as current at once.
     MaterialPick(usize),
+    /// Materials: the Create Material button. The app adds a material and makes it
+    /// current.
+    MaterialCreate,
+    /// Entity Info: a tag chosen in the Tag dropdown for the selected entities.
+    EntityTag(usize),
     /// Materials: the current material edited (name committed, color or opacity
     /// changed). Carries all editable fields; `opacity` is in percent 0..=100.
     MaterialEdit {

@@ -113,7 +113,7 @@ impl Shell {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
                 if id == "window.entity_info" {
-                    entity_info(ui, frame.entity_info);
+                    entity_info(ui, frame.entity_info, &self.data, &mut self.pending);
                 } else if !self.panel_body(ui, &id) {
                     ui.label(
                         egui::RichText::new(format!(
@@ -127,8 +127,29 @@ impl Shell {
     }
 }
 
-fn entity_info(ui: &mut egui::Ui, info: &EntityInfo) {
+fn entity_info(
+    ui: &mut egui::Ui,
+    info: &EntityInfo,
+    data: &crate::TrayData,
+    pending: &mut Vec<crate::Event>,
+) {
     ui.label(egui::RichText::new(&info.title).strong());
+    // Tag dropdown (SketchUp shows it under the title; layout unverified).
+    if let Some(tag) = data.entity_tag {
+        ui.horizontal(|ui| {
+            ui.label("Tag");
+            let name = |i: usize| data.tags.get(i).map_or("", |t| t.name.as_str()).to_owned();
+            egui::ComboBox::from_id_salt("mt_ui_entity_tag")
+                .selected_text(name(tag))
+                .show_ui(ui, |ui| {
+                    for i in 0..data.tags.len() {
+                        if ui.selectable_label(i == tag, name(i)).clicked() && i != tag {
+                            pending.push(crate::Event::EntityTag(i));
+                        }
+                    }
+                });
+        });
+    }
     if info.rows.is_empty() {
         return;
     }

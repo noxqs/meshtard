@@ -782,3 +782,57 @@ fn translucent_faces_sort_back_to_front() {
     let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
     assert!(px[2] > px[0] + 20, "nearer blue pane on top, got {px:?}");
 }
+
+/// The app's case: a 100 x 100 x 60 box at the origin with the sun of Boulder,
+/// 2026-11-08 13:30 MST (south-south-west, ~28 degrees up). The shadow falls
+/// north-north-east, entirely behind the box from the default south-west camera, so it
+/// is checked from the north-east.
+#[test]
+fn box_shadow_with_app_sun() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = face_style();
+    style.sky = None;
+    style.ground = Some([0.6, 0.6, 0.6]);
+    let mut viewport = Viewport::new(&device, style);
+    // The cube helper scaled into the box [0, 100] x [0, 100] x [0, 60].
+    let quads: Vec<_> = cube_quads()
+        .into_iter()
+        .map(|(n, c)| {
+            let to_box = |p: DVec3| (p / HALF + DVec3::ONE) * DVec3::new(50.0, 50.0, 30.0);
+            (n, c.map(to_box))
+        })
+        .collect();
+    let white = [1.0; 4];
+    let (vertices, indices) = quads_mesh(&quads, white, white);
+    let sun = mt_render::sun_direction(40.017, -105.283, -7.0, 2026, 11, 8, 13, 30);
+    assert!(sun.z > 0.4 && sun.y < -0.7 && sun.x < -0.4, "sun {sun}");
+    // Same call order as the app: shadows before faces.
+    viewport.set_shadows(Some(Shadows {
+        sun_dir: sun.as_vec3().into(),
+        ..sun_30()
+    }));
+    viewport.set_faces(&device, &vertices, &indices);
+    let camera = Camera {
+        eye: DVec3::new(500.0, 600.0, 300.0),
+        target: DVec3::new(50.0, 50.0, 0.0),
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(&device, &queue, &mut viewport, &camera, "shadow_app_box");
+    let at = |p: DVec3| luma(&pixel_at(&img, &camera, p));
+    // The top centre's shadow lands at (50, 50) + 60 / sun.z * -(sun.x, sun.y).
+    let t = 60.0 / sun.z;
+    let shadowed = DVec3::new(50.0 - t * sun.x, 50.0 - t * sun.y, 0.0);
+    let lit = DVec3::new(-100.0, 150.0, 0.0);
+    eprintln!("shadow at {shadowed}: {} vs lit {}", at(shadowed), at(lit));
+    assert!(at(shadowed) < at(lit) - 30, "ground shadow behind the box");
+    // The +Y face looks away from the sun: dark only.
+    let back = at(DVec3::new(50.0, 100.0, 30.0));
+    assert!(
+        (back - (0.45f32 * 255.0) as i32).abs() <= 4,
+        "+Y face {back}"
+    );
+}
