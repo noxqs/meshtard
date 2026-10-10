@@ -176,6 +176,15 @@ struct App {
 
 impl App {
     fn new(spec: Spec, render_state: &egui_wgpu::RenderState) -> Self {
+        let info = render_state.adapter.get_info();
+        log::info!(
+            "GPU: {} ({:?}, {:?}, driver {} {})",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver,
+            info.driver_info
+        );
         let shortcuts = IMPLEMENTED
             .iter()
             .filter_map(|&id| {
@@ -195,7 +204,14 @@ impl App {
             document: None,
             scene: Scene::default(),
             bvh: Box::new(Bvh::default()),
-            accel: mt_cuda::Accel::new(),
+            accel: {
+                let accel = mt_cuda::Accel::new();
+                log::info!(
+                    "CUDA pick index for large models: {}",
+                    if accel.is_gpu() { "on" } else { "off (CPU)" }
+                );
+                accel
+            },
             selection: Selection::default(),
             box_start: None,
             geometry: mt_infer::Geometry::default(),
