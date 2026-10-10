@@ -283,3 +283,50 @@ fn splitting_a_box_face_keeps_neighbors() {
     line(&mut e, p(5.0, 0.0, s), p(5.0, s, s));
     assert_eq!(e.faces.len(), 7);
 }
+
+fn circle(center: DVec3, radius: f64) -> mt_kernel::Arc {
+    mt_kernel::Arc {
+        center,
+        normal: DVec3::Z,
+        x_axis: DVec3::X,
+        radius,
+        start_angle: 0.0,
+        end_angle: std::f64::consts::TAU,
+        segments: 24,
+    }
+}
+
+#[test]
+fn circle_is_one_curve_with_a_face() {
+    let mut e = Entities::new();
+    let c = circle(DVec3::ZERO, 10.0);
+    let edges = mt_kernel::add_curve(&mut e, &c.points(), Some(c));
+    check(&e);
+    assert_eq!(edges.len(), 24);
+    assert_eq!(e.faces.len(), 1);
+    assert_eq!(e.curves.len(), 1);
+    let curve = e.curves.keys().next().unwrap();
+    assert_eq!(e.curve_edges(curve).len(), 24);
+    mt_kernel::erase_curve(&mut e, curve);
+    check(&e);
+    assert_eq!((e.edges.len(), e.faces.len(), e.curves.len()), (0, 0, 0));
+}
+
+#[test]
+fn line_across_circle_keeps_curve_membership() {
+    let mut e = Entities::new();
+    let c = circle(DVec3::ZERO, 10.0);
+    mt_kernel::add_curve(&mut e, &c.points(), Some(c));
+    let across = line(&mut e, p(-20.0, 0.3, 0.0), p(20.0, 0.3, 0.0));
+    assert!(
+        across.iter().all(|x| e.edges[*x].attrs.curve.is_none()),
+        "the line is not part of the circle"
+    );
+    let curve = e.curves.keys().next().unwrap();
+    assert_eq!(
+        e.curve_edges(curve).len(),
+        26,
+        "two circle segments split in two"
+    );
+    assert_eq!(e.faces.len(), 2);
+}

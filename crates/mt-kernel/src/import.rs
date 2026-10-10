@@ -114,6 +114,7 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             smooth: e.smooth,
             hidden: e.hidden,
             layer: None,
+            curve: None,
         };
         edges.insert(id, ents.add_raw_edge(a, b, attrs));
     }

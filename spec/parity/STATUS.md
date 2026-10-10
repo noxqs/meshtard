@@ -45,3 +45,8 @@
 | Inference | Arrow keys and Shift locking | unverified | |
 | Line tool | Chain continues until a face closes; Esc cancels | unverified | |
 | Measurements | Length entry formats | unverified | |
+| Draw | Default segments: circle 24, arc 12, polygon 6 sides | unverified | |
+| Draw | Shape plane: clicked face, else ground; arrow keys lock | unverified | |
+| Draw | Typed values per tool (`w,h`, radius, `24s`, bulge, angle) | unverified | |
+| Eraser | Whole curve erased from one segment; Shift hide, Ctrl soften | unverified | |
+| Select | One click on a curve segment selects the curve | unverified | |

@@ -129,6 +129,8 @@ pub struct Inference {
     pub guide: Option<(DVec3, DVec3)>,
     /// The direction is locked (Shift or arrow key).
     pub locked: bool,
+    /// Normal of the face under the cursor (for "on face"), to orient shapes drawn on it.
+    pub normal: Option<DVec3>,
 }
 
 /// Snappable geometry in world space.
@@ -252,10 +254,24 @@ impl Engine {
         anchor: Option<DVec3>,
     ) -> Inference {
         let ray = view.camera.ray(cursor, view.viewport);
-        let face_t = bvh.ray(ray.origin, ray.dir).map_or(f64::INFINITY, |h| h.t);
+        let hit = bvh.ray(ray.origin, ray.dir);
+        let face_t = hit.map_or(f64::INFINITY, |h| h.t);
+        let face_normal = hit.map(|h| {
+            let [a, b, c] = bvh.triangle(h.triangle);
+            (b - a).cross(c - a).normalize_or_zero()
+        });
         let visible = |p: DVec3| (p - ray.origin).dot(ray.dir) <= face_t * (1.0 + 1e-4) + 1e-2;
 
-        let point = self.point_inference(geom, view, cursor, ray.origin, ray.dir, face_t, visible);
+        let point = self.point_inference(
+            geom,
+            view,
+            cursor,
+            ray.origin,
+            ray.dir,
+            face_t,
+            face_normal,
+            visible,
+        );
 
         if let Some(a) = anchor {
             if let Some((dir, kind)) = self.lock {
@@ -270,6 +286,7 @@ impl Engine {
                     edge: None,
                     guide: None,
                     locked: true,
+                    normal: None,
                 };
             }
             if let Some(p) = point.filter(|p| p.kind.is_point()) {
@@ -293,6 +310,7 @@ impl Engine {
             edge: None,
             guide: None,
             locked: false,
+            normal: None,
         }
     }
 
@@ -314,6 +332,7 @@ impl Engine {
         ro: DVec3,
         rd: DVec3,
         face_t: f64,
+        face_normal: Option<DVec3>,
         visible: impl Fn(DVec3) -> bool,
     ) -> Option<Inference> {
         let near = |p: DVec3, r: f64| {
@@ -330,6 +349,7 @@ impl Engine {
                     edge: e,
                     guide: None,
                     locked: false,
+                    normal: None,
                 })
         };
 
@@ -380,6 +400,7 @@ impl Engine {
                     edge: Some(i),
                     guide: None,
                     locked: false,
+                    normal: None,
                 })
         };
         let on_axis = || {
@@ -396,6 +417,7 @@ impl Engine {
                     edge: None,
                     guide: None,
                     locked: false,
+                    normal: None,
                 })
         };
         let on_face = || {
@@ -405,6 +427,7 @@ impl Engine {
                 edge: None,
                 guide: None,
                 locked: false,
+                normal: face_normal,
             })
         };
         endpoint
@@ -465,6 +488,7 @@ impl Engine {
             edge,
             guide: None,
             locked: false,
+            normal: None,
         };
         // Line up with the acquired point along another axis, if close.
         if let (Kind::Along(_), Some(t)) = (kind, self.tracking(view, cursor, ro, rd, Some((a, p))))
@@ -513,6 +537,7 @@ impl Engine {
                 edge: None,
                 guide: Some((src, p)),
                 locked: false,
+                normal: None,
             })
     }
 }
@@ -621,6 +646,10 @@ mod tests {
         let i = infer(&mut e, &g, &b, at(DVec3::new(60.0, 70.0, 0.0)), None);
         assert_eq!(i.kind, Kind::OnFace);
         assert!(i.point.z.abs() < 1e-9);
+        assert!(
+            i.normal.is_some_and(|n| n.z.abs() > 0.999),
+            "face normal reported"
+        );
     }
 
     #[test]

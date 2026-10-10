@@ -1,9 +1,10 @@
 //! meshtard desktop application.
 
 mod document;
-mod line_tool;
 mod nav;
+mod overlay;
 mod selection;
+mod tools;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
@@ -28,6 +29,16 @@ const IMPLEMENTED: &[&str] = &[
     "file.exit",
     "tool.select",
     "tool.line",
+    "tool.rectangle",
+    "tool.rotated_rectangle",
+    "tool.circle",
+    "tool.polygon",
+    "tool.arc",
+    "tool.arc_2pt",
+    "tool.arc_3pt",
+    "tool.pie",
+    "tool.freehand",
+    "tool.eraser",
     "edit.select_all",
     "edit.select_none",
     "edit.delete",
@@ -97,7 +108,10 @@ struct App {
     geometry: mt_infer::Geometry,
     engine: mt_infer::Engine,
     inference: Option<mt_infer::Inference>,
-    line: line_tool::LineTool,
+    /// The active drawing tool, when `tool` is `Tool::Draw`.
+    draw: Option<Box<dyn tools::DrawTool>>,
+    /// Edges picked during an Eraser drag, erased on release.
+    erase_drag: Vec<Owner>,
     /// The direction lock comes from holding Shift (released with it).
     shift_lock: bool,
     /// Error from the last command, shown in the status bar until the next one.
@@ -130,7 +144,8 @@ impl App {
             geometry: mt_infer::Geometry::default(),
             engine: mt_infer::Engine::default(),
             inference: None,
-            line: line_tool::LineTool::default(),
+            draw: None,
+            erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
         };
@@ -276,7 +291,8 @@ impl App {
     fn run_command(&mut self, ctx: &egui::Context, frame: &eframe::Frame, id: &str) {
         if let Some(tool) = Tool::from_command(id) {
             self.tool = tool;
-            self.line = line_tool::LineTool::default();
+            self.draw = tools::for_command(id);
+            self.erase_drag.clear();
             self.engine.unlock();
             self.inference = None;
         } else if id == "file.exit" {
@@ -373,7 +389,10 @@ impl App {
             Tool::Select => {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
-            Tool::Line => self.line_tool(ui, &response, rect, viewport_px, &render_state.device),
+            Tool::Draw(_) => self.draw_tool(ui, &response, rect, viewport_px, &render_state.device),
+            Tool::Eraser => {
+                self.eraser_tool(ui, &response, rect, viewport_px, &render_state.device)
+            }
             _ => self.inference = None,
         }
 
@@ -418,17 +437,24 @@ impl App {
                     .project(p, viewport_px)
                     .map(|q| rect.min + egui::vec2(q.x as f32, q.y as f32) / ppp)
             };
-            line_tool::paint(
+            let previews = self
+                .draw
+                .as_ref()
+                .map(|d| d.preview(inf))
+                .unwrap_or_default();
+            let anchor = self.draw.as_ref().and_then(|d| d.anchor());
+            overlay::paint(
                 &ui.painter().with_clip_rect(rect),
                 to_screen,
-                self.line.anchor,
+                anchor,
+                &previews,
                 inf,
             );
         }
     }
 
-    /// Mouse and keys of the Line tool.
-    fn line_tool(
+    /// Mouse and keys of the drawing tools.
+    fn draw_tool(
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,
@@ -451,25 +477,29 @@ impl App {
             )
         });
         let [right, left, up, down, escape] = keys;
-        if right {
-            self.engine.toggle_axis_lock(mt_infer::Axis::Red);
-        }
-        if left {
-            self.engine.toggle_axis_lock(mt_infer::Axis::Green);
-        }
-        if up {
-            self.engine.toggle_axis_lock(mt_infer::Axis::Blue);
+        let Some(draw) = self.draw.as_mut() else {
+            return;
+        };
+        // Arrow keys lock the drawing plane of shape tools, the direction otherwise.
+        for (pressed, axis) in [
+            (right, mt_infer::Axis::Red),
+            (left, mt_infer::Axis::Green),
+            (up, mt_infer::Axis::Blue),
+        ] {
+            if pressed && !draw.lock_plane(axis) {
+                self.engine.toggle_axis_lock(axis);
+            }
         }
         if down {
             self.engine.toggle_parallel_lock(&self.geometry);
         }
         if escape {
-            self.line.anchor = None;
+            draw.cancel();
             self.engine.unlock();
         }
         // Holding Shift locks the current direction; releasing it unlocks.
         if shift && !self.shift_lock {
-            if let (Some(inf), Some(a)) = (&self.inference, self.line.anchor) {
+            if let (Some(inf), Some(a)) = (&self.inference, draw.anchor()) {
                 self.engine.lock_current(inf, a);
             }
             self.shift_lock = self.engine.is_locked();
@@ -478,43 +508,93 @@ impl App {
             self.shift_lock = false;
         }
 
-        let cursor = response.hover_pos().map(|p| {
-            DVec2::new(
-                f64::from((p.x - rect.min.x) * ppp),
-                f64::from((p.y - rect.min.y) * ppp),
-            )
-        });
+        let cursor = response
+            .hover_pos()
+            .or(response.interact_pointer_pos())
+            .map(|p| {
+                DVec2::new(
+                    f64::from((p.x - rect.min.x) * ppp),
+                    f64::from((p.y - rect.min.y) * ppp),
+                )
+            });
+        let anchor = draw.anchor();
         self.inference = cursor.map(|c| {
             let view = mt_infer::View {
                 camera: &self.camera,
                 viewport: viewport_px,
             };
             self.engine
-                .infer(&self.geometry, &self.bvh, view, c, self.line.anchor)
+                .infer(&self.geometry, &self.bvh, view, c, anchor)
         });
-        if response.clicked_by(egui::PointerButton::Primary)
-            && let Some(p) = self.inference.map(|i| i.point)
-        {
-            self.commit_point(p, device);
+        let (Some(inf), Some(doc)) = (self.inference, self.document.as_mut()) else {
+            return;
+        };
+        let root = &mut doc.model.root;
+        let primary = egui::PointerButton::Primary;
+        let changed = if response.clicked_by(primary) {
+            draw.click(root, &inf)
+        } else if response.drag_started_by(primary) {
+            draw.drag_start(root, &inf)
+        } else if response.drag_stopped_by(primary) {
+            draw.drag_end(root, &inf)
+        } else {
+            if response.dragged_by(primary) {
+                draw.drag_move(&inf);
+            }
+            false
+        };
+        if changed {
+            self.engine.unlock();
+            self.shift_lock = false;
+            self.rebuild(device);
         }
     }
 
-    /// A clicked or typed point for the Line tool: starts a segment, or ends one and
-    /// continues from its end. A segment that closes a face ends the chain.
-    fn commit_point(&mut self, p: DVec3, device: &wgpu::Device) {
-        let Some(a) = self.line.anchor else {
-            self.line.anchor = Some(p);
-            return;
+    /// The Eraser: click or drag over edges and components to erase them. Shift hides
+    /// instead, Ctrl softens and smooths, Ctrl+Shift unsoftens.
+    fn eraser_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        viewport_px: DVec2,
+        device: &wgpu::Device,
+    ) {
+        self.inference = None;
+        let ppp = ui.ctx().pixels_per_point();
+        let to_px = |p: egui::Pos2| {
+            DVec2::new(
+                f64::from((p.x - rect.min.x) * ppp),
+                f64::from((p.y - rect.min.y) * ppp),
+            )
         };
-        let Some(doc) = &mut self.document else {
-            return;
+        let pick = |app: &Self, p: egui::Pos2| {
+            selection::pick(&app.scene, &app.bvh, &app.camera, to_px(p), viewport_px)
+                .filter(|o| !matches!(o, Owner::Face(_)))
         };
-        let faces_before = doc.model.root.faces.len();
-        mt_kernel::add_line(&mut doc.model.root, a, p);
-        let closed = doc.model.root.faces.len() > faces_before;
-        self.line.anchor = (!closed).then_some(p);
-        self.engine.unlock();
-        self.shift_lock = false;
+        let primary = egui::PointerButton::Primary;
+        let pos = response.interact_pointer_pos();
+        let mut done: Vec<Owner> = Vec::new();
+        if response.clicked_by(primary) {
+            done.extend(pos.and_then(|p| pick(self, p)));
+        } else if response.dragged_by(primary) || response.drag_started_by(primary) {
+            if let Some(o) = pos.and_then(|p| pick(self, p))
+                && !self.erase_drag.contains(&o)
+            {
+                self.erase_drag.push(o);
+                self.select(device, Mode::Replace, self.erase_drag.clone());
+            }
+        } else if response.drag_stopped_by(primary) {
+            done = std::mem::take(&mut self.erase_drag);
+            self.selection.clear();
+        }
+        if done.is_empty() {
+            return;
+        }
+        let mods = ui.input(|i| i.modifiers);
+        if let Some(doc) = &mut self.document {
+            doc.erase(&done, mods.shift, mods.command);
+        }
         self.rebuild(device);
     }
 
@@ -630,6 +710,25 @@ impl App {
         };
         let root = &doc.model.root;
         let inches = |v: f64| format!("{v:.3}\"");
+        // All selected edges belong to one curve: describe the curve.
+        let curve = items.first().and_then(|o| match o {
+            Owner::Edge(e) => root.edges.get(*e).and_then(|x| x.attrs.curve),
+            _ => None,
+        });
+        if let Some(c) = curve
+            && let Some(cv) = root.curves.get(c)
+            && items.iter().all(|o| matches!(o, Owner::Edge(e) if root.edges.get(*e).and_then(|x| x.attrs.curve) == Some(c)))
+        {
+            let units = doc.units;
+            let segments = ("Segments".to_owned(), items.len().to_string());
+            return match cv.arc {
+                Some(arc) => mt_ui::EntityInfo {
+                    title: if arc.is_circle() { "Circle" } else { "Arc" }.into(),
+                    rows: vec![("Radius".into(), units.format(arc.radius)), segments],
+                },
+                None => mt_ui::EntityInfo { title: "Curve".into(), rows: vec![segments] },
+            };
+        }
         match items {
             [] => mt_ui::EntityInfo::no_selection(),
             [Owner::Edge(e)] if root.edges.contains_key(*e) => {
@@ -688,22 +787,19 @@ impl eframe::App for App {
         self.handle_shortcuts(ui.ctx(), frame, shell.is_typing());
 
         let info = self.entity_info();
-        let status = self.message.clone().unwrap_or_else(|| match self.tool {
-            Tool::Line => self.line.status().to_owned(),
-            t => t.hint().to_owned(),
-        });
+        let status = self
+            .message
+            .clone()
+            .unwrap_or_else(|| match (&self.draw, self.tool) {
+                (Some(d), Tool::Draw(_)) => d.status(),
+                (_, t) => t.hint().to_owned(),
+            });
         let units = self
             .document
             .as_ref()
             .map_or(mt_infer::units::LengthUnit::Inch, |d| d.units);
-        let (label, value) = match self.tool {
-            Tool::Line => (
-                "Length",
-                self.line
-                    .length(self.inference.as_ref())
-                    .map(|l| units.format(l))
-                    .unwrap_or_default(),
-            ),
+        let (label, value) = match (&self.draw, self.tool) {
+            (Some(d), Tool::Draw(_)) => d.measurement(self.inference.as_ref(), units),
             _ => ("Measurements", String::new()),
         };
         let spec = self.spec.clone();
@@ -723,13 +819,13 @@ impl eframe::App for App {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
                 mt_ui::Event::Measurements(text) => {
-                    if self.tool == Tool::Line
-                        && let Some(len) = mt_infer::units::parse_length(&text, units)
-                        && let Some(end) = self.line.typed_end(self.inference.as_ref(), len)
+                    if let (Some(draw), Some(doc)) = (self.draw.as_mut(), self.document.as_mut())
+                        && draw.typed(&mut doc.model.root, self.inference.as_ref(), &text, units)
                         && let Some(rs) = frame.wgpu_render_state()
                     {
                         let device = rs.device.clone();
-                        self.commit_point(end, &device);
+                        self.engine.unlock();
+                        self.rebuild(&device);
                     }
                 }
             }

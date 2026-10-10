@@ -254,6 +254,44 @@ impl Document {
         }
     }
 
+    /// The Eraser on picked entities. Erasing one segment of a curve erases the curve.
+    /// `hide` (Shift) hides edges instead, `soften` (Ctrl) softens and smooths them,
+    /// both together unsoften.
+    pub fn erase(&mut self, items: &[Owner], hide: bool, soften: bool) {
+        let root = &mut self.model.root;
+        let mut erase: Vec<Owner> = Vec::new();
+        for item in items {
+            match (*item, hide, soften) {
+                (Owner::Edge(e), true, true) => {
+                    if let Some(edge) = root.edges.get_mut(e) {
+                        edge.attrs.soft = false;
+                        edge.attrs.smooth = false;
+                    }
+                }
+                (Owner::Edge(e), false, true) => {
+                    if let Some(edge) = root.edges.get_mut(e) {
+                        edge.attrs.soft = true;
+                        edge.attrs.smooth = true;
+                    }
+                }
+                (Owner::Edge(e), true, false) => {
+                    if let Some(edge) = root.edges.get_mut(e) {
+                        edge.attrs.hidden = true;
+                    }
+                }
+                (Owner::Edge(e), false, false) => {
+                    match root.edges.get(e).and_then(|x| x.attrs.curve) {
+                        Some(c) => mt_kernel::erase_curve(root, c),
+                        None => erase.push(*item),
+                    }
+                }
+                (Owner::Instance(_), false, false) => erase.push(*item),
+                _ => {}
+            }
+        }
+        self.delete(&erase);
+    }
+
     pub fn extents_camera(&self, fov_deg: f64) -> Option<Camera> {
         let scene = self.scene();
         let points = scene

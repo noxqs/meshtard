@@ -140,7 +140,11 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] Not yet: center and intersection inferences, the hover delay SketchUp uses before acquiring points, inference on component geometry while editing inside it.
 
 ### M5: Drawing tools
-- Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arc variants, Eraser.
+- [x] Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arc (center), 2 Point Arc, 3 Point Arc, Pie, Eraser.
+- [x] Curves in the kernel: arcs, circles and freehand curves select, erase and report (Entity Info) as one entity.
+- [x] Shapes lie on the clicked face's plane or the ground; arrow keys lock the plane. Typed values: rectangle `w,h`, radius, `24s` sides/segments, arc bulge, arc angle.
+- [x] Eraser: click or drag; Shift hides, Ctrl softens/smooths, Ctrl+Shift unsoftens.
+- [ ] Not yet: square/golden-section and tangent/half-circle inferences, rectangle orientation on tilted faces as SketchUp does it, Eraser drag preview highlighting in SketchUp's style, undo.
 
 ### M6: Modeling tools
 - Push/Pull, Move/Copy (arrays), Rotate, Scale, Offset, Follow Me, Tape Measure, Protractor, Dimensions, Text, Intersect Faces.

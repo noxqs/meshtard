@@ -12,6 +12,7 @@ new_key_type! {
     pub struct EdgeId;
     pub struct FaceId;
     pub struct DefinitionId;
+    pub struct CurveId;
 }
 
 /// Index into `Model::materials`.
@@ -31,6 +32,51 @@ pub struct EdgeAttrs {
     pub smooth: bool,
     pub hidden: bool,
     pub layer: Option<LayerId>,
+    /// The curve (arc, circle, polyline) this edge is a segment of.
+    pub curve: Option<CurveId>,
+}
+
+/// An arc's geometry: points are `center + radius * (cos(a) * x_axis + sin(a) * y_axis)`
+/// for angles from `start_angle` to `end_angle` (radians).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Arc {
+    pub center: DVec3,
+    pub normal: DVec3,
+    pub x_axis: DVec3,
+    pub radius: f64,
+    pub start_angle: f64,
+    pub end_angle: f64,
+    pub segments: usize,
+}
+
+impl Arc {
+    pub fn y_axis(&self) -> DVec3 {
+        self.normal.cross(self.x_axis)
+    }
+
+    pub fn is_circle(&self) -> bool {
+        (self.end_angle - self.start_angle).abs() >= std::f64::consts::TAU - 1e-9
+    }
+
+    /// The `segments + 1` points along the arc (a circle repeats its first point).
+    pub fn points(&self) -> Vec<DVec3> {
+        let y = self.y_axis();
+        (0..=self.segments)
+            .map(|i| {
+                let a = self.start_angle
+                    + (self.end_angle - self.start_angle) * i as f64 / self.segments as f64;
+                self.center + (self.x_axis * a.cos() + y * a.sin()) * self.radius
+            })
+            .collect()
+    }
+}
+
+/// Edges that select and erase as one: SketchUp's curves and arc curves. Member edges
+/// point to their curve through `EdgeAttrs::curve`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Curve {
+    /// `None` for a free-form curve (Freehand).
+    pub arc: Option<Arc>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +160,7 @@ pub struct Entities {
     pub edges: SlotMap<EdgeId, Edge>,
     pub faces: SlotMap<FaceId, Face>,
     pub instances: Vec<Instance>,
+    pub curves: SlotMap<CurveId, Curve>,
 }
 
 impl Entities {
@@ -176,6 +223,15 @@ impl Entities {
         let q = plane.project(p);
         crate::geom::point_in_polygon(q, &outer)
             && !holes.iter().any(|h| crate::geom::point_in_polygon(q, h))
+    }
+
+    /// Edges of a curve.
+    pub fn curve_edges(&self, c: CurveId) -> Vec<EdgeId> {
+        self.edges
+            .iter()
+            .filter(|(_, e)| e.attrs.curve == Some(c))
+            .map(|(id, _)| id)
+            .collect()
     }
 
     pub fn find_vertex(&self, p: DVec3) -> Option<VertexId> {

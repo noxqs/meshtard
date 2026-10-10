@@ -1,47 +1,20 @@
-//! The Line tool: click a start point, click end points; each segment continues from the
-//! last end, until a face closes or Esc. Typing a length in the Measurements box makes
-//! the next segment that long in the current direction.
+//! Drawing-tool overlay: preview geometry, inference marker and tooltip.
 
 use glam::DVec3;
 use mt_infer::{Inference, Kind};
-
-#[derive(Debug, Default)]
-pub struct LineTool {
-    /// Start of the segment being drawn.
-    pub anchor: Option<DVec3>,
-}
-
-impl LineTool {
-    pub fn status(&self) -> &'static str {
-        if self.anchor.is_some() {
-            "Select end point or enter value."
-        } else {
-            "Select start point."
-        }
-    }
-
-    /// Length of the segment being drawn.
-    pub fn length(&self, current: Option<&Inference>) -> Option<f64> {
-        Some(current?.point.distance(self.anchor?))
-    }
-
-    /// End point for a typed length along the current direction.
-    pub fn typed_end(&self, current: Option<&Inference>, length: f64) -> Option<DVec3> {
-        let a = self.anchor?;
-        let d = (current?.point - a).normalize_or_zero();
-        (d != DVec3::ZERO && length != 0.0).then(|| a + d * length)
-    }
-}
 
 fn color32(c: [u8; 3]) -> egui::Color32 {
     egui::Color32::from_rgb(c[0], c[1], c[2])
 }
 
-/// Draws the rubber band, guide line, inference marker and tooltip.
+/// Draws the tool's preview polylines, the guide line, the inference marker and its
+/// tooltip. A single preview segment from `anchor` is the rubber band and takes the
+/// inference's color when it follows a direction.
 pub fn paint(
     painter: &egui::Painter,
     to_screen: impl Fn(DVec3) -> Option<egui::Pos2>,
     anchor: Option<DVec3>,
+    previews: &[Vec<DVec3>],
     inf: &Inference,
 ) {
     let Some(p) = to_screen(inf.point) else {
@@ -53,12 +26,13 @@ pub fn paint(
         let stroke = egui::Stroke::new(1.0, color32(inf.kind.color()));
         painter.extend(egui::Shape::dashed_line(&[a, b], stroke, 3.0, 3.0));
     }
-    if let Some(a) = anchor.and_then(&to_screen) {
-        let directional = matches!(
-            inf.kind,
-            Kind::Along(_) | Kind::Parallel | Kind::Perpendicular | Kind::FromPoint(_)
-        );
-        let (color, width) = if directional {
+    let directional = matches!(
+        inf.kind,
+        Kind::Along(_) | Kind::Parallel | Kind::Perpendicular | Kind::FromPoint(_)
+    );
+    for line in previews {
+        let rubber_band = previews.len() == 1 && line.len() == 2 && Some(line[0]) == anchor;
+        let (color, width) = if rubber_band && directional {
             (
                 color32(inf.kind.color()),
                 if inf.locked { 3.0 } else { 2.0 },
@@ -66,7 +40,10 @@ pub fn paint(
         } else {
             (egui::Color32::BLACK, 1.5)
         };
-        painter.line_segment([a, p], egui::Stroke::new(width, color));
+        let pts: Vec<egui::Pos2> = line.iter().filter_map(|p| to_screen(*p)).collect();
+        if pts.len() == line.len() {
+            painter.add(egui::Shape::line(pts, egui::Stroke::new(width, color)));
+        }
     }
 
     // Marker: dot for points, square for "on" inferences, diamond on faces.
@@ -120,27 +97,5 @@ pub fn paint(
             egui::StrokeKind::Inside,
         );
         painter.galley(pos + egui::vec2(4.0, 2.0), galley, egui::Color32::BLACK);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_length_follows_current_direction() {
-        let tool = LineTool {
-            anchor: Some(DVec3::ZERO),
-        };
-        let cur = Inference {
-            point: DVec3::new(3.0, 4.0, 0.0),
-            kind: Kind::Free,
-            edge: None,
-            guide: None,
-            locked: false,
-        };
-        assert_eq!(tool.length(Some(&cur)), Some(5.0));
-        let end = tool.typed_end(Some(&cur), 10.0).unwrap();
-        assert!((end - DVec3::new(6.0, 8.0, 0.0)).length() < 1e-12);
     }
 }

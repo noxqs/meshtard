@@ -90,6 +90,12 @@ impl Selection {
 
 /// What a click with `clicks` presses on `hit` selects.
 pub fn expand(ents: &Entities, hit: Owner, clicks: u32) -> Vec<Owner> {
+    // A click on one segment of a curve selects the whole curve.
+    if let (Owner::Edge(e), 0 | 1) = (hit, clicks)
+        && let Some(c) = ents.edges.get(e).and_then(|x| x.attrs.curve)
+    {
+        return ents.curve_edges(c).into_iter().map(Owner::Edge).collect();
+    }
     match (hit, clicks) {
         (_, 0 | 1) | (Owner::Instance(_), _) => vec![hit],
         (Owner::Face(f), 2) => {

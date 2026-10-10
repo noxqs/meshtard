@@ -406,3 +406,41 @@ fn heal_vertex(ents: &mut Entities, v: VertexId) {
         }
     }
 }
+
+/// Adds a polyline through `points` as one curve and returns its edges. Edges it reuses
+/// keep their old curve; pieces it creates join the new one. A closed planar polyline
+/// gets a face like any other loop.
+pub fn add_curve(
+    ents: &mut Entities,
+    points: &[DVec3],
+    arc: Option<crate::entities::Arc>,
+) -> Vec<EdgeId> {
+    let curve = ents.curves.insert(crate::entities::Curve { arc });
+    let mut edges = Vec::new();
+    for w in points.windows(2) {
+        let before: std::collections::HashSet<EdgeId> = ents.edges.keys().collect();
+        for e in add_line(ents, w[0], w[1]) {
+            if !before.contains(&e)
+                && let Some(edge) = ents.edges.get_mut(e)
+            {
+                edge.attrs.curve = Some(curve);
+            }
+            edges.push(e);
+        }
+    }
+    edges.retain(|e| ents.edges.contains_key(*e));
+    if ents.curve_edges(curve).is_empty() {
+        ents.curves.remove(curve);
+    }
+    edges
+}
+
+/// Erases every edge of a curve (SketchUp erases a curve as a whole).
+pub fn erase_curve(ents: &mut Entities, c: crate::entities::CurveId) {
+    for e in ents.curve_edges(c) {
+        if ents.edges.contains_key(e) {
+            erase_edge(ents, e);
+        }
+    }
+    ents.curves.remove(c);
+}

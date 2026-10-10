@@ -15,7 +15,7 @@ pub mod validate;
 
 pub use entities::*;
 pub use model::{Definition, Layer, Material, Model};
-pub use ops::{add_line, erase_edge};
+pub use ops::{add_curve, add_line, erase_curve, erase_edge};
 pub use validate::{Checks, validate};
 
 /// Distance below which two points are the same, in inches. SketchUp's internal tolerance
