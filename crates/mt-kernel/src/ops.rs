@@ -54,9 +54,12 @@ pub(crate) fn insert_line(
             (d <= TOL && interior(s, len) && interior(t, elen)).then(|| (id, ps + (pt - ps) * t))
         })
         .collect();
-    for (e, p) in crossing {
-        let w = ents.add_vertex(p);
-        ents.split_edge(e, w);
+    for (_, p) in crossing {
+        // A crossing within tolerance of a vertex goes through that vertex. Every edge
+        // passing within tolerance of the crossing is split there (the crossed edge, or
+        // its piece if an earlier crossing split it, and edges a shallow crossing grazes).
+        let w = ents.find_vertex(p).unwrap_or_else(|| ents.add_vertex(p));
+        snap_edges_to(ents, w);
     }
 
     // Every vertex on the line, in order.
@@ -74,6 +77,11 @@ pub(crate) fn insert_line(
         .chain(on_line.into_iter().map(|(_, v)| v))
         .chain(std::iter::once(vb))
         .collect();
+    // An existing edge running along the line within tolerance is split at the line's
+    // vertices, so the line reuses its pieces instead of doubling it.
+    for &w in &chain {
+        snap_edges_to(ents, w);
+    }
 
     let mut all = Vec::new();
     let mut created = Vec::new();
@@ -89,6 +97,65 @@ pub(crate) fn insert_line(
     }
     update_faces(ents, &created, auto_face);
     (all, created)
+}
+
+/// Splits every edge that passes within tolerance of vertex `w` (in its interior) at `w`.
+fn snap_edges_to(ents: &mut Entities, w: VertexId) {
+    let p = ents.pos(w);
+    let near: Vec<EdgeId> = ents
+        .edges
+        .iter()
+        .filter(|(_, e)| e.start != w && e.end != w)
+        .filter(|(_, e)| point_segment(p, ents.pos(e.start), ents.pos(e.end)).0 <= TOL)
+        .map(|(id, _)| id)
+        .collect();
+    for e in near {
+        if can_split_at(ents, e, w) {
+            split_edge_merging(ents, e, w);
+        }
+    }
+}
+
+/// Whether `e` can be split at `w` (which is not one of its ends).
+fn can_split_at(ents: &Entities, e: EdgeId, w: VertexId) -> bool {
+    ents.edges
+        .get(e)
+        .is_some_and(|edge| edge.start != w && edge.end != w)
+}
+
+/// Splits `e` at `w`; a half that duplicates an existing edge between the same vertices
+/// is merged into it (its faces use the existing edge).
+fn split_edge_merging(ents: &mut Entities, e: EdgeId, w: VertexId) {
+    let (s0, s1) = (ents.edges[e].start, ents.edges[e].end);
+    let twins = [ents.edge_between(s0, w), ents.edge_between(w, s1)];
+    let (a, b) = ents.split_edge(e, w);
+    for (half, twin) in [(a, twins[0]), (b, twins[1])] {
+        if let Some(y) = twin {
+            merge_edge_into(ents, half, y);
+        }
+    }
+}
+
+/// Replaces edge `x` by edge `y` (same two vertices) in every face, then removes `x`.
+fn merge_edge_into(ents: &mut Entities, x: EdgeId, y: EdgeId) {
+    let flip = ents.edges[x].start != ents.edges[y].start;
+    let faces = std::mem::take(&mut ents.edges[x].faces);
+    for f in faces {
+        for l in ents.faces[f].loops_mut() {
+            for c in &mut l.coedges {
+                if c.edge == x {
+                    *c = CoEdge {
+                        edge: y,
+                        reversed: c.reversed != flip,
+                    };
+                }
+            }
+        }
+        if !ents.edges[y].faces.contains(&f) {
+            ents.edges[y].faces.push(f);
+        }
+    }
+    ents.remove_edge(x);
 }
 
 /// The vertex at `p`: an existing one within tolerance, a new one splitting the edge

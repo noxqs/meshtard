@@ -219,7 +219,13 @@ fn check_face_overlap(ents: &Entities, err: &mut impl FnMut(String)) {
         .collect();
     for (f, p) in &samples {
         for g in ents.faces.keys() {
-            if g != *f && ents.face_contains(g, *p) {
+            // Coplanar only: faces may pass through each other (SketchUp does not
+            // intersect them unless asked), and a sample on the line where two planes
+            // cross is not an overlap.
+            if g != *f
+                && ents.face_plane(g).coincides(&ents.face_plane(*f))
+                && ents.face_contains(g, *p)
+            {
                 err(format!("faces {f:?} and {g:?} overlap"));
             }
         }

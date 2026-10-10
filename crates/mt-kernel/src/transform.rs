@@ -709,9 +709,21 @@ fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId
         ents.remove_vertex_if_unused(v);
     }
 
+    if std::env::var("MTDBG").is_ok() {
+        eprintln!(
+            "DBG before: {:?}",
+            crate::validate::validate(ents, crate::validate::Checks::ALL)
+        );
+    }
     for (a, b, attrs) in &segments {
         for e in insert_line(ents, *a, *b, false).1 {
             ents.edges[e].attrs = attrs.clone();
+        }
+        if std::env::var("MTDBG").is_ok() {
+            let errs = crate::validate::validate(ents, crate::validate::Checks::ALL);
+            if !errs.is_empty() {
+                eprintln!("DBG insert {a:.5?} {b:.5?}: {errs:?}");
+            }
         }
     }
     let desired = desired_faces(ents, &records);
