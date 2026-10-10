@@ -1,0 +1,38 @@
+# Default shortcuts of SketchUp 2026 (Windows).
+# DRAFT from memory. Replace with the real list: Window > Preferences > Shortcuts > Export.
+verified = false
+
+# Key syntax: modifiers joined with "+", in the order Ctrl, Shift, Alt. Keys use egui names.
+[bindings]
+"file.new" = "Ctrl+N"
+"file.open" = "Ctrl+O"
+"file.save" = "Ctrl+S"
+"file.print" = "Ctrl+P"
+"edit.undo" = "Ctrl+Z"
+"edit.redo" = "Ctrl+Y"
+"edit.cut" = "Ctrl+X"
+"edit.copy" = "Ctrl+C"
+"edit.paste" = "Ctrl+V"
+"edit.delete" = "Delete"
+"edit.select_all" = "Ctrl+A"
+"edit.select_none" = "Ctrl+T"
+"edit.invert_selection" = "Ctrl+Shift+I"
+"edit.make_component" = "G"
+"camera.orbit" = "O"
+"camera.pan" = "H"
+"camera.zoom" = "Z"
+"camera.zoom_window" = "Ctrl+Shift+W"
+"camera.zoom_extents" = "Shift+Z"
+"tool.select" = "Space"
+"tool.eraser" = "E"
+"tool.paint_bucket" = "B"
+"tool.line" = "L"
+"tool.arc_2pt" = "A"
+"tool.rectangle" = "R"
+"tool.circle" = "C"
+"tool.move" = "M"
+"tool.rotate" = "Q"
+"tool.scale" = "S"
+"tool.push_pull" = "P"
+"tool.offset" = "F"
+"tool.tape_measure" = "T"

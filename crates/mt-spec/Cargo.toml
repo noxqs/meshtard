@@ -1,0 +1,13 @@
+[package]
+name = "mt-spec"
+description = "Loads the SketchUp behavior spec (menus, keymap, default style) from spec/*.toml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

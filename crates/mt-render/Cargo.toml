@@ -1,0 +1,19 @@
+[package]
+name = "mt-render"
+description = "Camera and wgpu renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+bytemuck.workspace = true
+egui-wgpu.workspace = true
+mt-spec.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,254 @@
+# Menu bar of SketchUp 2026 (Windows).
+# DRAFT from memory. Every label, order and separator must be checked against the real app.
+# Item kinds: { id, label } command, { separator = true }, { label, items = [...] } submenu.
+# Shortcuts are not stored here; they come from keymap.toml by command id.
+verified = false
+
+[[menu]]
+label = "File"
+items = [
+  { id = "file.new", label = "New" },
+  { id = "file.new_from_template", label = "New from Template..." },
+  { id = "file.open", label = "Open..." },
+  { id = "file.save", label = "Save" },
+  { id = "file.save_as", label = "Save As..." },
+  { id = "file.save_copy_as", label = "Save A Copy As..." },
+  { id = "file.save_as_template", label = "Save As Template..." },
+  { id = "file.revert", label = "Revert" },
+  { separator = true },
+  { id = "file.send_to_layout", label = "Send to LayOut" },
+  { separator = true },
+  { id = "file.import", label = "Import..." },
+  { label = "Export", items = [
+    { id = "file.export_3d", label = "3D Model..." },
+    { id = "file.export_2d", label = "2D Graphic..." },
+    { id = "file.export_section", label = "Section Slice..." },
+    { id = "file.export_animation", label = "Animation..." },
+  ] },
+  { separator = true },
+  { id = "file.print_setup", label = "Print Setup..." },
+  { id = "file.print_preview", label = "Print Preview..." },
+  { id = "file.print", label = "Print..." },
+  { separator = true },
+  { id = "file.generate_report", label = "Generate Report..." },
+  { separator = true },
+  { id = "file.exit", label = "Exit" },
+]
+
+[[menu]]
+label = "Edit"
+items = [
+  { id = "edit.undo", label = "Undo" },
+  { id = "edit.redo", label = "Redo" },
+  { separator = true },
+  { id = "edit.cut", label = "Cut" },
+  { id = "edit.copy", label = "Copy" },
+  { id = "edit.paste", label = "Paste" },
+  { id = "edit.paste_in_place", label = "Paste In Place" },
+  { id = "edit.delete", label = "Delete" },
+  { id = "edit.delete_guides", label = "Delete Guides" },
+  { separator = true },
+  { id = "edit.select_all", label = "Select All" },
+  { id = "edit.select_none", label = "Select None" },
+  { id = "edit.invert_selection", label = "Invert Selection" },
+  { separator = true },
+  { id = "edit.hide", label = "Hide" },
+  { label = "Unhide", items = [
+    { id = "edit.unhide_selected", label = "Selected" },
+    { id = "edit.unhide_last", label = "Last" },
+    { id = "edit.unhide_all", label = "All" },
+  ] },
+  { id = "edit.lock", label = "Lock" },
+  { label = "Unlock", items = [
+    { id = "edit.unlock_selected", label = "Selected" },
+    { id = "edit.unlock_all", label = "All" },
+  ] },
+  { separator = true },
+  { id = "edit.create_group", label = "Create Group" },
+  { id = "edit.make_component", label = "Make Component..." },
+  { id = "edit.close_group", label = "Close Group/Component" },
+  { label = "Intersect Faces", items = [
+    { id = "edit.intersect_model", label = "With Model" },
+    { id = "edit.intersect_selection", label = "With Selection" },
+    { id = "edit.intersect_context", label = "With Context" },
+  ] },
+]
+
+[[menu]]
+label = "View"
+items = [
+  { id = "view.toolbars", label = "Toolbars..." },
+  { id = "view.scene_tabs", label = "Scene Tabs" },
+  { separator = true },
+  { id = "view.hidden_geometry", label = "Hidden Geometry" },
+  { id = "view.section_planes", label = "Section Planes" },
+  { id = "view.section_cuts", label = "Section Cuts" },
+  { id = "view.section_fill", label = "Section Fill" },
+  { id = "view.axes", label = "Axes" },
+  { id = "view.guides", label = "Guides" },
+  { id = "view.shadows", label = "Shadows" },
+  { id = "view.fog", label = "Fog" },
+  { separator = true },
+  { label = "Edge Style", items = [
+    { id = "view.edges", label = "Edges" },
+    { id = "view.back_edges", label = "Back Edges" },
+    { id = "view.profiles", label = "Profiles" },
+    { id = "view.depth_cue", label = "Depth Cue" },
+    { id = "view.extension", label = "Extension" },
+  ] },
+  { label = "Face Style", items = [
+    { id = "view.xray", label = "X-ray" },
+    { separator = true },
+    { id = "view.wireframe", label = "Wireframe" },
+    { id = "view.hidden_line", label = "Hidden Line" },
+    { id = "view.shaded", label = "Shaded" },
+    { id = "view.shaded_textures", label = "Shaded With Textures" },
+    { id = "view.monochrome", label = "Monochrome" },
+  ] },
+  { label = "Component Edit", items = [
+    { id = "view.hide_rest_of_model", label = "Hide Rest Of Model" },
+    { id = "view.hide_similar_components", label = "Hide Similar Components" },
+  ] },
+  { label = "Animation", items = [
+    { id = "view.anim_add_scene", label = "Add Scene" },
+    { id = "view.anim_update_scene", label = "Update Scene" },
+    { id = "view.anim_delete_scene", label = "Delete Scene" },
+    { separator = true },
+    { id = "view.anim_previous", label = "Previous Scene" },
+    { id = "view.anim_next", label = "Next Scene" },
+    { id = "view.anim_play", label = "Play" },
+    { id = "view.anim_settings", label = "Settings" },
+  ] },
+]
+
+[[menu]]
+label = "Camera"
+items = [
+  { id = "camera.previous", label = "Previous" },
+  { id = "camera.next", label = "Next" },
+  { label = "Standard Views", items = [
+    { id = "camera.view_top", label = "Top" },
+    { id = "camera.view_bottom", label = "Bottom" },
+    { id = "camera.view_front", label = "Front" },
+    { id = "camera.view_back", label = "Back" },
+    { id = "camera.view_left", label = "Left" },
+    { id = "camera.view_right", label = "Right" },
+    { id = "camera.view_iso", label = "Iso" },
+  ] },
+  { separator = true },
+  { id = "camera.parallel", label = "Parallel Projection" },
+  { id = "camera.perspective", label = "Perspective" },
+  { id = "camera.two_point", label = "Two-Point Perspective" },
+  { separator = true },
+  { id = "camera.match_new_photo", label = "Match New Photo..." },
+  { separator = true },
+  { id = "camera.orbit", label = "Orbit" },
+  { id = "camera.pan", label = "Pan" },
+  { id = "camera.zoom", label = "Zoom" },
+  { id = "camera.field_of_view", label = "Field of View" },
+  { id = "camera.zoom_window", label = "Zoom Window" },
+  { id = "camera.zoom_extents", label = "Zoom Extents" },
+  { separator = true },
+  { id = "camera.position", label = "Position Camera" },
+  { id = "camera.walk", label = "Walk" },
+  { id = "camera.look_around", label = "Look Around" },
+]
+
+[[menu]]
+label = "Draw"
+items = [
+  { label = "Lines", items = [
+    { id = "tool.line", label = "Line" },
+    { id = "tool.freehand", label = "Freehand" },
+  ] },
+  { label = "Arcs", items = [
+    { id = "tool.arc", label = "Arc" },
+    { id = "tool.arc_2pt", label = "2 Point Arc" },
+    { id = "tool.arc_3pt", label = "3 Point Arc" },
+    { id = "tool.pie", label = "Pie" },
+  ] },
+  { label = "Shapes", items = [
+    { id = "tool.rectangle", label = "Rectangle" },
+    { id = "tool.rotated_rectangle", label = "Rotated Rectangle" },
+    { id = "tool.circle", label = "Circle" },
+    { id = "tool.polygon", label = "Polygon" },
+  ] },
+  { label = "Sandbox", items = [
+    { id = "tool.sandbox_from_contours", label = "From Contours" },
+    { id = "tool.sandbox_from_scratch", label = "From Scratch" },
+  ] },
+]
+
+[[menu]]
+label = "Tools"
+items = [
+  { id = "tool.select", label = "Select" },
+  { id = "tool.eraser", label = "Eraser" },
+  { id = "tool.tag", label = "Tag" },
+  { id = "tool.paint_bucket", label = "Paint Bucket" },
+  { separator = true },
+  { id = "tool.move", label = "Move" },
+  { id = "tool.rotate", label = "Rotate" },
+  { id = "tool.scale", label = "Scale" },
+  { id = "tool.push_pull", label = "Push/Pull" },
+  { id = "tool.follow_me", label = "Follow Me" },
+  { id = "tool.offset", label = "Offset" },
+  { id = "tool.outer_shell", label = "Outer Shell" },
+  { label = "Solid Tools", items = [
+    { id = "tool.solid_intersect", label = "Intersect" },
+    { id = "tool.solid_union", label = "Union" },
+    { id = "tool.solid_subtract", label = "Subtract" },
+    { id = "tool.solid_trim", label = "Trim" },
+    { id = "tool.solid_split", label = "Split" },
+  ] },
+  { separator = true },
+  { id = "tool.tape_measure", label = "Tape Measure" },
+  { id = "tool.protractor", label = "Protractor" },
+  { id = "tool.axes", label = "Axes" },
+  { id = "tool.dimensions", label = "Dimensions" },
+  { id = "tool.text", label = "Text" },
+  { id = "tool.text_3d", label = "3D Text" },
+  { separator = true },
+  { id = "tool.section_plane", label = "Section Plane" },
+]
+
+[[menu]]
+label = "Window"
+items = [
+  { id = "window.model_info", label = "Model Info" },
+  { label = "Default Tray", items = [
+    { id = "window.tray_show", label = "Show Tray" },
+  ] },
+  { id = "window.manage_trays", label = "Manage Trays..." },
+  { separator = true },
+  { id = "window.entity_info", label = "Entity Info" },
+  { id = "window.components", label = "Components" },
+  { id = "window.materials", label = "Materials" },
+  { id = "window.styles", label = "Styles" },
+  { id = "window.tags", label = "Tags" },
+  { id = "window.scenes", label = "Scenes" },
+  { id = "window.shadows", label = "Shadows" },
+  { id = "window.fog", label = "Fog" },
+  { id = "window.soften_edges", label = "Soften Edges" },
+  { id = "window.outliner", label = "Outliner" },
+  { id = "window.instructor", label = "Instructor" },
+  { separator = true },
+  { id = "window.preferences", label = "Preferences" },
+]
+
+[[menu]]
+label = "Extensions"
+items = [
+  { id = "extensions.warehouse", label = "Extension Warehouse" },
+  { id = "extensions.manager", label = "Extension Manager" },
+]
+
+[[menu]]
+label = "Help"
+items = [
+  { id = "help.welcome", label = "Welcome to SketchUp" },
+  { id = "help.knowledge_center", label = "Knowledge Center" },
+  { id = "help.contact", label = "Contact Us" },
+  { separator = true },
+  { id = "help.about", label = "About" },
+]

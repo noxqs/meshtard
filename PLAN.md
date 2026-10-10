@@ -22,7 +22,7 @@ Rebuild the application from scratch by matching observable behavior (clean room
 |---|---|---|
 | [OpenSKP](https://github.com/iamahsanmehmood/openskp) | MIT | Primary. Port its C++ implementation (`core.cpp`, `legacy.cpp`, `create.cpp`, `edit.cpp`, about 5,200 lines) and `docs/BINARY_FORMAT.md` to Rust. Keep its copyright notice. Use its Python package as a test oracle. |
 | skppy (Blender Artists forum) | Not checked | Writes 2026-format (VFF) files, which OpenSKP cannot. Check its license before reading its code. Otherwise use it only as a black box to produce test files. |
-| Real SketchUp (Windows) | n/a | Ground truth for GUI, menus, hotkeys, tool behavior. Screenshots and recorded behavior go in `spec/`. |
+| Real SketchUp 2026 (Windows) | n/a | Ground truth for GUI, menus, hotkeys, tool behavior. Screenshots and recorded behavior go in `spec/`. |
 
 ## Architecture
 
@@ -100,9 +100,11 @@ SketchUp runs only on Windows and macOS, so the trial runs on one of those machi
 4. Automated part: the saved `.skp` files are loaded by meshtard, and the scripted scenarios are replayed through our tool API; the resulting geometry is compared with what SketchUp saved.
 
 ### M0: Skeleton and spec capture
-- Cargo workspace, CI (fmt, clippy, test) on Linux, optional CUDA job.
-- Capture from real SketchUp: full menu tree, default shortcuts (Preferences > Shortcuts), toolbar layout, default tray panels, status bar, Measurements box. Write into `spec/`.
-- Window with SketchUp's default camera, axes and ground.
+- [x] Cargo workspace, CI (fmt, clippy, test) on Linux. CUDA CI job added together with `mt-cuda`.
+- [x] Draft `spec/` from memory: menus, keymap, default model, trial checklist, scenario 00.
+- [x] Window with menu bar from `spec/`, status bar, Vulkan viewport: sky, ground, axes (dotted negative halves).
+- [x] Navigation: middle drag orbit, shift + middle drag pan, wheel zoom at cursor, Orbit/Pan/Zoom tools (O/H/Z), Space for Select.
+- [ ] Capture from real SketchUp 2026 during the trial (`spec/parity/TRIAL_CHECKLIST.md`) and correct the drafts.
 
 ### M1: `.skp` reading (port of OpenSKP)
 - VFF container (2021+) and legacy MFC CArchive (2013-2020).
@@ -158,6 +160,4 @@ Reading first means real SketchUp models are available for testing everything el
 
 ## Open questions
 
-- Which SketchUp version is the reference? Menus and tools differ between releases. Proposed: SketchUp 2026, Windows.
 - Is a test corpus of real `.skp` files available, across versions 2013 to 2026? The trial covers 2026; older versions need files from elsewhere.
-- Which machine runs the trial: Windows or macOS?

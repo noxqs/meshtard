@@ -1,0 +1,30 @@
+# What a new model looks like in SketchUp 2026 (Windows), default template.
+# DRAFT. Colors and camera are placeholders until measured from screenshots during the trial.
+verified = false
+
+# Internal unit is the inch, same as .skp.
+[camera]
+eye = [-300.0, -500.0, 120.0]
+target = [0.0, 0.0, 0.0]
+fov_deg = 35.0
+perspective = true
+
+[sky]
+enabled = true
+zenith = [0.64, 0.78, 0.92]
+horizon = [0.93, 0.95, 0.97]
+# Used when sky is disabled.
+background = [1.0, 1.0, 1.0]
+
+[ground]
+enabled = true
+color = [0.83, 0.82, 0.78]
+show_from_below = false
+
+[axes]
+x = [1.0, 0.0, 0.0]
+y = [0.0, 0.7, 0.0]
+z = [0.0, 0.0, 1.0]
+# Positive half solid, negative half dotted.
+dotted_negative = true
+width_px = 1.5
