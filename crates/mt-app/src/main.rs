@@ -1461,6 +1461,19 @@ impl eframe::App for App {
             return;
         };
         shell.capture_typing(ui.ctx());
+        // A .skp file dropped on the window opens it (SketchUp asks to save unsaved
+        // changes first; not implemented yet).
+        let dropped = ui.ctx().input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("skp")))
+        });
+        if let (Some(path), Some(rs)) = (dropped, frame.wgpu_render_state()) {
+            let device = rs.device.clone();
+            self.open(ui.ctx(), &device, &path);
+        }
         if let Some(doc) = &self.document
             && doc.title() != self.last_title
         {
