@@ -87,6 +87,18 @@ The renderer itself stays on Vulkan. CUDA results are shared with Vulkan through
 
 ## Milestones
 
+### Comparison with real SketchUp (runs alongside every milestone)
+
+SketchUp runs only on Windows and macOS, so the trial runs on one of those machines, not on the Linux dev box.
+
+1. **Before starting the trial**, write `spec/parity/*.md`: one scripted scenario per feature (e.g. "draw 1000 mm rectangle, push/pull 500 mm, erase top edge, expected result"). The trial clock is short, so the scripts are ready before it starts.
+2. **During the trial**, run every script in SketchUp and record:
+   - screenshots and short screen recordings into `spec/tools/` and `spec/ui/`
+   - the `.skp` file saved after each scenario into `tests/corpus/` (this is also the test corpus for the file format)
+   - menu tree, shortcut export, preferences into `spec/`
+3. **After**, run the same scripts in meshtard. `spec/parity/STATUS.md` tracks each feature as missing / differs / matches.
+4. Automated part: the saved `.skp` files are loaded by meshtard, and the scripted scenarios are replayed through our tool API; the resulting geometry is compared with what SketchUp saved.
+
 ### M0: Skeleton and spec capture
 - Cargo workspace, CI (fmt, clippy, test) on Linux, optional CUDA job.
 - Capture from real SketchUp: full menu tree, default shortcuts (Preferences > Shortcuts), toolbar layout, default tray panels, status bar, Measurements box. Write into `spec/`.
@@ -129,9 +141,13 @@ Reading first means real SketchUp models are available for testing everything el
 - VFF (2021+) writing: not covered by OpenSKP. Needs own research, or skppy if its license allows.
 - Test: files we write open in real SketchUp and in OpenSKP.
 
+### M9: Windows and macOS
+- Windows: Vulkan or DX12 via wgpu, CUDA works the same.
+- macOS: Metal via wgpu. No CUDA on macOS, so the CPU fallback (or a Metal compute path) is used there.
+- Native menu bar on macOS, matching the macOS SketchUp menus.
+
 ### Later
 - Ruby plugin API (kept in view).
-- Windows and macOS builds.
 
 ## Risks
 
@@ -143,4 +159,5 @@ Reading first means real SketchUp models are available for testing everything el
 ## Open questions
 
 - Which SketchUp version is the reference? Menus and tools differ between releases. Proposed: SketchUp 2026, Windows.
-- Is a test corpus of real `.skp` files available, across versions 2013 to 2026?
+- Is a test corpus of real `.skp` files available, across versions 2013 to 2026? The trial covers 2026; older versions need files from elsewhere.
+- Which machine runs the trial: Windows or macOS?
