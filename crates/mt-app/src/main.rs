@@ -27,8 +27,10 @@ const POINTS_PER_NOTCH: f32 = 40.0;
 
 /// Commands that do something today. Every other menu item is shown disabled.
 /// Models with fewer triangles build their pick index on the CPU: below this the GPU
-/// round trip costs more than it saves (draft threshold; measure on real models).
-const GPU_MIN_TRIANGLES: usize = 20_000;
+/// round trip (mostly host-side flattening and PCIe transfer) costs more than it saves.
+/// Measured on an RTX 4070 SUPER with `mt-cuda`'s `bench -- --sweep`: the GPU was 2x
+/// slower at 20k triangles, even around 50k-100k, and 2-2.6x faster from 100k to 2M.
+const GPU_MIN_TRIANGLES: usize = 100_000;
 
 const IMPLEMENTED: &[&str] = &[
     "file.open",
