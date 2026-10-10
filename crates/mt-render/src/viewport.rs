@@ -5,12 +5,13 @@
 
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::wgpu;
-use glam::{DVec2, DVec3, Mat4};
+use glam::{DVec2, DVec3, Mat4, Vec3};
 use mt_spec::DefaultModel;
 use wgpu::util::DeviceExt;
 
-use crate::camera::Camera;
+use crate::camera::{Camera, look_at_rh, orthographic_rh};
 use crate::mesh::{FaceBuffers, FaceVertex};
+use crate::section::SectionCut;
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -19,6 +20,10 @@ const SAMPLES: u32 = 4;
 const AXIS_LENGTH: f32 = 1.0e6;
 /// Dash length of the negative axis halves, in logical points.
 const AXIS_DASH: f32 = 2.0;
+const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Shadow map resolution, fitted to the bounds of all faces. One map for the whole
+/// model, so detail drops as the model grows (SketchUp's own quality is unknown).
+const SHADOW_SIZE: u32 = 2048;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -40,6 +45,33 @@ struct Globals {
     eye: [f32; 4],
     /// x: profile edge width in logical points, y: 1 when profiles are drawn.
     profile: [f32; 4],
+    /// World to shadow map clip space.
+    light_view_proj: [[f32; 4]; 4],
+    /// Section plane as (normal, -normal·point - tolerance); (0, 0, 0, -1) when off.
+    section: [f32; 4],
+    /// xyz: unit direction towards the sun (zero below the horizon), w: 1 when shadow
+    /// lighting is on.
+    sun: [f32; 4],
+    /// x: light, y: dark, z: 1 when faces receive shadows, w: 1 when the ground does.
+    shadow: [f32; 4],
+    /// x: world size of a shadow texel, y: 1 / shadow map size.
+    shadow_texel: [f32; 4],
+}
+
+/// SketchUp's Shadows panel. Draft: the lighting and shadow look only roughly
+/// follow SketchUp (see [`Viewport::set_shadows`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shadows {
+    /// Direction from the ground towards the sun, e.g. from [`crate::sun_direction`].
+    /// Need not be unit length. At or below the horizon (z <= 0) nothing casts shadows.
+    pub sun_dir: [f32; 3],
+    /// The panel's Light and Dark sliders (0..100) mapped to 0..1.
+    pub light: f32,
+    pub dark: f32,
+    /// "On faces": faces receive shadows.
+    pub on_faces: bool,
+    /// "On ground": the ground plane z = 0 receives shadows.
+    pub on_ground: bool,
 }
 
 /// One line segment, drawn as a screen-space quad.
@@ -175,6 +207,99 @@ fn axis_segments(axes: &AxesStyle) -> Vec<Segment> {
     out
 }
 
+/// The sun's depth map and the bind group the color passes sample it through.
+struct ShadowMap {
+    size: u32,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
+
+impl ShadowMap {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        size: u32,
+    ) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow map"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow map"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        Self {
+            size,
+            view,
+            bind_group,
+        }
+    }
+}
+
+/// Orthographic sun projection fitted around the box `bounds`, and the world size of
+/// one shadow map texel. `sun` is the unit direction towards the sun.
+fn fit_sun(sun: Vec3, bounds: (Vec3, Vec3)) -> (Mat4, f32) {
+    let (lo, hi) = (bounds.0.as_dvec3(), bounds.1.as_dvec3());
+    let sun = sun.as_dvec3();
+    let center = (lo + hi) * 0.5;
+    let radius = (hi - lo).length().max(1.0);
+    let up = if sun.z.abs() > 0.99 {
+        DVec3::Y
+    } else {
+        DVec3::Z
+    };
+    let view = look_at_rh(center + sun * radius * 2.0, center, up);
+    let (mut min, mut max) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+    for i in 0..8 {
+        let corner = DVec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let p = view.transform_point3(corner);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    // A couple of texels of margin, so PCF at the rim does not read past the casters.
+    let extent = (max.x - min.x).max(max.y - min.y).max(1e-3);
+    let pad = extent * 2.0 / f64::from(SHADOW_SIZE);
+    let depth_pad = radius * 0.01;
+    let proj = orthographic_rh(
+        min.x - pad,
+        max.x + pad,
+        min.y - pad,
+        max.y + pad,
+        -max.z - depth_pad,
+        -min.z + depth_pad,
+    );
+    (
+        (proj * view).as_mat4(),
+        ((extent + 2.0 * pad) / f64::from(SHADOW_SIZE)) as f32,
+    )
+}
+
 struct Targets {
     size: [u32; 2],
     msaa: wgpu::TextureView,
@@ -226,6 +351,15 @@ pub struct Viewport {
     bind_group: wgpu::BindGroup,
     background: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    /// Lines the section plane does not clip (axes).
+    overlay_lines: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_layout: wgpu::BindGroupLayout,
+    shadow_sampler: wgpu::Sampler,
+    /// 1x1 while shadows have never been on.
+    shadow_map: ShadowMap,
+    shadows: Option<Shadows>,
+    section: Option<SectionCut>,
     faces_opaque: wgpu::RenderPipeline,
     faces_translucent: wgpu::RenderPipeline,
     faces: Option<FaceBuffers>,
@@ -269,9 +403,39 @@ impl Viewport {
                 resource: globals.as_entire_binding(),
             }],
         });
+        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow map"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow map"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            // Lit when the receiver is not farther from the sun than the nearest caster.
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_map = ShadowMap::new(device, &shadow_layout, &shadow_sampler, 1);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(&shadow_layout)],
             immediate_size: 0,
         });
 
@@ -330,6 +494,14 @@ impl Viewport {
             "lines",
             "line_vs",
             "line_fs",
+            &[Some(segment_layout.clone())],
+            true,
+            alpha,
+        );
+        let overlay_lines = pipeline(
+            "overlay lines",
+            "line_vs",
+            "overlay_line_fs",
             &[Some(segment_layout)],
             true,
             alpha,
@@ -344,8 +516,7 @@ impl Viewport {
             Some(wgpu::BlendState::REPLACE),
         );
         // No depth write: translucent faces neither hide each other nor what is
-        // drawn after them. They are not sorted, so overlapping ones blend in
-        // submission order.
+        // drawn after them. They are sorted back to front per triangle before drawing.
         let faces_translucent = pipeline(
             "translucent faces",
             "face_vs",
@@ -365,11 +536,58 @@ impl Viewport {
             alpha,
         );
 
+        // Depth from the sun, regular Z (cleared to 1, nearer is smaller). Slope-scaled
+        // bias against self-shadowing acne, on top of the normal offset in the shader.
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shadow map"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow map"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("shadow_vs"),
+                compilation_options: Default::default(),
+                buffers: &faces,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SHADOW_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("shadow_fs"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let mut viewport = Self {
             globals,
             bind_group,
             background,
             lines,
+            overlay_lines,
+            shadow_pipeline,
+            shadow_layout,
+            shadow_sampler,
+            shadow_map,
+            shadows: None,
+            section: None,
             faces_opaque,
             faces_translucent,
             faces: None,
@@ -414,6 +632,25 @@ impl Viewport {
         self.selected = FaceBuffers::new(device, vertices, indices);
     }
 
+    /// Sets or clears the section plane. Faces (including selected ones) and model
+    /// edges on the side the normal points to are discarded per fragment, and do not
+    /// cast shadows; axes are not clipped. Geometry within a small tolerance of the plane
+    /// is kept so cut edges from [`crate::section_lines`] lying in it stay visible. The
+    /// cut is not capped (no section fill).
+    pub fn set_section(&mut self, plane: Option<SectionCut>) {
+        self.section = plane;
+    }
+
+    /// Sets or clears sun shadows. While set, faces are shaded by the sun instead of
+    /// the style's light: `dark + light * max(0, n·sun) * visibility`, clamped to 1,
+    /// with `visibility` from a shadow map when `on_faces` (1 otherwise). With the sun
+    /// at or below the horizon everything gets `dark` alone and nothing casts shadows.
+    /// Shadowed ground keeps the ratio a horizontal face would have. A draft: SketchUp's
+    /// exact formula, shadow softness and bias are not known.
+    pub fn set_shadows(&mut self, shadows: Option<Shadows>) {
+        self.shadows = shadows;
+    }
+
     pub fn set_style(&mut self, device: &wgpu::Device, style: Style) {
         let segments = style.axes.as_ref().map(axis_segments).unwrap_or_default();
         self.axes_count = segments.len() as u32;
@@ -439,6 +676,32 @@ impl Viewport {
         let size = [size[0].max(1), size[1].max(1)];
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(device, size));
+        }
+
+        // Sun: lighting whenever shadows are set, a shadow map only when it is up and
+        // something receives shadows.
+        let sun = self
+            .shadows
+            .map(|s| Vec3::from(s.sun_dir).normalize_or_zero())
+            .filter(|d| d.z > 0.0);
+        let shadow_fit = match (self.shadows, sun, &self.faces) {
+            (Some(s), Some(sun), Some(faces)) if s.on_faces || s.on_ground => {
+                Some(fit_sun(sun, faces.bounds))
+            }
+            _ => None,
+        };
+        if shadow_fit.is_some() && self.shadow_map.size != SHADOW_SIZE {
+            self.shadow_map = ShadowMap::new(
+                device,
+                &self.shadow_layout,
+                &self.shadow_sampler,
+                SHADOW_SIZE,
+            );
+        }
+        if let Some(faces) = &mut self.faces {
+            let eye = camera.eye.as_vec3();
+            let forward = camera.forward().as_vec3();
+            faces.sort_translucent(queue, eye, forward, camera.perspective);
         }
         let targets = self.targets.as_ref().expect("targets just created");
 
@@ -491,10 +754,71 @@ impl Viewport {
                 0.0,
                 0.0,
             ],
+            light_view_proj: shadow_fit
+                .map_or(Mat4::IDENTITY, |(m, _)| m)
+                .to_cols_array_2d(),
+            section: self
+                .section
+                .and_then(|cut| {
+                    let n = Vec3::from(cut.normal).try_normalize()?;
+                    let p = Vec3::from(cut.point);
+                    // Keep what is within float noise of the plane (cut edges lie in it).
+                    let tolerance = 1e-5 * (1.0 + p.abs().max_element());
+                    Some([n.x, n.y, n.z, -n.dot(p) - tolerance])
+                })
+                .unwrap_or([0.0, 0.0, 0.0, -1.0]),
+            sun: {
+                let d = sun.unwrap_or(Vec3::ZERO);
+                [d.x, d.y, d.z, f32::from(u8::from(self.shadows.is_some()))]
+            },
+            shadow: {
+                let s = self.shadows.unwrap_or(Shadows {
+                    sun_dir: [0.0; 3],
+                    light: 0.0,
+                    dark: 0.0,
+                    on_faces: false,
+                    on_ground: false,
+                });
+                let mapped = shadow_fit.is_some();
+                [
+                    s.light.clamp(0.0, 1.0),
+                    s.dark.clamp(0.0, 1.0),
+                    f32::from(u8::from(mapped && s.on_faces)),
+                    f32::from(u8::from(mapped && s.on_ground)),
+                ]
+            },
+            shadow_texel: [
+                shadow_fit.map_or(0.0, |(_, texel)| texel),
+                1.0 / self.shadow_map.size as f32,
+                0.0,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
         let mut encoder = device.create_command_encoder(&Default::default());
+        if let (Some(_), Some(faces)) = (shadow_fit, &self.faces) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow map"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_map.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_vertex_buffer(0, faces.vertices.slice(..));
+            pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..faces.translucent.end, 0, 0..1);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport"),
@@ -520,6 +844,7 @@ impl Viewport {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(1, &self.shadow_map.bind_group, &[]);
             pass.set_pipeline(&self.background);
             pass.draw(0..3, 0..1);
             // Order: opaque faces, then edges and axes, which are pulled towards the
@@ -551,7 +876,7 @@ impl Viewport {
                 pass.draw(0..6, 0..self.edges_count);
             }
             if let Some(axes) = &self.axes {
-                pass.set_pipeline(&self.lines);
+                pass.set_pipeline(&self.overlay_lines);
                 pass.set_vertex_buffer(0, axes.slice(..));
                 pass.draw(0..6, 0..self.axes_count);
             }

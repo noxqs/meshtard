@@ -200,7 +200,7 @@ impl Camera {
     }
 }
 
-fn look_at_rh(eye: DVec3, target: DVec3, up: DVec3) -> DMat4 {
+pub(crate) fn look_at_rh(eye: DVec3, target: DVec3, up: DVec3) -> DMat4 {
     let f = (target - eye).normalize();
     let s = f.cross(up).normalize();
     let u = s.cross(f);
@@ -224,7 +224,14 @@ fn perspective_infinite_reverse_rh(fov_y: f64, aspect: f64, near: f64) -> DMat4 
 }
 
 /// Maps view-space `-near..-far` to depth `0..1`.
-fn orthographic_rh(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> DMat4 {
+pub(crate) fn orthographic_rh(
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+    near: f64,
+    far: f64,
+) -> DMat4 {
     let rw = 1.0 / (right - left);
     let rh = 1.0 / (top - bottom);
     let r = 1.0 / (near - far);

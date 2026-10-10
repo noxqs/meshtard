@@ -22,9 +22,49 @@ struct Globals {
     eye: vec4<f32>,
     // x: profile width in logical points, y: 1 when profiles are drawn.
     profile: vec4<f32>,
+    // World to shadow map clip space (orthographic, depth 0..1, regular Z).
+    light_view_proj: mat4x4<f32>,
+    // Section plane: points with dot(xyz, p) + w > 0 are clipped. (0, 0, 0, -1) when off.
+    section: vec4<f32>,
+    // xyz: unit direction towards the sun (zero below the horizon), w: 1 when shadow
+    // lighting (sun + light/dark) replaces the style's shading.
+    sun: vec4<f32>,
+    // x: light, y: dark, z: 1 when faces receive shadows, w: 1 when the ground does.
+    shadow: vec4<f32>,
+    // x: world size of one shadow map texel, y: 1 / shadow map size.
+    shadow_texel: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
+@group(1) @binding(0) var shadow_map: texture_depth_2d;
+@group(1) @binding(1) var shadow_sampler: sampler_comparison;
+
+fn section_clipped(p: vec3<f32>) -> bool {
+    return dot(g.section.xyz, p) + g.section.w > 0.0;
+}
+
+// Fraction of the sun reaching `p` (1 = lit), 5x5 PCF over the shadow map. `n` is the
+// visible side's normal; the sample point is pushed along it by a texel or two so a
+// surface does not shadow itself.
+fn sun_visibility(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let offset = p + n * (g.shadow_texel.x * 1.5);
+    let c = g.light_view_proj * vec4<f32>(offset, 1.0);
+    let ndc = c.xyz / c.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return 1.0;
+    }
+    // Receivers past the far plane (the ground under the model) are behind every caster.
+    let depth = min(ndc.z, 1.0);
+    var sum = 0.0;
+    for (var y = -2; y <= 2; y++) {
+        for (var x = -2; x <= 2; x++) {
+            let o = vec2<f32>(f32(x), f32(y)) * g.shadow_texel.y;
+            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, depth);
+        }
+    }
+    return sum / 25.0;
+}
 
 // ---------------------------------------------------------------- background
 
@@ -56,14 +96,24 @@ fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
     let ground_on = g.ground.w > 0.5;
     let from_below = g.background.w > 0.5;
     let hits_ground = (origin.z > 0.0 && dir.z < 0.0) || (from_below && origin.z < 0.0 && dir.z > 0.0);
+    var color = g.background.rgb;
     if (ground_on && hits_ground) {
-        return vec4<f32>(g.ground.rgb, 1.0);
-    }
-    if (g.sky_horizon.w > 0.5) {
+        color = g.ground.rgb;
+    } else if (g.sky_horizon.w > 0.5) {
         let t = pow(clamp(dir.z, 0.0, 1.0), 0.5);
-        return vec4<f32>(mix(g.sky_horizon.rgb, g.sky_zenith.rgb, t), 1.0);
+        color = mix(g.sky_horizon.rgb, g.sky_zenith.rgb, t);
     }
-    return vec4<f32>(g.background.rgb, 1.0);
+    // Shadows on the ground plane z = 0, seen from above. Unshadowed ground keeps its
+    // color; shadowed ground is scaled by dark / (dark + light * sun.z), the ratio the
+    // face shading would give a horizontal face.
+    if (g.shadow.w > 0.5 && origin.z > 0.0 && dir.z < 0.0) {
+        let p = origin + dir * (-origin.z / dir.z);
+        let lit = min(g.shadow.y + g.shadow.x * g.sun.z, 1.0);
+        let dark = min(g.shadow.y, lit);
+        let v = sun_visibility(p, vec3<f32>(0.0, 0.0, 1.0));
+        color *= mix(dark / max(lit, 1e-4), 1.0, v);
+    }
+    return vec4<f32>(color, 1.0);
 }
 
 // ---------------------------------------------------------------- faces
@@ -81,6 +131,7 @@ struct FaceOut {
     @location(0) normal: vec3<f32>,
     @location(1) front: vec4<f32>,
     @location(2) back: vec4<f32>,
+    @location(3) world: vec3<f32>,
 };
 
 @vertex
@@ -90,26 +141,67 @@ fn face_vs(v: FaceVertex) -> FaceOut {
     out.normal = v.normal;
     out.front = v.front;
     out.back = v.back;
+    out.world = v.position;
     return out;
 }
 
 @fragment
 fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (section_clipped(in.world)) {
+        discard;
+    }
     let color = select(in.back, in.front, front);
     let n = normalize(select(-in.normal, in.normal, front));
-    let ambient = g.light.w;
-    let shade = ambient + (1.0 - ambient) * max(0.0, dot(n, g.light.xyz));
+    var shade: f32;
+    if (g.sun.w > 0.5) {
+        // Draft of SketchUp's shadow lighting: ambient "dark" plus "light" times the
+        // sun's diffuse term, the latter only where the sun reaches.
+        let diffuse = max(0.0, dot(n, g.sun.xyz));
+        var v = 1.0;
+        if (g.shadow.z > 0.5 && diffuse > 0.0) {
+            v = sun_visibility(in.world, n);
+        }
+        shade = min(g.shadow.y + g.shadow.x * diffuse * v, 1.0);
+    } else {
+        let ambient = g.light.w;
+        shade = ambient + (1.0 - ambient) * max(0.0, dot(n, g.light.xyz));
+    }
     return vec4<f32>(color.rgb * shade, color.a);
 }
 
 // SketchUp marks selected faces with a grid of blue dots.
 @fragment
 fn select_fs(in: FaceOut) -> @location(0) vec4<f32> {
+    if (section_clipped(in.world)) {
+        discard;
+    }
     let p = vec2<u32>(in.pos.xy);
     if (p.x % 3u != 0u || p.y % 3u != 0u) {
         discard;
     }
     return vec4<f32>(0.0, 0.0, 1.0, 1.0);
+}
+
+// ---------------------------------------------------------------- shadow map
+
+// Depth from the sun. Faces less than 70% opaque cast no shadow (SketchUp's rule as
+// commonly documented; unverified) and clipped-away geometry casts none either.
+@vertex
+fn shadow_vs(v: FaceVertex) -> FaceOut {
+    var out: FaceOut;
+    out.pos = g.light_view_proj * vec4<f32>(v.position, 1.0);
+    out.normal = v.normal;
+    out.front = v.front;
+    out.back = v.back;
+    out.world = v.position;
+    return out;
+}
+
+@fragment
+fn shadow_fs(in: FaceOut) {
+    if (section_clipped(in.world) || max(in.front.a, in.back.a) < 0.7) {
+        discard;
+    }
 }
 
 // ---------------------------------------------------------------- lines
@@ -148,16 +240,17 @@ struct LineOut {
     @location(1) @interpolate(flat) start_dir: vec4<f32>,
     // x: width in pixels, y: dash length in pixels.
     @location(2) @interpolate(flat) style: vec2<f32>,
+    // World position along the segment, for the section plane.
+    @location(3) world: vec3<f32>,
 };
 
-// Pulls a clip-space point onto the near plane along the segment.
-fn clip_near(p: vec4<f32>, q: vec4<f32>) -> vec4<f32> {
+// How far along p -> q to move p to put it on the near plane (0 when in front of it).
+fn clip_near_t(p: vec4<f32>, q: vec4<f32>) -> f32 {
     let min_w = g.viewport.w;
     if (p.w >= min_w) {
-        return p;
+        return 0.0;
     }
-    let t = (min_w - p.w) / (q.w - p.w);
-    return mix(p, q, t);
+    return (min_w - p.w) / (q.w - p.w);
 }
 
 // Line quads have the edge's depth across their whole width, but a face through the
@@ -189,10 +282,13 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
-    // Clip `b` against the unclipped `a`.
+    let ta = clip_near_t(ca, cb);
+    let tb = clip_near_t(cb, ca);
     let ca0 = ca;
-    ca = clip_near(ca, cb);
-    cb = clip_near(cb, ca0);
+    ca = mix(ca0, cb, ta);
+    cb = mix(cb, ca0, tb);
+    let wa = mix(s.a, s.b, ta);
+    let wb = mix(s.b, s.a, tb);
 
     let size = g.viewport.xy;
     let ppp = g.viewport.z;
@@ -222,14 +318,29 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     let ndc = screen / size * 2.0 - 1.0;
     out.pos = vec4<f32>(ndc * c.w, pull_depth(c, half), c.w);
     out.color = s.color;
+    out.world = select(wa, wb, end > 0.5);
     // Framebuffer y runs down; everything above uses y up.
     out.start_dir = vec4<f32>(sa.x, size.y - sa.y, dir.x, -dir.y);
     out.style = vec2<f32>(width * ppp, s.style.y * ppp);
     return out;
 }
 
+// Model edges: clipped by the section plane.
 @fragment
 fn line_fs(in: LineOut) -> @location(0) vec4<f32> {
+    if (section_clipped(in.world)) {
+        discard;
+    }
+    return line_color(in);
+}
+
+// Axes and other overlays: never clipped.
+@fragment
+fn overlay_line_fs(in: LineOut) -> @location(0) vec4<f32> {
+    return line_color(in);
+}
+
+fn line_color(in: LineOut) -> vec4<f32> {
     let width = in.style.x;
     let dash = in.style.y;
     let rel = in.pos.xy - in.start_dir.xy;

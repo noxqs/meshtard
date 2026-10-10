@@ -2,8 +2,12 @@
 
 pub mod camera;
 pub mod mesh;
+pub mod section;
+pub mod sun;
 pub mod viewport;
 
 pub use camera::{Camera, Ray};
 pub use mesh::FaceVertex;
-pub use viewport::{Light, Segment, ShadingStyle, Style, Viewport};
+pub use section::{SectionCut, section_lines};
+pub use sun::sun_direction;
+pub use viewport::{Light, Segment, ShadingStyle, Shadows, Style, Viewport};

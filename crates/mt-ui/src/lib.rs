@@ -34,14 +34,47 @@
 //!     is_checked: &|_id| false,
 //!     entity_info: &info,
 //! };
+//! shell.set_tray_data(mt_ui::TrayData::default()); // tags, materials, scenes, ...
 //! for event in shell.show(ui, &frame, |ui| { /* draw the 3D view in ui */ }) {
 //!     match event {
 //!         mt_ui::Event::Command(id) => { /* run the command */ }
 //!         mt_ui::Event::Measurements(text) => { /* parse the typed value */ }
+//!         mt_ui::Event::SceneActivate(i) => { /* restore scene i */ }
+//!         _ => {} // `Event` is non_exhaustive
 //!     }
 //! }
 //! # }
 //! ```
+//!
+//! # Tray panels and scene tabs
+//!
+//! Besides Entity Info (from [`Frame::entity_info`]), the tray panels show a
+//! [`TrayData`] the app passes to [`Shell::set_tray_data`] before [`Shell::show`]
+//! (every frame or whenever the model changes). It uses plain data only: indices,
+//! index paths and `[u8; 3]` sRGB colors. What the user does comes back as [`Event`]s,
+//! only on user action:
+//!
+//! | Panel     | Shows                                         | Events |
+//! |-----------|-----------------------------------------------|--------|
+//! | Tags      | [`TrayData::tags`] (0 = "Untagged"), eye, color swatch, pencil on [`TrayData::active_tag`]; double-click renames | [`Event::TagAdd`], [`Event::TagDelete`], [`Event::TagRename`], [`Event::TagVisible`], [`Event::TagActive`], [`Event::TagColor`] |
+//! | Materials | "In Model" grid of [`TrayData::materials`], current material preview, Edit tab (name, color, opacity) | [`Event::MaterialPick`], [`Event::MaterialEdit`] |
+//! | Outliner  | [`TrayData::outliner`] tree under [`TrayData::outliner_root`], filter field | [`Event::OutlinerSelect`] |
+//! | Scenes    | [`TrayData::scenes`], [`TrayData::active_scene`] | [`Event::SceneAdd`], [`Event::SceneDelete`], [`Event::SceneUpdate`], [`Event::SceneActivate`] |
+//! | Styles    | [`TrayData::style`]: edges, profiles, section cut width, face style, X-ray | [`Event::StyleChanged`] |
+//! | Shadows   | [`TrayData::shadows`]: on/off, time, date, light, dark, on faces/ground | [`Event::ShadowsChanged`] |
+//!
+//! When [`TrayData::scene_tabs`] is on and there are scenes, [`Shell::show`] draws a
+//! strip of scene tabs between the toolbars and the viewport (the viewport closure
+//! gets the rect below it); clicking a tab emits [`Event::SceneActivate`], its
+//! context menu Update / Add / Delete.
+//!
+//! The shell applies a picked material and edited style, shadow and material values
+//! to its copy of the data at once so controls respond without waiting for the app;
+//! the next [`Shell::set_tray_data`] replaces that copy. Expand state, the Outliner
+//! filter, the selected tag and the open tabs are shell UI state.
+//!
+//! Pure helpers are public for tests and reuse: [`outliner_rows`] (flattening and
+//! filtering), [`OutlinerNode::label`], [`time_label`], [`date_label`].
 //!
 //! # Measurements box
 //!
@@ -61,16 +94,23 @@
 
 pub mod icons;
 mod menu;
+mod panels;
 mod status;
 mod theme;
 mod toolbar;
 mod tray;
+mod tray_data;
 
 use std::collections::{BTreeMap, HashMap};
 
 use mt_spec::Spec;
 
 pub use theme::apply as apply_theme;
+pub use tray_data::{
+    FaceStyle, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow, SelectMode, ShadowSettings,
+    StyleSettings, TagRow, TrayData, date_label, day_of_year, month_day, outliner_node,
+    outliner_rows, time_label,
+};
 
 /// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection")
 /// and rows of label and value (e.g. "Length", "1000 mm").
@@ -109,12 +149,60 @@ pub struct Frame<'a> {
 
 /// Something the user did in the shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// A menu item or toolbar button was clicked: a command id from `menus.toml`.
     Command(String),
     /// Text entered in the Measurements box and confirmed with Enter.
     Measurements(String),
+
+    /// Tags: "Add Tag" clicked.
+    TagAdd,
+    /// Tags: "Delete Tag" clicked with this tag selected (never 0, "Untagged").
+    TagDelete(usize),
+    /// Tags: tag renamed by double-click editing (never 0). The name is trimmed and
+    /// non-empty.
+    TagRename(usize, String),
+    /// Tags: eye clicked; the new visibility.
+    TagVisible(usize, bool),
+    /// Tags: pencil column clicked; make this the active tag.
+    TagActive(usize),
+    /// Tags: color picked in the swatch's color picker.
+    TagColor(usize, [u8; 3]),
+
+    /// Materials: swatch clicked in the "In Model" grid; make it the Paint Bucket's
+    /// current material. The shell also shows it as current at once.
+    MaterialPick(usize),
+    /// Materials: the current material edited (name committed, color or opacity
+    /// changed). Carries all editable fields; `opacity` is in percent 0..=100.
+    MaterialEdit {
+        index: usize,
+        name: String,
+        color: [u8; 3],
+        opacity: u8,
+    },
+
+    /// Outliner: row clicked. `path` = child indices from the root down
+    /// (see [`OutlinerNode`]); `mode` from the Ctrl/Shift keys.
+    OutlinerSelect { path: Vec<usize>, mode: SelectMode },
+
+    /// Scenes: "Add Scene" clicked (panel button or tab context menu).
+    SceneAdd,
+    /// Scenes: "Delete Scene" clicked for this scene.
+    SceneDelete(usize),
+    /// Scenes: "Update Scene" clicked for this scene.
+    SceneUpdate(usize),
+    /// Scenes: scene clicked in the panel or its tab clicked above the viewport.
+    SceneActivate(usize),
+
+    /// Styles: any setting changed; the complete new settings.
+    StyleChanged(StyleSettings),
+    /// Shadows: any setting changed; the complete new settings.
+    ShadowsChanged(ShadowSettings),
 }
+
+/// Height of the scene tab strip above the viewport.
+const SCENE_TAB_HEIGHT: f32 = 24.0;
 
 /// Characters that start Measurements typing while the viewport has focus.
 const TYPING_STARTERS: &str = ".,;-+[<'\"/*@=";
@@ -136,6 +224,9 @@ pub struct Shell {
     typing: bool,
     field_text: String,
     pending: Vec<Event>,
+    /// What the tray panels and scene tabs show, from [`Shell::set_tray_data`].
+    data: TrayData,
+    tray_ui: panels::TrayUi,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +261,8 @@ impl Shell {
             typing: false,
             field_text: String::new(),
             pending: Vec::new(),
+            data: TrayData::default(),
+            tray_ui: panels::TrayUi::default(),
         }
     }
 
@@ -222,6 +315,14 @@ impl Shell {
                 .resizable(true)
                 .show_separator_line(true)
                 .show(ui, |ui| self.tray(ui, frame));
+        }
+
+        if self.data.scene_tabs && !self.data.scenes.is_empty() {
+            egui::Panel::top("mt_ui_scene_tabs")
+                .frame(egui::Frame::NONE.fill(t.toolbar))
+                .exact_size(SCENE_TAB_HEIGHT)
+                .show_separator_line(false)
+                .show(ui, |ui| self.scene_tabs(ui));
         }
 
         egui::CentralPanel::default()
@@ -340,6 +441,19 @@ impl Shell {
                 Typing::Backspace => self.backspace(),
             }
         }
+    }
+
+    /// Sets what the tray panels (Tags, Materials, Outliner, Scenes, Styles, Shadows)
+    /// and the scene tabs show. Call before [`Shell::show`] whenever the model changed
+    /// (calling it every frame is fine).
+    pub fn set_tray_data(&mut self, data: TrayData) {
+        self.data = data;
+    }
+
+    /// The tray data last set, including changes the user made since (a picked
+    /// material, edited style or shadow settings are applied here at once).
+    pub fn tray_data(&self) -> &TrayData {
+        &self.data
     }
 
     pub fn tray_visible(&self) -> bool {

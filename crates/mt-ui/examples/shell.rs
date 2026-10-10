@@ -1,11 +1,17 @@
 //! Opens the SketchUp-style shell with a plain colored rectangle as the viewport.
-//! Prints every event to stdout.
+//! Prints every event to stdout. The tray panels show sample [`TrayData`] that the
+//! demo updates from the events, like an app would.
 //!
 //! `cargo run -p mt-ui --example shell`
+//!
+//! `MT_UI_PANELS=window.tags,window.scenes` expands those tray panels at start.
 
 use eframe::egui;
 use mt_spec::Spec;
-use mt_ui::{EntityInfo, Event, Frame, Shell};
+use mt_ui::{
+    EntityInfo, Event, Frame, MaterialRow, OutlinerKind, OutlinerNode, SelectMode, Shell, TagRow,
+    TrayData,
+};
 
 fn main() -> eframe::Result {
     let spec = Spec::builtin().expect("spec");
@@ -19,12 +25,18 @@ fn main() -> eframe::Result {
         "mt-ui shell",
         options,
         Box::new(move |_cc| {
-            let shell = Shell::new(&spec);
+            let mut shell = Shell::new(&spec);
+            if let Ok(panels) = std::env::var("MT_UI_PANELS") {
+                for id in panels.split(',') {
+                    shell.open_panel(id.trim());
+                }
+            }
             Ok(Box::new(Demo {
                 spec,
                 shell,
                 tool: "tool.select".to_owned(),
                 last: String::new(),
+                data: sample_data(),
             }))
         }),
     )
@@ -35,6 +47,141 @@ struct Demo {
     shell: Shell,
     tool: String,
     last: String,
+    data: TrayData,
+}
+
+fn tag(name: &str, visible: bool, color: [u8; 3]) -> TagRow {
+    TagRow {
+        name: name.to_owned(),
+        visible,
+        color,
+    }
+}
+
+fn material(name: &str, color: [u8; 3], opacity: u8) -> MaterialRow {
+    MaterialRow {
+        name: name.to_owned(),
+        color,
+        opacity,
+    }
+}
+
+fn node(name: &str, definition: Option<&str>, children: Vec<OutlinerNode>) -> OutlinerNode {
+    OutlinerNode {
+        name: name.to_owned(),
+        kind: match definition {
+            Some(d) => OutlinerKind::Component {
+                definition: d.to_owned(),
+            },
+            None => OutlinerKind::Group,
+        },
+        hidden: false,
+        selected: false,
+        children,
+    }
+}
+
+fn sample_data() -> TrayData {
+    let mut hidden = node("", Some("Tree"), vec![]);
+    hidden.hidden = true;
+    TrayData {
+        tags: vec![
+            tag("Untagged", true, [255, 255, 255]),
+            tag("Walls", true, [224, 160, 96]),
+            tag("Furniture", false, [96, 160, 224]),
+            tag("Site", true, [120, 190, 100]),
+        ],
+        active_tag: 1,
+        materials: vec![
+            material("Brick", [178, 84, 60], 100),
+            material("Concrete", [180, 180, 175], 100),
+            material("Glass", [150, 200, 230], 35),
+            material("Oak", [196, 150, 96], 100),
+            material("Grass", [96, 150, 70], 100),
+            material("Steel", [120, 125, 135], 100),
+            material("Roof tiles", [140, 60, 50], 100),
+        ],
+        current_material: Some(2),
+        outliner: vec![
+            node(
+                "House",
+                None,
+                vec![
+                    node("Front", Some("Door"), vec![]),
+                    node("", Some("Window"), vec![]),
+                    node("", Some("Window"), vec![]),
+                    node("Roof", None, vec![]),
+                ],
+            ),
+            node("", Some("Chair"), vec![]),
+            hidden,
+        ],
+        scenes: vec!["Scene 1".into(), "Front view".into(), "Top".into()],
+        active_scene: Some(1),
+        ..TrayData::default()
+    }
+}
+
+/// Applies tray events to the sample data, as the app would to its model.
+fn apply(data: &mut TrayData, event: &Event) {
+    match event {
+        Event::TagAdd => {
+            let n = data.tags.len();
+            data.tags
+                .push(tag(&format!("Tag{n}"), true, [200, 200, 120]));
+        }
+        Event::TagDelete(i) if *i > 0 => {
+            data.tags.remove(*i);
+            if data.active_tag >= data.tags.len() || data.active_tag == *i {
+                data.active_tag = 0;
+            }
+        }
+        Event::TagRename(i, name) => data.tags[*i].name.clone_from(name),
+        Event::TagVisible(i, v) => data.tags[*i].visible = *v,
+        Event::TagActive(i) => data.active_tag = *i,
+        Event::TagColor(i, c) => data.tags[*i].color = *c,
+        Event::MaterialPick(i) => data.current_material = Some(*i),
+        Event::MaterialEdit {
+            index,
+            name,
+            color,
+            opacity,
+        } => data.materials[*index] = material(name, *color, *opacity),
+        Event::OutlinerSelect { path, mode } => {
+            fn walk(nodes: &mut [OutlinerNode], f: &mut dyn FnMut(&mut OutlinerNode)) {
+                for n in nodes {
+                    f(n);
+                    walk(&mut n.children, f);
+                }
+            }
+            if *mode == SelectMode::Replace {
+                walk(&mut data.outliner, &mut |n| n.selected = false);
+            }
+            let mut nodes = &mut data.outliner;
+            let (last, parents) = path.split_last().expect("path");
+            for &i in parents {
+                nodes = &mut nodes[i].children;
+            }
+            let n = &mut nodes[*last];
+            n.selected = match mode {
+                SelectMode::Replace | SelectMode::Add => true,
+                SelectMode::Toggle => !n.selected,
+                SelectMode::Remove => false,
+            };
+        }
+        Event::SceneAdd => {
+            data.scenes.push(format!("Scene {}", data.scenes.len() + 1));
+            data.active_scene = Some(data.scenes.len() - 1);
+        }
+        Event::SceneDelete(i) => {
+            data.scenes.remove(*i);
+            data.active_scene = None;
+        }
+        Event::SceneActivate(i) => data.active_scene = Some(*i),
+        Event::StyleChanged(s) => data.style = *s,
+        Event::ShadowsChanged(s) => data.shadows = *s,
+        _ => {}
+    }
 }
 
 impl eframe::App for Demo {
@@ -73,6 +220,7 @@ impl eframe::App for Demo {
             is_checked: &|id| id == "view.axes" || id == "view.shaded",
             entity_info: &info,
         };
+        self.shell.set_tray_data(self.data.clone());
         let events = self.shell.show(ui, &frame, |ui| {
             let rect = ui.available_rect_before_wrap();
             ui.painter()
@@ -81,6 +229,7 @@ impl eframe::App for Demo {
         });
         for event in events {
             println!("event: {event:?}");
+            apply(&mut self.data, &event);
             match &event {
                 Event::Command(id) if id.starts_with("tool.") || id.starts_with("camera.") => {
                     self.tool.clone_from(id);

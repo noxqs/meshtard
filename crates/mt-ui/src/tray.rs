@@ -1,4 +1,5 @@
-//! The Default Tray from `spec/tray.toml`: a column of collapsible panels.
+//! The Default Tray from `spec/tray.toml`: a column of collapsible panels. Panel
+//! contents other than Entity Info are in `panels.rs`.
 
 use egui::{Align2, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
@@ -113,7 +114,7 @@ impl Shell {
                 ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
                 if id == "window.entity_info" {
                     entity_info(ui, frame.entity_info);
-                } else {
+                } else if !self.panel_body(ui, &id) {
                     ui.label(
                         egui::RichText::new(format!(
                             "{}: not implemented yet.",
