@@ -7,7 +7,7 @@ A SketchUp 2026 clone in Rust. See [PLAN.md](PLAN.md) for the roadmap and [spec/
 Needs Rust 1.90+ and a Vulkan driver.
 
 ```sh
-cargo run --release -p mt-app
+cargo run --release -p mt-app [FILE.skp]
 ```
 
 `MESHTARD_SPEC_DIR=spec cargo run -p mt-app` reads menus and shortcuts from `spec/` at startup instead of the copy built into the binary, so spec edits show without rebuilding.
@@ -18,6 +18,8 @@ cargo run --release -p mt-app
 cargo test --workspace
 ```
 
+The `.skp` reader is compared against OpenSKP's Python package; see [tools/README.md](tools/README.md) to install it. Without it, `crates/mt-skp/tests/oracle.rs` prints `SKIPPED`.
+
 The render tests in `crates/mt-render/tests/headless.rs` need a Vulkan adapter. Without a GPU, install Mesa's software driver (`apt install mesa-vulkan-drivers`). They print `SKIPPED` when no adapter exists. The rendered image is saved to `target/tmp/default_view.png`.
 
 ## Layout
@@ -26,8 +28,9 @@ The render tests in `crates/mt-render/tests/headless.rs` need a Vulkan adapter. 
 |---|---|
 | `mt-spec` | Loads `spec/*.toml` (menus, keymap, default model) and checks consistency |
 | `mt-render` | Camera and wgpu viewport renderer |
-| `mt-app` | The application: window, menus, navigation |
+| `mt-skp` | `.skp` reader (VFF 2021+ and legacy), a Rust port of OpenSKP |
+| `mt-app` | The application: window, menus, navigation, opening `.skp` files |
 
 ## Credits
 
-`.skp` support will be a Rust port of [OpenSKP](https://github.com/iamahsanmehmood/openskp) (MIT, Copyright (c) 2024-2026 Ahsan Mehmood).
+`.skp` support (`crates/mt-skp`) is a Rust port of [OpenSKP](https://github.com/iamahsanmehmood/openskp) (MIT, Copyright (c) 2024-2026 Ahsan Mehmood).

@@ -155,6 +155,8 @@ pub struct Viewport {
     lines: wgpu::RenderPipeline,
     axes: Option<wgpu::Buffer>,
     axes_count: u32,
+    edges: Option<wgpu::Buffer>,
+    edges_count: u32,
     style: Style,
     targets: Option<Targets>,
 }
@@ -251,11 +253,25 @@ impl Viewport {
             lines,
             axes: None,
             axes_count: 0,
+            edges: None,
+            edges_count: 0,
             style: style.clone(),
             targets: None,
         };
         viewport.set_style(device, style);
         viewport
+    }
+
+    /// Replaces the model's edges.
+    pub fn set_edges(&mut self, device: &wgpu::Device, segments: &[Segment]) {
+        self.edges_count = segments.len() as u32;
+        self.edges = (!segments.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("model edges"),
+                contents: bytemuck::cast_slice(segments),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
     }
 
     pub fn set_style(&mut self, device: &wgpu::Device, style: Style) {
@@ -339,6 +355,11 @@ impl Viewport {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_pipeline(&self.background);
             pass.draw(0..3, 0..1);
+            if let Some(edges) = &self.edges {
+                pass.set_pipeline(&self.lines);
+                pass.set_vertex_buffer(0, edges.slice(..));
+                pass.draw(0..6, 0..self.edges_count);
+            }
             if let Some(axes) = &self.axes {
                 pass.set_pipeline(&self.lines);
                 pass.set_vertex_buffer(0, axes.slice(..));

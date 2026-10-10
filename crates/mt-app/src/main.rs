@@ -1,5 +1,6 @@
 //! meshtard desktop application.
 
+mod document;
 mod nav;
 
 use eframe::egui;
@@ -8,6 +9,7 @@ use glam::DVec2;
 use mt_render::{Camera, Style, Viewport};
 use mt_spec::{MenuItem, Shortcut, Spec};
 
+use document::Document;
 use nav::Tool;
 
 /// Touchpad scroll distance, in points, that counts as one wheel notch.
@@ -15,6 +17,7 @@ const POINTS_PER_NOTCH: f32 = 40.0;
 
 /// Commands that do something today. Every other menu item is shown disabled.
 const IMPLEMENTED: &[&str] = &[
+    "file.open",
     "file.exit",
     "tool.select",
     "camera.orbit",
@@ -33,6 +36,8 @@ fn main() -> eframe::Result {
         std::process::exit(1);
     });
 
+    let open_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Untitled - meshtard")
@@ -50,7 +55,11 @@ fn main() -> eframe::Result {
                 .ok_or("wgpu renderer not available")?;
             // SketchUp on Windows uses the light system theme; full styling comes in M3.
             cc.egui_ctx.set_theme(egui::Theme::Light);
-            Ok(Box::new(App::new(spec, render_state)))
+            let mut app = App::new(spec, render_state);
+            if let Some(path) = open_path {
+                app.open(&cc.egui_ctx, &render_state.device, &path);
+            }
+            Ok(Box::new(app))
         }),
     )
 }
@@ -63,6 +72,9 @@ struct App {
     texture: Option<(egui::TextureId, [u32; 2])>,
     /// Shortcut for each implemented command, parsed once.
     shortcuts: Vec<(Shortcut, egui::Key, &'static str)>,
+    document: Option<Document>,
+    /// Error from the last command, shown in the status bar until the next one.
+    message: Option<String>,
 }
 
 impl App {
@@ -82,18 +94,45 @@ impl App {
             texture: None,
             shortcuts,
             spec,
+            document: None,
+            message: None,
         }
     }
 
-    fn run_command(&mut self, ctx: &egui::Context, id: &str) {
+    fn open(&mut self, ctx: &egui::Context, device: &wgpu::Device, path: &std::path::Path) {
+        match Document::open(path) {
+            Ok(doc) => {
+                self.viewport.set_edges(device, &doc.edge_segments());
+                if let Some(camera) = doc
+                    .saved_camera()
+                    .or_else(|| doc.extents_camera(self.camera.fov_deg))
+                {
+                    self.camera = camera;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
+                self.document = Some(doc);
+                self.message = None;
+            }
+            Err(e) => self.message = Some(format!("Could not open {}: {e}", path.display())),
+        }
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, frame: &eframe::Frame, id: &str) {
         if let Some(tool) = Tool::from_command(id) {
             self.tool = tool;
         } else if id == "file.exit" {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if id == "file.open" {
+            let picked = rfd::FileDialog::new()
+                .add_filter("SketchUp Models", &["skp"])
+                .pick_file();
+            if let (Some(path), Some(rs)) = (picked, frame.wgpu_render_state()) {
+                self.open(ctx, &rs.device, &path);
+            }
         }
     }
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -108,11 +147,11 @@ impl App {
                 .collect()
         });
         for id in pressed {
-            self.run_command(ctx, id);
+            self.run_command(ctx, frame, id);
         }
     }
 
-    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+    fn menu_bar(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let mut clicked = None;
         egui::MenuBar::new().ui(ui, |ui| {
             for menu in &self.spec.menus.menu {
@@ -122,7 +161,7 @@ impl App {
             }
         });
         if let Some(id) = clicked {
-            self.run_command(ui.ctx(), &id);
+            self.run_command(ui.ctx(), frame, &id);
         }
     }
 
@@ -238,10 +277,13 @@ fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], spec: &Spec, clicked: &mut 
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.handle_shortcuts(ui.ctx());
-        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        self.handle_shortcuts(ui.ctx(), frame);
+        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui, frame));
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.label(self.tool.hint());
+            match &self.message {
+                Some(m) => ui.colored_label(egui::Color32::DARK_RED, m),
+                None => ui.label(self.tool.hint()),
+            };
         });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)

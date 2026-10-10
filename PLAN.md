@@ -107,9 +107,11 @@ SketchUp runs only on Windows and macOS, so the trial runs on one of those machi
 - [ ] Capture from real SketchUp 2026 during the trial (`spec/parity/TRIAL_CHECKLIST.md`) and correct the drafts.
 
 ### M1: `.skp` reading (port of OpenSKP)
-- VFF container (2021+) and legacy MFC CArchive (2013-2020).
-- Load into `mt-kernel` entities, including components, tags, materials, styles, scenes.
-- Test: for every file in the test corpus, our parse matches OpenSKP Python's JSON export.
+- [x] `mt-skp`: VFF container (2021+) and legacy MFC CArchive (SketchUp 3 to 2020), ported from OpenSKP C++ at commit `359d183`. Geometry, components, tags, materials with textures, styles with watermarks, scenes, saved view, dimensions, guides, attribute dictionaries.
+- [x] Test: all 25 files in `tests/corpus/openskp` match OpenSKP Python's output (same commit), field by field. Known gaps both ways are listed in `crates/mt-skp/tests/oracle.rs`.
+- [x] App: File > Open and `meshtard FILE.skp` load a model and draw its edges, at the view it was saved with.
+- [ ] Not yet read (Python oracle has them, C++ does not): edge layer and curve id, legacy face layers, legacy model-level dimensions, text positions.
+- [ ] Loading into `mt-kernel` entities moves to M2, where the kernel is built.
 
 Reading first means real SketchUp models are available for testing everything else.
 
