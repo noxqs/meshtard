@@ -458,9 +458,18 @@ impl App {
                 self.document = Some(doc);
                 self.selection.clear();
                 self.rebuild(device);
+                log::info!(
+                    "opened {}: {} triangles, {} edges",
+                    path.display(),
+                    self.scene.triangles.len(),
+                    self.scene.edges.len()
+                );
                 self.message = None;
             }
-            Err(e) => self.message = Some(format!("Could not open {}: {e}", path.display())),
+            Err(e) => {
+                log::warn!("could not open {}: {e}", path.display());
+                self.message = Some(format!("Could not open {}: {e}", path.display()));
+            }
         }
     }
 
