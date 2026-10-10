@@ -18,7 +18,14 @@ pub struct Document {
     saved_camera: Option<mt_skp::ViewCamera>,
     /// Unit for typed and displayed lengths.
     pub units: mt_infer::units::LengthUnit,
+    /// Root geometry before each edit, most recent last (Edit > Undo).
+    undo: Vec<Entities>,
+    /// Undone states, most recent last (Edit > Redo).
+    redo: Vec<Entities>,
 }
+
+/// Undo steps kept.
+const UNDO_LIMIT: usize = 100;
 
 /// A top-level entity of the model root: what a click selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,7 +46,14 @@ pub struct Scene {
     /// World-space triangles for picking; triangle `i` is `indices[3 * i..3 * i + 3]`.
     pub triangles: Vec<[DVec3; 3]>,
     pub tri_owner: Vec<Owner>,
+    /// Construction guides drawn as dashed lines (not pickable as edges).
+    pub guides: Vec<Segment>,
 }
+
+/// Half-length of drawn guide lines, in inches.
+const GUIDE_EXTENT: f64 = 1e5;
+/// Guide color and dash length (draft).
+const GUIDE_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 
 impl Document {
     pub fn open(path: &Path) -> Result<Self, mt_skp::Error> {
@@ -53,6 +67,8 @@ impl Document {
                 .and_then(mt_infer::units::LengthUnit::from_name)
                 .unwrap_or(mt_infer::units::LengthUnit::Inch),
             saved_camera: src.camera,
+            undo: Vec::new(),
+            redo: Vec::new(),
         })
     }
 
@@ -63,7 +79,50 @@ impl Document {
             model: Model::default(),
             saved_camera: None,
             units: mt_infer::units::LengthUnit::Inch,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
+    }
+
+    /// Runs an edit of the model root; when `f` reports a change, the state before it
+    /// becomes an undo step.
+    pub fn edit(&mut self, f: impl FnOnce(&mut Entities) -> bool) -> bool {
+        let before = self.model.root.clone();
+        let changed = f(&mut self.model.root);
+        if changed {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        changed
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(prev) = self.undo.pop() else {
+            return false;
+        };
+        self.redo
+            .push(std::mem::replace(&mut self.model.root, prev));
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        self.undo
+            .push(std::mem::replace(&mut self.model.root, next));
+        true
     }
 
     pub fn title(&self) -> String {
@@ -101,6 +160,28 @@ impl Document {
         let mut active = HashSet::new();
         let root = &self.model.root;
         self.collect(root, DMat4::IDENTITY, None, None, &mut active, &mut scene);
+        let f = |p: DVec3| p.as_vec3().to_array();
+        for g in &root.guides {
+            match g.dir {
+                Some(d) => scene.guides.push(Segment::line(
+                    f(g.point - d * GUIDE_EXTENT),
+                    f(g.point + d * GUIDE_EXTENT),
+                    GUIDE_COLOR,
+                    [1.0, 3.0],
+                )),
+                None => {
+                    // A small cross.
+                    for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+                        scene.guides.push(Segment::line(
+                            f(g.point - axis * 0.5),
+                            f(g.point + axis * 0.5),
+                            GUIDE_COLOR,
+                            [1.0, 0.0],
+                        ));
+                    }
+                }
+            }
+        }
         scene
     }
 
@@ -230,7 +311,14 @@ impl Document {
     /// them, coplanar neighbors merge), faces are removed leaving their edges, components
     /// are removed.
     pub fn delete(&mut self, items: &[Owner]) {
-        let root = &mut self.model.root;
+        let items = items.to_vec();
+        self.edit(|root| {
+            Self::delete_in(root, &items);
+            !items.is_empty()
+        });
+    }
+
+    fn delete_in(root: &mut Entities, items: &[Owner]) {
         let mut instances: Vec<usize> = Vec::new();
         for item in items {
             match *item {
@@ -258,7 +346,14 @@ impl Document {
     /// `hide` (Shift) hides edges instead, `soften` (Ctrl) softens and smooths them,
     /// both together unsoften.
     pub fn erase(&mut self, items: &[Owner], hide: bool, soften: bool) {
-        let root = &mut self.model.root;
+        let items = items.to_vec();
+        self.edit(|root| {
+            Self::erase_in(root, &items, hide, soften);
+            !items.is_empty()
+        });
+    }
+
+    fn erase_in(root: &mut Entities, items: &[Owner], hide: bool, soften: bool) {
         let mut erase: Vec<Owner> = Vec::new();
         for item in items {
             match (*item, hide, soften) {
@@ -289,7 +384,7 @@ impl Document {
                 _ => {}
             }
         }
-        self.delete(&erase);
+        Self::delete_in(root, &erase);
     }
 
     pub fn extents_camera(&self, fov_deg: f64) -> Option<Camera> {
@@ -332,6 +427,25 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/corpus/openskp")
             .join(name)
+    }
+
+    #[test]
+    fn edits_undo_and_redo() {
+        let mut doc = Document::untitled();
+        let a = DVec3::ZERO;
+        let b = DVec3::new(10.0, 0.0, 0.0);
+        assert!(!doc.edit(|_| false), "no change, no undo step");
+        assert!(!doc.can_undo());
+        doc.edit(|root| !mt_kernel::add_line(root, a, b).is_empty());
+        assert_eq!(doc.model.root.edges.len(), 1);
+        assert!(doc.undo());
+        assert_eq!(doc.model.root.edges.len(), 0);
+        assert!(doc.redo());
+        assert_eq!(doc.model.root.edges.len(), 1);
+        assert!(!doc.redo());
+        doc.undo();
+        doc.edit(|root| !mt_kernel::add_line(root, a, DVec3::Y).is_empty());
+        assert!(!doc.can_redo(), "a new edit clears redo");
     }
 
     #[test]

@@ -161,6 +161,17 @@ pub struct Entities {
     pub faces: SlotMap<FaceId, Face>,
     pub instances: Vec<Instance>,
     pub curves: SlotMap<CurveId, Curve>,
+    /// Construction guides (Tape Measure, Protractor). Not geometry: they never split
+    /// edges or bound faces.
+    pub guides: Vec<Guide>,
+}
+
+/// A construction line (infinite, through `point` along `dir`) or construction point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Guide {
+    pub point: DVec3,
+    /// Unit direction for a guide line, `None` for a guide point.
+    pub dir: Option<DVec3>,
 }
 
 impl Entities {

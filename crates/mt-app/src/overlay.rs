@@ -50,10 +50,10 @@ pub fn paint(
     let fill = color32(inf.kind.color());
     let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
     match inf.kind {
-        Kind::Endpoint | Kind::Midpoint | Kind::Origin => {
+        Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::GuidePoint => {
             painter.circle(p, 5.0, fill, outline);
         }
-        Kind::OnEdge | Kind::OnAxis(_) => {
+        Kind::OnEdge | Kind::OnAxis(_) | Kind::OnGuide => {
             painter.rect(
                 egui::Rect::from_center_size(p, egui::vec2(8.0, 8.0)),
                 0.0,

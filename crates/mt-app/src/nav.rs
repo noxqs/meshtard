@@ -30,6 +30,7 @@ impl Tool {
             "tool.arc_3pt" => Self::Draw("tool.arc_3pt"),
             "tool.pie" => Self::Draw("tool.pie"),
             "tool.freehand" => Self::Draw("tool.freehand"),
+            "tool.tape_measure" => Self::Draw("tool.tape_measure"),
             "camera.orbit" => Self::Orbit,
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,

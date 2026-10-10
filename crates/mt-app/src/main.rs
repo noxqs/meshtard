@@ -39,6 +39,10 @@ const IMPLEMENTED: &[&str] = &[
     "tool.pie",
     "tool.freehand",
     "tool.eraser",
+    "tool.tape_measure",
+    "edit.delete_guides",
+    "edit.undo",
+    "edit.redo",
     "edit.select_all",
     "edit.select_none",
     "edit.delete",
@@ -171,6 +175,14 @@ impl App {
                 .map(|s| [v3(s.a), v3(s.b)])
                 .collect(),
         );
+        if let Some(doc) = &self.document {
+            for g in &doc.model.root.guides {
+                match g.dir {
+                    Some(d) => self.geometry.guide_lines.push((g.point, d)),
+                    None => self.geometry.guide_points.push(g.point),
+                }
+            }
+        }
         self.engine.reference_edge = None;
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
@@ -180,6 +192,7 @@ impl App {
     /// Colors selected edges, dots selected faces and boxes selected components.
     fn update_highlight(&mut self, device: &wgpu::Device) {
         let mut edges = self.scene.edges.clone();
+        let guides = self.scene.guides.clone();
         for (seg, owner) in edges.iter_mut().zip(&self.scene.edge_owner) {
             if self.selection.contains(owner) {
                 seg.color = SELECTED;
@@ -249,6 +262,7 @@ impl App {
         let indices: Vec<u32> = (0..vertices.len() as u32).collect();
         self.viewport
             .set_selected_faces(device, &vertices, &indices);
+        edges.extend(guides);
         self.viewport.set_edges(device, &edges);
     }
 
@@ -298,7 +312,15 @@ impl App {
         } else if id == "file.exit" {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if let Some(rs) = frame.wgpu_render_state()
-            && matches!(id, "edit.select_all" | "edit.select_none" | "edit.delete")
+            && matches!(
+                id,
+                "edit.select_all"
+                    | "edit.select_none"
+                    | "edit.delete"
+                    | "edit.undo"
+                    | "edit.redo"
+                    | "edit.delete_guides"
+            )
         {
             let device = rs.device.clone();
             match id {
@@ -307,6 +329,28 @@ impl App {
                     self.select(&device, Mode::Replace, all);
                 }
                 "edit.select_none" => self.select(&device, Mode::Replace, Vec::new()),
+                "edit.delete_guides" => {
+                    if let Some(doc) = &mut self.document
+                        && doc.edit(|root| !std::mem::take(&mut root.guides).is_empty())
+                    {
+                        self.rebuild(&device);
+                    }
+                }
+                "edit.undo" | "edit.redo" => {
+                    if let Some(doc) = &mut self.document
+                        && (if id == "edit.undo" {
+                            doc.undo()
+                        } else {
+                            doc.redo()
+                        })
+                    {
+                        if let Some(d) = self.draw.as_mut() {
+                            d.cancel();
+                        }
+                        self.selection.clear();
+                        self.rebuild(&device);
+                    }
+                }
                 _ => {
                     if let Some(doc) = &mut self.document {
                         doc.delete(self.selection.items());
@@ -529,14 +573,13 @@ impl App {
         let (Some(inf), Some(doc)) = (self.inference, self.document.as_mut()) else {
             return;
         };
-        let root = &mut doc.model.root;
         let primary = egui::PointerButton::Primary;
         let changed = if response.clicked_by(primary) {
-            draw.click(root, &inf)
+            doc.edit(|root| draw.click(root, &inf))
         } else if response.drag_started_by(primary) {
-            draw.drag_start(root, &inf)
+            doc.edit(|root| draw.drag_start(root, &inf))
         } else if response.drag_stopped_by(primary) {
-            draw.drag_end(root, &inf)
+            doc.edit(|root| draw.drag_end(root, &inf))
         } else {
             if response.dragged_by(primary) {
                 draw.drag_move(&inf);
@@ -802,6 +845,8 @@ impl eframe::App for App {
             (Some(d), Tool::Draw(_)) => d.measurement(self.inference.as_ref(), units),
             _ => ("Measurements", String::new()),
         };
+        let can_undo = self.document.as_ref().is_some_and(Document::can_undo);
+        let can_redo = self.document.as_ref().is_some_and(Document::can_redo);
         let spec = self.spec.clone();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
@@ -809,7 +854,11 @@ impl eframe::App for App {
             status: &status,
             measurements_label: label,
             measurements_value: &value,
-            is_enabled: &|id| IMPLEMENTED.contains(&id),
+            is_enabled: &|id| match id {
+                "edit.undo" => can_undo,
+                "edit.redo" => can_redo,
+                _ => IMPLEMENTED.contains(&id),
+            },
             is_checked: &|_| false,
             entity_info: &info,
         };
@@ -820,7 +869,7 @@ impl eframe::App for App {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
                 mt_ui::Event::Measurements(text) => {
                     if let (Some(draw), Some(doc)) = (self.draw.as_mut(), self.document.as_mut())
-                        && draw.typed(&mut doc.model.root, self.inference.as_ref(), &text, units)
+                        && doc.edit(|root| draw.typed(root, self.inference.as_ref(), &text, units))
                         && let Some(rs) = frame.wgpu_render_state()
                     {
                         let device = rs.device.clone();

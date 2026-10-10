@@ -63,6 +63,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn DrawTool>> {
         "tool.arc_2pt" => Box::new(TwoPointArc::default()),
         "tool.arc_3pt" => Box::new(ThreePointArc::default()),
         "tool.freehand" => Box::new(Freehand::default()),
+        "tool.tape_measure" => Box::new(TapeMeasure::default()),
         _ => return None,
     })
 }
@@ -1106,6 +1107,103 @@ impl DrawTool for Freehand {
     }
 }
 
+// ------------------------------------------------------------------ Tape Measure
+
+/// Measures between two points. Started on an edge it makes a guide line parallel to the
+/// edge through the end point; otherwise a guide point at the end. Typing a distance
+/// places the guide that far away (perpendicular to the edge, or towards the cursor).
+#[derive(Debug, Default)]
+pub struct TapeMeasure {
+    /// Start point and, when started on an edge, the edge direction.
+    start: Option<(DVec3, Option<DVec3>)>,
+}
+
+impl TapeMeasure {
+    fn offset(&self, p: DVec3) -> Option<DVec3> {
+        let (s, dir) = self.start?;
+        let d = p - s;
+        Some(match dir {
+            Some(e) => d - e * d.dot(e),
+            None => d,
+        })
+    }
+}
+
+impl DrawTool for TapeMeasure {
+    fn anchor(&self) -> Option<DVec3> {
+        self.start.map(|s| s.0)
+    }
+
+    fn status(&self) -> String {
+        if self.start.is_some() {
+            "Select second point to measure or create a guide."
+        } else {
+            "Select first point."
+        }
+        .into()
+    }
+
+    fn measurement(&self, cur: Option<&Inference>, units: LengthUnit) -> (&'static str, String) {
+        let v = cur
+            .and_then(|c| self.offset(c.point))
+            .map(|o| units.format(o.length()));
+        ("Length", v.unwrap_or_default())
+    }
+
+    fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        let Some((s, dir)) = self.start else {
+            let dir = inf
+                .segment
+                .filter(|_| inf.kind == mt_infer::Kind::OnEdge)
+                .map(|[a, b]| (b - a).normalize_or_zero())
+                .filter(|d| *d != DVec3::ZERO);
+            self.start = Some((inf.point, dir));
+            return false;
+        };
+        self.start = None;
+        if s.distance(inf.point) <= mt_kernel::TOL {
+            return false;
+        }
+        ents.guides.push(mt_kernel::Guide {
+            point: inf.point,
+            dir,
+        });
+        true
+    }
+
+    fn typed(
+        &mut self,
+        ents: &mut Entities,
+        cur: Option<&Inference>,
+        text: &str,
+        units: LengthUnit,
+    ) -> bool {
+        let (Some(c), Some(d)) = (cur, parse_length(text, units)) else {
+            return false;
+        };
+        let (Some((s, _)), Some(away)) = (self.start, self.offset(c.point)) else {
+            return false;
+        };
+        let away = away.normalize_or_zero();
+        if away == DVec3::ZERO {
+            return false;
+        }
+        let mut at = *c;
+        at.point = s + away * d;
+        self.click(ents, &at)
+    }
+
+    fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
+        self.start
+            .map(|(s, _)| vec![vec![s, cur.point]])
+            .unwrap_or_default()
+    }
+
+    fn cancel(&mut self) {
+        self.start = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,6 +1217,7 @@ mod tests {
             guide: None,
             locked: false,
             normal: None,
+            segment: None,
         }
     }
 
@@ -1216,6 +1315,25 @@ mod tests {
         assert!(t.click(&mut e, &inf(v(0.0, 10.0, 0.0))));
         assert_eq!(e.faces.len(), 1);
         assert_eq!(e.edges.len(), 12 + 2);
+    }
+
+    #[test]
+    fn tape_measure_makes_parallel_guide_and_guide_point() {
+        let mut e = Entities::new();
+        let mut t = TapeMeasure::default();
+        let mut on_edge = inf(v(5.0, 0.0, 0.0));
+        on_edge.kind = Kind::OnEdge;
+        on_edge.segment = Some([v(0.0, 0.0, 0.0), v(10.0, 0.0, 0.0)]);
+        t.click(&mut e, &on_edge);
+        assert!(t.typed(&mut e, Some(&inf(v(7.0, 3.0, 0.0))), "2", LengthUnit::Inch));
+        assert_eq!(e.guides.len(), 1);
+        assert_eq!(e.guides[0].dir, Some(DVec3::X));
+        assert!((e.guides[0].point - v(5.0, 2.0, 0.0)).length() < 1e-12);
+        let mut endpoint = inf(v(10.0, 0.0, 0.0));
+        endpoint.kind = Kind::Endpoint;
+        t.click(&mut e, &endpoint);
+        assert!(t.click(&mut e, &inf(v(10.0, 4.0, 0.0))));
+        assert_eq!(e.guides[1].dir, None);
     }
 
     #[test]

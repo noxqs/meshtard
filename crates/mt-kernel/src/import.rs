@@ -92,6 +92,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
         model.definitions[maps.definitions[&id]].entities = ents;
     }
     model.root = entities(&src.root, &maps);
+    model.root.guides = guides(&src.root);
     model
 }
 
@@ -172,4 +173,23 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
 
 fn face_normal(ents: &Entities, l: &Loop) -> DVec3 {
     crate::geom::Plane::from_polygon(&ents.loop_points(l)).map_or(DVec3::Z, |p| p.normal)
+}
+
+/// Construction lines and points of a definition as guides.
+fn guides(d: &skp::Definition) -> Vec<crate::entities::Guide> {
+    let lines = d.construction_lines.iter().filter_map(|c| {
+        let dir = DVec3::from(c.direction).normalize_or_zero();
+        (dir != DVec3::ZERO).then_some(crate::entities::Guide {
+            point: c.point.into(),
+            dir: Some(dir),
+        })
+    });
+    let points = d
+        .construction_points
+        .iter()
+        .map(|c| crate::entities::Guide {
+            point: c.position.into(),
+            dir: None,
+        });
+    lines.chain(points).collect()
 }

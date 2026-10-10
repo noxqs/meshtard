@@ -19,13 +19,25 @@ use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment};
 /// - existing edges along the line are reused;
 /// - a closed planar loop gets a face; a line across a face splits the face.
 pub fn add_line(ents: &mut Entities, a: DVec3, b: DVec3) -> Vec<EdgeId> {
+    insert_line(ents, a, b, true).0
+}
+
+/// `add_line` that only creates faces when `auto_face` is set (faces crossed by the
+/// line are split either way). Returns the edges covering the line and, among them,
+/// those that were created.
+pub(crate) fn insert_line(
+    ents: &mut Entities,
+    a: DVec3,
+    b: DVec3,
+    auto_face: bool,
+) -> (Vec<EdgeId>, Vec<EdgeId>) {
     if a.distance(b) <= TOL {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let va = vertex_at(ents, a);
     let vb = vertex_at(ents, b);
     if va == vb {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let (pa, pb) = (ents.pos(va), ents.pos(vb));
     let len = pa.distance(pb);
@@ -75,8 +87,8 @@ pub fn add_line(ents: &mut Entities, a: DVec3, b: DVec3) -> Vec<EdgeId> {
             }
         }
     }
-    update_faces(ents, &created);
-    all
+    update_faces(ents, &created, auto_face);
+    (all, created)
 }
 
 /// The vertex at `p`: an existing one within tolerance, a new one splitting the edge
@@ -191,7 +203,7 @@ fn reversed(cycle: &[CoEdge]) -> Vec<CoEdge> {
 
 /// Creates a face from a cell, with the given front normal (along or against the
 /// plane's normal).
-fn face_from_cell(
+pub(crate) fn face_from_cell(
     ents: &mut Entities,
     plane: &Plane,
     cell: &Cell,
@@ -242,8 +254,9 @@ fn new_face_normal(ents: &Entities, plane: &Plane, cell: &Cell) -> DVec3 {
     if largest < 0.0 { -n } else { n }
 }
 
-/// Creates faces for closed loops through `new_edges` and splits faces they cross.
-fn update_faces(ents: &mut Entities, new_edges: &[EdgeId]) {
+/// Creates faces for closed loops through `new_edges` (when `create` is set) and splits
+/// faces they cross.
+pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bool) {
     let mut planes = Vec::new();
     for &e in new_edges {
         if ents.edges.contains_key(e) {
@@ -274,7 +287,8 @@ fn update_faces(ents: &mut Entities, new_edges: &[EdgeId]) {
                         to_split.push(f);
                     }
                 }
-                None => to_create.push(i),
+                None if create => to_create.push(i),
+                None => {}
             }
         }
         for f in to_split {

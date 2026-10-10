@@ -68,6 +68,10 @@ pub enum Kind {
     OnEdge,
     OnAxis(Axis),
     OnFace,
+    /// On a construction line.
+    OnGuide,
+    /// A construction point.
+    GuidePoint,
     /// Along an axis direction from the anchor.
     Along(Axis),
     Parallel,
@@ -88,6 +92,8 @@ impl Kind {
             Kind::OnEdge => "On Edge".into(),
             Kind::OnAxis(a) => format!("On {} Axis", a.name()),
             Kind::OnFace => "On Face".into(),
+            Kind::OnGuide => "On Guide".into(),
+            Kind::GuidePoint => "Guide Point".into(),
             Kind::Along(a) => format!("On {} Axis", a.name()),
             Kind::Parallel => "Parallel to Edge".into(),
             Kind::Perpendicular => "Perpendicular to Edge".into(),
@@ -104,6 +110,7 @@ impl Kind {
             Kind::Origin => [230, 200, 0],
             Kind::OnEdge => [230, 0, 0],
             Kind::OnFace => [0, 0, 230],
+            Kind::OnGuide | Kind::GuidePoint => [60, 60, 60],
             Kind::OnAxis(a) | Kind::Along(a) | Kind::FromPoint(a) => a.color(),
             Kind::Parallel | Kind::Perpendicular => [220, 0, 220],
             Kind::Free => [0, 0, 0],
@@ -113,7 +120,13 @@ impl Kind {
     fn is_point(self) -> bool {
         matches!(
             self,
-            Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::OnEdge | Kind::OnAxis(_)
+            Kind::Endpoint
+                | Kind::Midpoint
+                | Kind::Origin
+                | Kind::GuidePoint
+                | Kind::OnEdge
+                | Kind::OnGuide
+                | Kind::OnAxis(_)
         )
     }
 }
@@ -131,6 +144,8 @@ pub struct Inference {
     pub locked: bool,
     /// Normal of the face under the cursor (for "on face"), to orient shapes drawn on it.
     pub normal: Option<DVec3>,
+    /// The edge segment `edge` refers to, in world space.
+    pub segment: Option<[DVec3; 2]>,
 }
 
 /// Snappable geometry in world space.
@@ -138,6 +153,9 @@ pub struct Inference {
 pub struct Geometry {
     pub vertices: Vec<DVec3>,
     pub edges: Vec<[DVec3; 2]>,
+    /// Construction lines as (point, unit direction), and construction points.
+    pub guide_lines: Vec<(DVec3, DVec3)>,
+    pub guide_points: Vec<DVec3>,
 }
 
 impl Geometry {
@@ -151,7 +169,11 @@ impl Geometry {
             .copied()
             .filter(|p| seen.insert(key(*p)))
             .collect();
-        Self { vertices, edges }
+        Self {
+            vertices,
+            edges,
+            ..Self::default()
+        }
     }
 }
 
@@ -253,6 +275,19 @@ impl Engine {
         cursor: DVec2,
         anchor: Option<DVec3>,
     ) -> Inference {
+        let mut i = self.infer_point(geom, bvh, view, cursor, anchor);
+        i.segment = i.edge.and_then(|e| geom.edges.get(e).copied());
+        i
+    }
+
+    fn infer_point(
+        &mut self,
+        geom: &Geometry,
+        bvh: &Bvh,
+        view: View,
+        cursor: DVec2,
+        anchor: Option<DVec3>,
+    ) -> Inference {
         let ray = view.camera.ray(cursor, view.viewport);
         let hit = bvh.ray(ray.origin, ray.dir);
         let face_t = hit.map_or(f64::INFINITY, |h| h.t);
@@ -287,6 +322,7 @@ impl Engine {
                     guide: None,
                     locked: true,
                     normal: None,
+                    segment: None,
                 };
             }
             if let Some(p) = point.filter(|p| p.kind.is_point()) {
@@ -311,6 +347,7 @@ impl Engine {
             guide: None,
             locked: false,
             normal: None,
+            segment: None,
         }
     }
 
@@ -350,6 +387,7 @@ impl Engine {
                     guide: None,
                     locked: false,
                     normal: None,
+                    segment: None,
                 })
         };
 
@@ -401,6 +439,7 @@ impl Engine {
                     guide: None,
                     locked: false,
                     normal: None,
+                    segment: None,
                 })
         };
         let on_axis = || {
@@ -418,6 +457,7 @@ impl Engine {
                     guide: None,
                     locked: false,
                     normal: None,
+                    segment: None,
                 })
         };
         let on_face = || {
@@ -428,12 +468,36 @@ impl Engine {
                 guide: None,
                 locked: false,
                 normal: face_normal,
+                segment: None,
             })
+        };
+        let guide_point = || {
+            best_point(
+                &mut geom.guide_points.iter().map(|&p| (p, None)),
+                Kind::GuidePoint,
+            )
+        };
+        let on_guide = || {
+            geom.guide_lines
+                .iter()
+                .filter_map(|&(p, d)| on_line(p - d * AXIS_EXTENT, p + d * AXIS_EXTENT))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, p)| Inference {
+                    point: p,
+                    kind: Kind::OnGuide,
+                    edge: None,
+                    guide: None,
+                    locked: false,
+                    normal: None,
+                    segment: None,
+                })
         };
         endpoint
             .or_else(midpoint)
+            .or_else(guide_point)
             .or_else(origin)
             .or_else(on_edge)
+            .or_else(on_guide)
             .or_else(on_axis)
             .or_else(on_face)
     }
@@ -489,6 +553,7 @@ impl Engine {
             guide: None,
             locked: false,
             normal: None,
+            segment: None,
         };
         // Line up with the acquired point along another axis, if close.
         if let (Kind::Along(_), Some(t)) = (kind, self.tracking(view, cursor, ro, rd, Some((a, p))))
@@ -538,6 +603,7 @@ impl Engine {
                 guide: Some((src, p)),
                 locked: false,
                 normal: None,
+                segment: None,
             })
     }
 }
