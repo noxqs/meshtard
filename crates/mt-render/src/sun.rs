@@ -56,8 +56,8 @@ fn julian_day(year: i32, month: u32, day: u32) -> f64 {
 /// Julian day `jd` (NOAA spreadsheet formulas; time scale differences ignored).
 fn solar_coordinates(jd: f64) -> (f64, f64) {
     let t = (jd - 2_451_545.0) / 36_525.0;
-    let l0 = (280.46646 + t * (36_000.76983 + t * 0.0003032)).rem_euclid(360.0);
-    let m = 357.52911 + t * (35_999.05029 - 0.0001537 * t);
+    let l0 = (280.46646 + t * (36000.76983 + t * 0.0003032)).rem_euclid(360.0);
+    let m = 357.52911 + t * (35999.05029 - 0.0001537 * t);
     let e = 0.016708634 - t * (0.000042037 + 0.0000001267 * t);
     let mr = m.to_radians();
     let center = mr.sin() * (1.914602 - t * (0.004817 + 0.000014 * t))

@@ -4,7 +4,7 @@
 
 use egui_wgpu::wgpu;
 use glam::{DVec2, DVec3};
-use mt_render::{Camera, FaceVertex, Segment, Style, Viewport};
+use mt_render::{Camera, FaceVertex, SectionCut, Segment, Shadows, Style, Viewport};
 use mt_spec::Spec;
 
 const SIZE: [u32; 2] = [640, 400];
@@ -563,4 +563,222 @@ fn border_and_silhouette_edges_draw_as_profiles() {
         width_at(-60.0) > width_at(60.0),
         "silhouette thicker than crease"
     );
+}
+
+// ---------------------------------------------------------------- section planes
+
+#[test]
+fn section_plane_clips_faces_edges_and_selection() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    let (vertices, indices) = quads_mesh(&cube_quads(), RED, BLUE);
+    viewport.set_faces(&device, &vertices, &indices);
+    viewport.set_selected_faces(&device, &vertices, &indices);
+    let black = [0.0, 0.0, 0.0, 1.0];
+    // An edge across the clipped half of the top face, and one across the kept half.
+    let clipped_edge = Segment::line([25.0, -40.0, 50.0], [25.0, 40.0, 50.0], black, [3.0, 0.0]);
+    let kept_edge = Segment::line([-25.0, -40.0, 50.0], [-25.0, 40.0, 50.0], black, [3.0, 0.0]);
+    viewport.set_edges(&device, &[clipped_edge, kept_edge]);
+    // Cut at x = 0, removing +X. Looking down from above the +X side.
+    viewport.set_section(Some(SectionCut {
+        point: [0.0; 3],
+        normal: [1.0, 0.0, 0.0],
+    }));
+    let camera = Camera {
+        eye: DVec3::new(300.0, -100.0, 400.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(&device, &queue, &mut viewport, &camera, "section");
+    // The kept half of the top shows its red front and the kept edge.
+    let top_kept = pixel_at(&img, &camera, DVec3::new(-35.0, 20.0, 50.0));
+    assert!(
+        top_kept[0] > 100 && top_kept[2] < 100,
+        "kept top, got {top_kept:?}"
+    );
+    let edge = pixel_at(&img, &camera, DVec3::new(-25.0, 0.0, 50.0));
+    assert!(luma(&edge) < 60, "kept edge, got {edge:?}");
+    // Through the removed half: the inside of the -X wall (blue back side), not the
+    // top face, its edge, or the selection dots over it.
+    for p in [
+        DVec3::new(25.0, 0.0, 50.0),
+        DVec3::new(25.0, 1.0, 50.0),
+        DVec3::new(30.0, 5.0, 50.0),
+    ] {
+        let px = pixel_at(&img, &camera, p);
+        assert!(
+            px[2] > 100 && px[0] < 100,
+            "inside visible through the cut at {p}, got {px:?}"
+        );
+    }
+
+    viewport.set_section(None);
+    let img = render(&device, &queue, &mut viewport, &camera, "section_off");
+    let px = pixel_at(&img, &camera, DVec3::new(35.0, 20.0, 50.0));
+    assert!(px[0] > 100 && px[2] < 100, "uncut top, got {px:?}");
+}
+
+// ---------------------------------------------------------------- shadows
+
+/// A slab over a lower ledge, seen from straight above, lit from +X 30 degrees off
+/// vertical. The slab's shadow is shifted by (50 - z) tan 30 towards -X.
+fn shadow_scene(device: &wgpu::Device) -> (Viewport, Camera) {
+    let mut style = face_style();
+    style.sky = None;
+    style.ground = Some([0.6, 0.6, 0.6]);
+    style.profiles = None;
+    let mut viewport = Viewport::new(device, style);
+    let up = DVec3::Z;
+    let quad = |x0: f64, x1: f64, y0: f64, y1: f64, z: f64| {
+        let c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        (up, c.map(|(x, y)| DVec3::new(x, y, z)))
+    };
+    let white = [1.0; 4];
+    let (vertices, indices) = quads_mesh(
+        &[
+            quad(-50.0, 50.0, -50.0, 50.0, 50.0),
+            quad(-100.0, -55.0, -20.0, 20.0, 20.0),
+        ],
+        white,
+        white,
+    );
+    viewport.set_faces(device, &vertices, &indices);
+    let camera = Camera {
+        eye: DVec3::new(0.0, 0.0, 800.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    (viewport, camera)
+}
+
+fn sun_30() -> Shadows {
+    let a = 30f32.to_radians();
+    Shadows {
+        sun_dir: [a.sin(), 0.0, a.cos()],
+        light: 0.8,
+        dark: 0.45,
+        on_faces: true,
+        on_ground: true,
+    }
+}
+
+#[test]
+fn shadows_fall_on_ground_and_faces() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let (mut viewport, camera) = shadow_scene(&device);
+    viewport.set_shadows(Some(sun_30()));
+    let img = render(&device, &queue, &mut viewport, &camera, "shadows");
+    let at = |x: f64, y: f64, z: f64| luma(&pixel_at(&img, &camera, DVec3::new(x, y, z)));
+    // Ground: the shadow spans x in [-78.9, 21.1], y in [-50, 50]; the slab hides
+    // x in [-50, 50] and the ledge y in [-20, 20] from above.
+    let (ground_lit, ground_shadow) = (at(-130.0, 30.0, 0.0), at(-70.0, 30.0, 0.0));
+    let ground_east = at(70.0, 30.0, 0.0);
+    eprintln!("ground lit {ground_lit}, east {ground_east}, shadow {ground_shadow}");
+    let expected = 0.45 / (0.45 + 0.8 * 30f32.to_radians().cos());
+    let ratio = ground_shadow as f32 / ground_lit as f32;
+    assert!(
+        (ratio - expected).abs() < 0.06,
+        "ground shadow ratio {ratio}, expected {expected}"
+    );
+    assert!(
+        (ground_east - ground_lit).abs() <= 3,
+        "ground east of the shadow is lit"
+    );
+    // Ledge at z = 20: the shadow there spans x in [-67.3, 32.7].
+    let (ledge_lit, ledge_shadow) = (at(-90.0, 0.0, 20.0), at(-60.0, 0.0, 20.0));
+    eprintln!("ledge lit {ledge_lit}, shadow {ledge_shadow}");
+    let ratio = ledge_shadow as f32 / ledge_lit as f32;
+    assert!(
+        (ratio - expected).abs() < 0.06,
+        "ledge shadow ratio {ratio}, expected {expected}"
+    );
+    // The slab top is lit: white * min(1, dark + light cos 30) = full white.
+    let slab = at(0.0, 0.0, 50.0);
+    assert!(slab > 245, "slab lit, got {slab}");
+
+    // Not on faces: the ledge is evenly lit, the ground still shadowed.
+    viewport.set_shadows(Some(Shadows {
+        on_faces: false,
+        ..sun_30()
+    }));
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        "shadows_ground_only",
+    );
+    let at = |x: f64, y: f64, z: f64| luma(&pixel_at(&img, &camera, DVec3::new(x, y, z)));
+    assert!((at(-90.0, 0.0, 20.0) - at(-60.0, 0.0, 20.0)).abs() <= 3);
+    assert!(at(-70.0, 30.0, 0.0) < at(-130.0, 0.0, 0.0) - 30);
+
+    // Sun below the horizon: no shadows, faces get only the dark (ambient) term.
+    viewport.set_shadows(Some(Shadows {
+        sun_dir: [0.5, 0.0, -0.5],
+        ..sun_30()
+    }));
+    let img = render(&device, &queue, &mut viewport, &camera, "shadows_night");
+    let at = |x: f64, y: f64, z: f64| luma(&pixel_at(&img, &camera, DVec3::new(x, y, z)));
+    assert!((at(-70.0, 30.0, 0.0) - at(-130.0, 0.0, 0.0)).abs() <= 3);
+    assert!((at(0.0, 0.0, 50.0) - (0.45f32 * 255.0) as i32).abs() <= 3);
+}
+
+#[test]
+fn translucent_faces_sort_back_to_front() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    let up = DVec3::Z;
+    let quad = |z: f64| {
+        let c = [(-50.0, -50.0), (50.0, -50.0), (50.0, 50.0), (-50.0, 50.0)];
+        (up, c.map(|(x, y)| DVec3::new(x, y, z)))
+    };
+    // Near red submitted first, far blue second: unsorted, blue would end up on top.
+    let red = [0.9, 0.1, 0.1, 0.6];
+    let blue = [0.1, 0.1, 0.9, 0.6];
+    let (mut vertices, mut indices) = quads_mesh(&[quad(20.0)], red, red);
+    let (bv, bi) = quads_mesh(&[quad(0.0)], blue, blue);
+    let base = vertices.len() as u32;
+    vertices.extend(bv);
+    indices.extend(bi.iter().map(|i| i + base));
+    viewport.set_faces(&device, &vertices, &indices);
+    let camera = Camera {
+        eye: DVec3::new(0.0, 0.0, 500.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        "translucent_sorted",
+    );
+    let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
+    assert!(px[0] > px[2] + 20, "nearer red pane on top, got {px:?}");
+    // From below the order flips.
+    let below = Camera {
+        eye: DVec3::new(0.0, 0.0, -500.0),
+        ..camera
+    };
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &below,
+        "translucent_sorted_below",
+    );
+    let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
+    assert!(px[2] > px[0] + 20, "nearer blue pane on top, got {px:?}");
 }

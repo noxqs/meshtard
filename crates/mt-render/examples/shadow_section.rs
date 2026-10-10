@@ -4,8 +4,7 @@
 use egui_wgpu::wgpu;
 use glam::DVec3;
 use mt_render::{
-    Camera, FaceVertex, SectionCut, Segment, Shadows, Style, Viewport, section_lines,
-    sun_direction,
+    Camera, FaceVertex, SectionCut, Segment, Shadows, Style, Viewport, section_lines, sun_direction,
 };
 use mt_spec::Spec;
 
@@ -14,8 +13,8 @@ const SIZE: [u32; 2] = [800, 500];
 fn main() {
     let out_dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
-        .expect("no wgpu adapter");
+    let adapter =
+        pollster::block_on(instance.request_adapter(&Default::default())).expect("no wgpu adapter");
     let (device, queue) =
         pollster::block_on(adapter.request_device(&Default::default())).expect("no device");
 
@@ -30,9 +29,12 @@ fn main() {
         .collect::<Vec<_>>();
     // A slab floating over the box's corner, and a translucent pane.
     quads.extend(
-        box_quads(DVec3::new(30.0, 20.0, 100.0), DVec3::new(110.0, 80.0, 106.0))
-            .into_iter()
-            .map(|q| (q, white, back)),
+        box_quads(
+            DVec3::new(30.0, 20.0, 100.0),
+            DVec3::new(110.0, 80.0, 106.0),
+        )
+        .into_iter()
+        .map(|q| (q, white, back)),
     );
     quads.push((
         (
@@ -89,23 +91,41 @@ fn main() {
         point: point.as_vec3().into(),
         normal: normal.as_vec3().into(),
     }));
-    edges.extend(section_lines(&triangles, point, normal).iter().map(|[a, b]| {
-        Segment::line(
-            a.as_vec3().into(),
-            b.as_vec3().into(),
-            [0.0, 0.0, 0.0, 1.0],
-            [3.0, 0.0],
-        )
-    }));
+    edges.extend(
+        section_lines(&triangles, point, normal)
+            .iter()
+            .map(|[a, b]| {
+                Segment::line(
+                    a.as_vec3().into(),
+                    b.as_vec3().into(),
+                    [0.0, 0.0, 0.0, 1.0],
+                    [3.0, 0.0],
+                )
+            }),
+    );
     viewport.set_edges(&device, &edges);
-    save(&device, &queue, &mut viewport, &camera, &out_dir, "shadows_section");
+    save(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        &out_dir,
+        "shadows_section",
+    );
 
     // From the cut side: the box is open, its inside (back faces) in the sun.
     let inside = Camera {
         eye: DVec3::new(420.0, -260.0, 300.0),
         ..camera
     };
-    save(&device, &queue, &mut viewport, &inside, &out_dir, "section_inside");
+    save(
+        &device,
+        &queue,
+        &mut viewport,
+        &inside,
+        &out_dir,
+        "section_inside",
+    );
 
     viewport.set_shadows(None);
     save(&device, &queue, &mut viewport, &camera, &out_dir, "section");
