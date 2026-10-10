@@ -34,8 +34,16 @@ impl Aabb {
 
 #[derive(Debug, Clone)]
 enum Node {
-    Leaf { bounds: Aabb, first: usize, count: usize },
-    Inner { bounds: Aabb, left: usize, right: usize },
+    Leaf {
+        bounds: Aabb,
+        first: usize,
+        count: usize,
+    },
+    Inner {
+        bounds: Aabb,
+        left: usize,
+        right: usize,
+    },
 }
 
 impl Node {
@@ -104,7 +112,11 @@ impl Bvh {
         let bounds = self.bounds_of(&self.order[first..first + count]);
         let index = self.nodes.len();
         if count <= LEAF_SIZE {
-            self.nodes.push(Node::Leaf { bounds, first, count });
+            self.nodes.push(Node::Leaf {
+                bounds,
+                first,
+                count,
+            });
             return index;
         }
         // Split at the median centroid along the widest axis.
@@ -121,10 +133,18 @@ impl Bvh {
         let mid = count / 2;
         self.order[first..first + count]
             .select_nth_unstable_by(mid, |&a, &b| centroid(a).total_cmp(&centroid(b)));
-        self.nodes.push(Node::Leaf { bounds, first, count });
+        self.nodes.push(Node::Leaf {
+            bounds,
+            first,
+            count,
+        });
         let left = self.build_node(first, mid);
         let right = self.build_node(first + mid, count - mid);
-        self.nodes[index] = Node::Inner { bounds, left, right };
+        self.nodes[index] = Node::Inner {
+            bounds,
+            left,
+            right,
+        };
         index
     }
 
@@ -219,13 +239,19 @@ mod tests {
         // Pseudo-random triangles, compared against testing every triangle.
         let mut s = 1u64;
         let mut rnd = || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 11) as f64 / (1u64 << 53) as f64 * 20.0 - 10.0
         };
         let tris: Vec<[DVec3; 3]> = (0..500)
             .map(|_| {
                 let c = DVec3::new(rnd(), rnd(), rnd());
-                [c, c + DVec3::new(rnd(), rnd(), rnd()) / 5.0, c + DVec3::new(rnd(), rnd(), rnd()) / 5.0]
+                [
+                    c,
+                    c + DVec3::new(rnd(), rnd(), rnd()) / 5.0,
+                    c + DVec3::new(rnd(), rnd(), rnd()) / 5.0,
+                ]
             })
             .collect();
         let bvh = Bvh::build(tris.clone());

@@ -1,0 +1,55 @@
+# Default Tray of SketchUp 2026 (Windows), docked on the right of the viewport.
+# DRAFT from memory. Check during the trial: panel list and order, which panels start
+# expanded, tray width in pixels at 100% scaling, header look.
+#
+# Each panel's id is the Window menu command that shows it (menus.toml).
+verified = false
+
+name = "Default Tray"
+dock = "right"
+width = 300
+
+[[panel]]
+id = "window.entity_info"
+title = "Entity Info"
+expanded = true
+
+[[panel]]
+id = "window.materials"
+title = "Materials"
+expanded = false
+
+[[panel]]
+id = "window.components"
+title = "Components"
+expanded = false
+
+[[panel]]
+id = "window.styles"
+title = "Styles"
+expanded = false
+
+[[panel]]
+id = "window.tags"
+title = "Tags"
+expanded = false
+
+[[panel]]
+id = "window.scenes"
+title = "Scenes"
+expanded = false
+
+[[panel]]
+id = "window.shadows"
+title = "Shadows"
+expanded = false
+
+[[panel]]
+id = "window.environments"
+title = "Environments"
+expanded = false
+
+[[panel]]
+id = "window.instructor"
+title = "Instructor"
+expanded = false

@@ -23,6 +23,16 @@ impl Tool {
         })
     }
 
+    /// Command id that selects this tool.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Select => "tool.select",
+            Self::Orbit => "camera.orbit",
+            Self::Pan => "camera.pan",
+            Self::Zoom => "camera.zoom",
+        }
+    }
+
     /// Status bar hint. Draft wording; check against SketchUp.
     pub fn hint(self) -> &'static str {
         match self {

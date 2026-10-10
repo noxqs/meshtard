@@ -1,0 +1,46 @@
+# Look of the SketchUp 2026 (Windows) main window: Windows 11 light system theme.
+# DRAFT from memory. Check during the trial: sample colors from screenshots at 100%
+# scaling, measure toolbar button size, status bar height, Measurements box width.
+# Colors are sRGB [r, g, b]. Sizes are in points (1 point = 1 pixel at 100% scaling).
+verified = false
+
+[colors]
+window = [240, 240, 240]           # dialog/panel background (Windows "button face")
+menu_bar = [255, 255, 255]
+toolbar = [240, 240, 240]
+text = [0, 0, 0]
+text_disabled = [160, 160, 160]
+hover = [229, 241, 251]            # button hover fill
+hover_border = [0, 120, 215]
+pressed = [204, 228, 247]          # active tool / pushed button fill
+pressed_border = [0, 84, 153]
+menu_highlight = [145, 201, 247]   # highlighted menu item
+separator = [200, 200, 200]
+border = [173, 173, 173]           # panel and text field borders
+tray = [240, 240, 240]
+tray_title = [255, 255, 255]       # "Default Tray" title bar
+panel_header = [228, 228, 228]     # collapsible panel header
+panel_body = [240, 240, 240]
+status_bar = [240, 240, 240]
+field = [255, 255, 255]            # text field background
+selection = [0, 120, 215]
+
+[icons]
+ink = [38, 38, 38]                 # outlines
+accent = [27, 112, 203]            # blue: selection, camera tools
+face = [242, 214, 140]             # warm fill for faces
+face_dark = [196, 160, 84]         # shaded side of a face
+red = [214, 54, 46]
+green = [52, 150, 72]
+paper = [255, 255, 255]
+
+[sizes]
+font = 12.0                        # Segoe UI 9 pt at 96 dpi
+menu_bar_height = 20.0
+toolbar_icon = 24.0                # "Large icons" (View > Toolbars > Options), the default
+toolbar_button = 30.0
+toolbar_padding = 2.0
+separator_gap = 7.0
+panel_header_height = 22.0
+status_bar_height = 24.0
+measurements_width = 150.0

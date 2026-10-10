@@ -1,0 +1,16 @@
+[package]
+name = "mt-ui"
+description = "SketchUp-style main window: menu bar, toolbars, Default Tray, status bar, Measurements box"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mt-spec.workspace = true
+egui.workspace = true
+
+[dev-dependencies]
+eframe.workspace = true
+
+[lints]
+workspace = true

@@ -9,7 +9,7 @@ use egui_wgpu::wgpu;
 use glam::DVec2;
 use mt_kernel::bvh::Bvh;
 use mt_render::{Camera, FaceVertex, Segment, Style, Viewport};
-use mt_spec::{MenuItem, Shortcut, Spec};
+use mt_spec::{Shortcut, Spec};
 
 use document::{Document, Owner, Scene};
 use nav::Tool;
@@ -81,6 +81,9 @@ struct App {
     texture: Option<(egui::TextureId, [u32; 2])>,
     /// Shortcut for each implemented command, parsed once.
     shortcuts: Vec<(Shortcut, egui::Key, &'static str)>,
+    /// The window around the viewport; taken out while it draws (it calls back into
+    /// the app for the viewport).
+    shell: Option<mt_ui::Shell>,
     document: Option<Document>,
     /// Drawn geometry of the document and its pick index.
     scene: Scene,
@@ -103,6 +106,7 @@ impl App {
             })
             .collect();
         Self {
+            shell: Some(mt_ui::Shell::new(&spec)),
             camera: Camera::from_spec(&spec.default_model.camera),
             tool: Tool::Select,
             viewport: Viewport::new(&render_state.device, Style::from_spec(&spec.default_model)),
@@ -275,7 +279,7 @@ impl App {
         }
     }
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context, frame: &eframe::Frame, typing: bool) {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -284,27 +288,19 @@ impl App {
                 .iter()
                 .filter(|(s, key, _)| {
                     let m = i.modifiers;
-                    i.key_pressed(*key) && m.ctrl == s.ctrl && m.shift == s.shift && m.alt == s.alt
+                    // While typing into the Measurements box, plain keys are text.
+                    let plain = !s.ctrl && !s.alt;
+                    !(typing && plain)
+                        && i.key_pressed(*key)
+                        && m.ctrl == s.ctrl
+                        && m.shift == s.shift
+                        && m.alt == s.alt
                 })
                 .map(|(_, _, id)| *id)
                 .collect()
         });
         for id in pressed {
             self.run_command(ctx, frame, id);
-        }
-    }
-
-    fn menu_bar(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        let mut clicked = None;
-        egui::MenuBar::new().ui(ui, |ui| {
-            for menu in &self.spec.menus.menu {
-                ui.menu_button(&menu.label, |ui| {
-                    menu_items(ui, &menu.items, &self.spec, &mut clicked);
-                });
-            }
-        });
-        if let Some(id) = clicked {
-            self.run_command(ui.ctx(), frame, &id);
         }
     }
 
@@ -486,42 +482,96 @@ fn wheel_notches(events: &[egui::Event]) -> f32 {
         .sum()
 }
 
-fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], spec: &Spec, clicked: &mut Option<String>) {
-    for item in items {
-        match item {
-            MenuItem::Separator { .. } => {
-                ui.separator();
-            }
-            MenuItem::Submenu { label, items } => {
-                ui.menu_button(label, |ui| menu_items(ui, items, spec, clicked));
-            }
-            MenuItem::Command { id, label } => {
-                let mut button = egui::Button::new(label);
-                if let Some(shortcut) = spec.keymap.shortcut(id) {
-                    button = button.shortcut_text(shortcut.to_string());
+impl App {
+    /// What the Entity Info panel shows for the current selection.
+    fn entity_info(&self) -> mt_ui::EntityInfo {
+        let items = self.selection.items();
+        let Some(doc) = &self.document else {
+            return mt_ui::EntityInfo::no_selection();
+        };
+        let root = &doc.model.root;
+        let inches = |v: f64| format!("{v:.3}\"");
+        match items {
+            [] => mt_ui::EntityInfo::no_selection(),
+            [Owner::Edge(e)] if root.edges.contains_key(*e) => {
+                let edge = &root.edges[*e];
+                let len = root.pos(edge.start).distance(root.pos(edge.end));
+                mt_ui::EntityInfo {
+                    title: "Edge".into(),
+                    rows: vec![
+                        ("Length".into(), inches(len)),
+                        (
+                            "Soft".into(),
+                            if edge.attrs.soft { "Yes" } else { "No" }.into(),
+                        ),
+                    ],
                 }
-                let enabled = IMPLEMENTED.contains(&id.as_str());
-                if ui.add_enabled(enabled, button).clicked() {
-                    *clicked = Some(id.clone());
-                    ui.close();
+            }
+            [Owner::Face(f)] if root.faces.contains_key(*f) => {
+                let tris = mt_kernel::tessellate::triangulate(root, *f);
+                let area: f64 = tris
+                    .iter()
+                    .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() / 2.0)
+                    .sum();
+                mt_ui::EntityInfo {
+                    title: "Face".into(),
+                    rows: vec![("Area".into(), format!("{area:.3} sq in"))],
                 }
             }
+            [Owner::Instance(i)] if *i < root.instances.len() => {
+                let inst = &root.instances[*i];
+                let def = doc.model.definitions.get(inst.definition);
+                mt_ui::EntityInfo {
+                    title: "Component".into(),
+                    rows: vec![
+                        ("Instance".into(), inst.name.clone()),
+                        (
+                            "Definition".into(),
+                            def.map(|d| d.name.clone()).unwrap_or_default(),
+                        ),
+                    ],
+                }
+            }
+            _ => mt_ui::EntityInfo {
+                title: format!("{} Entities", items.len()),
+                rows: Vec::new(),
+            },
         }
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.handle_shortcuts(ui.ctx(), frame);
-        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui, frame));
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            match &self.message {
-                Some(m) => ui.colored_label(egui::Color32::DARK_RED, m),
-                None => ui.label(self.tool.hint()),
-            };
-        });
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| self.viewport_ui(ui, frame));
+        let Some(mut shell) = self.shell.take() else {
+            return;
+        };
+        shell.capture_typing(ui.ctx());
+        self.handle_shortcuts(ui.ctx(), frame, shell.is_typing());
+
+        let info = self.entity_info();
+        let status = self
+            .message
+            .clone()
+            .unwrap_or_else(|| self.tool.hint().to_owned());
+        let spec = self.spec.clone();
+        let ui_frame = mt_ui::Frame {
+            spec: &spec,
+            active_tool: self.tool.command(),
+            status: &status,
+            measurements_label: "Measurements",
+            measurements_value: "",
+            is_enabled: &|id| IMPLEMENTED.contains(&id),
+            is_checked: &|_| false,
+            entity_info: &info,
+        };
+        let events = shell.show(ui, &ui_frame, |ui| self.viewport_ui(ui, frame));
+        self.shell = Some(shell);
+        for event in events {
+            match event {
+                mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
+                // Typed values go to the active tool once drawing tools exist (M4).
+                mt_ui::Event::Measurements(_) => {}
+            }
+        }
     }
 }

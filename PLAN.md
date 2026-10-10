@@ -125,10 +125,12 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] Not yet: undo (transactions), spatial index for large models (lookups are linear today), Intersect Faces.
 
 ### M3: Renderer and GUI shell
-- Faces, edges, profiles, front/back face colors, default style.
-- Menu bar, toolbars, Default Tray, status bar, Measurements box, all built from `spec/`.
-- Selection: click, shift, ctrl, window vs crossing, double/triple click.
-- CUDA: triangulation and BVH build.
+- [x] Faces, edges, profiles (borders and silhouettes), front/back face colors.
+- [x] `mt-ui`: menu bar, toolbars (Getting Started, Large Tool Set) with original icons, Default Tray with Entity Info, status bar, Measurements box (typing captured from the viewport), all built from `spec/`.
+- [x] Selection: click, Ctrl/Shift/Ctrl+Shift, window vs crossing, double/triple click, highlight; Select All, Select None, Delete.
+- [x] CPU BVH for picking.
+- [ ] CUDA triangulation and BVH build: to be done on the user's Linux machine with an NVIDIA GPU (Remote Control session).
+- [ ] Not yet: dockable toolbars, other tray panels' contents, component-aligned selection boxes.
 
 ### M4: Inference engine
 - Endpoint, midpoint, on-edge, on-face, center, intersection.

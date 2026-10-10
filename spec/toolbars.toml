@@ -1,0 +1,104 @@
+# Toolbars of SketchUp 2026 (Windows), default workspace.
+# DRAFT from memory. Check during the trial: which toolbars are visible on first start,
+# where they are docked, button order, separators, flyouts, tooltip text.
+#
+# Each toolbar:
+#   id       stable meshtard id
+#   name     title shown in View > Toolbars
+#   dock     "top", "left", "right" or "bottom"
+#   row      order among toolbars on the same dock (0 = closest to the menu bar / window edge)
+#   columns  buttons per row for toolbars docked left/right (Large Tool Set is two columns)
+#   visible  shown in the default workspace
+#   items    buttons and separators, in order
+# Button: { id = command id from menus.toml, tooltip = "...", flyout = [ids] (optional) }.
+# A flyout button shows the first id until the user picks another one from its list.
+verified = false
+
+[[toolbar]]
+id = "getting_started"
+name = "Getting Started"
+dock = "top"
+row = 0
+columns = 1
+visible = true
+items = [
+  { id = "tool.select", tooltip = "Select" },
+  { id = "edit.make_component", tooltip = "Make Component" },
+  { id = "tool.eraser", tooltip = "Eraser" },
+  { separator = true },
+  { id = "tool.line", tooltip = "Line" },
+  { id = "tool.arc_2pt", tooltip = "2 Point Arc", flyout = ["tool.arc_2pt", "tool.arc", "tool.arc_3pt", "tool.pie"] },
+  { id = "tool.rectangle", tooltip = "Rectangle", flyout = ["tool.rectangle", "tool.rotated_rectangle", "tool.circle", "tool.polygon"] },
+  { separator = true },
+  { id = "tool.push_pull", tooltip = "Push/Pull" },
+  { id = "tool.offset", tooltip = "Offset" },
+  { id = "tool.move", tooltip = "Move" },
+  { id = "tool.rotate", tooltip = "Rotate" },
+  { id = "tool.scale", tooltip = "Scale" },
+  { separator = true },
+  { id = "tool.tape_measure", tooltip = "Tape Measure" },
+  { id = "tool.text", tooltip = "Text" },
+  { id = "tool.paint_bucket", tooltip = "Paint Bucket" },
+  { separator = true },
+  { id = "camera.orbit", tooltip = "Orbit" },
+  { id = "camera.pan", tooltip = "Pan" },
+  { id = "camera.zoom", tooltip = "Zoom" },
+  { id = "camera.zoom_extents", tooltip = "Zoom Extents" },
+  { separator = true },
+  { id = "window.3d_warehouse", tooltip = "3D Warehouse" },
+  { id = "extensions.warehouse", tooltip = "Extension Warehouse" },
+  { id = "file.send_to_layout", tooltip = "Send to LayOut" },
+  { id = "extensions.manager", tooltip = "Extension Manager" },
+]
+
+[[toolbar]]
+id = "large_tool_set"
+name = "Large Tool Set"
+dock = "left"
+row = 0
+columns = 2
+visible = true
+items = [
+  { id = "tool.select", tooltip = "Select" },
+  { id = "edit.make_component", tooltip = "Make Component" },
+  { id = "tool.paint_bucket", tooltip = "Paint Bucket" },
+  { id = "tool.eraser", tooltip = "Eraser" },
+  { id = "tool.tag", tooltip = "Tag" },
+  { separator = true },
+  { id = "tool.line", tooltip = "Line" },
+  { id = "tool.freehand", tooltip = "Freehand" },
+  { id = "tool.rectangle", tooltip = "Rectangle" },
+  { id = "tool.rotated_rectangle", tooltip = "Rotated Rectangle" },
+  { id = "tool.circle", tooltip = "Circle" },
+  { id = "tool.polygon", tooltip = "Polygon" },
+  { id = "tool.arc", tooltip = "Arc" },
+  { id = "tool.arc_2pt", tooltip = "2 Point Arc" },
+  { id = "tool.arc_3pt", tooltip = "3 Point Arc" },
+  { id = "tool.pie", tooltip = "Pie" },
+  { separator = true },
+  { id = "tool.move", tooltip = "Move" },
+  { id = "tool.push_pull", tooltip = "Push/Pull" },
+  { id = "tool.rotate", tooltip = "Rotate" },
+  { id = "tool.follow_me", tooltip = "Follow Me" },
+  { id = "tool.scale", tooltip = "Scale" },
+  { id = "tool.offset", tooltip = "Offset" },
+  { separator = true },
+  { id = "tool.tape_measure", tooltip = "Tape Measure" },
+  { id = "tool.dimensions", tooltip = "Dimensions" },
+  { id = "tool.protractor", tooltip = "Protractor" },
+  { id = "tool.text", tooltip = "Text" },
+  { id = "tool.axes", tooltip = "Axes" },
+  { id = "tool.text_3d", tooltip = "3D Text" },
+  { separator = true },
+  { id = "camera.orbit", tooltip = "Orbit" },
+  { id = "camera.pan", tooltip = "Pan" },
+  { id = "camera.zoom", tooltip = "Zoom" },
+  { id = "camera.zoom_window", tooltip = "Zoom Window" },
+  { id = "camera.zoom_extents", tooltip = "Zoom Extents" },
+  { id = "camera.previous", tooltip = "Previous" },
+  { separator = true },
+  { id = "camera.position", tooltip = "Position Camera" },
+  { id = "camera.look_around", tooltip = "Look Around" },
+  { id = "camera.walk", tooltip = "Walk" },
+  { id = "tool.section_plane", tooltip = "Section Plane" },
+]

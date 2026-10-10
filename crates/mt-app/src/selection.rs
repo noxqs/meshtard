@@ -86,7 +86,6 @@ impl Selection {
     pub fn items(&self) -> &[Owner] {
         &self.items
     }
-
 }
 
 /// What a click with `clicks` presses on `hit` selects.
@@ -412,13 +411,18 @@ mod pick_tests {
         let doc = Document::open(&path).unwrap();
         let scene = doc.scene();
         let bvh = Bvh::build(scene.triangles.clone());
-        let camera = doc.saved_camera().or_else(|| doc.extents_camera(35.0)).unwrap();
+        let camera = doc
+            .saved_camera()
+            .or_else(|| doc.extents_camera(35.0))
+            .unwrap();
         let viewport = DVec2::new(1280.0, 760.0);
         let mut hits = 0;
         let mut tried = 0;
         for (t, tri) in scene.triangles.iter().enumerate().step_by(7) {
             let c = (tri[0] + tri[1] + tri[2]) / 3.0;
-            let Some(px) = camera.project(c, viewport) else { continue };
+            let Some(px) = camera.project(c, viewport) else {
+                continue;
+            };
             if px.x < 0.0 || px.y < 0.0 || px.x > viewport.x || px.y > viewport.y {
                 continue;
             }
@@ -429,6 +433,9 @@ mod pick_tests {
             let _ = t;
         }
         assert!(tried > 10, "only {tried} triangles on screen");
-        assert_eq!(hits, tried, "every on-screen triangle centroid picks something");
+        assert_eq!(
+            hits, tried,
+            "every on-screen triangle centroid picks something"
+        );
     }
 }

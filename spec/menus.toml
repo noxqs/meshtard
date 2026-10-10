@@ -228,10 +228,13 @@ items = [
   { id = "window.tags", label = "Tags" },
   { id = "window.scenes", label = "Scenes" },
   { id = "window.shadows", label = "Shadows" },
+  { id = "window.environments", label = "Environments" },
   { id = "window.fog", label = "Fog" },
   { id = "window.soften_edges", label = "Soften Edges" },
   { id = "window.outliner", label = "Outliner" },
   { id = "window.instructor", label = "Instructor" },
+  { separator = true },
+  { id = "window.3d_warehouse", label = "3D Warehouse" },
   { separator = true },
   { id = "window.preferences", label = "Preferences" },
 ]
