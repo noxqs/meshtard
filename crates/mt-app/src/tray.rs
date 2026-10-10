@@ -80,6 +80,7 @@ impl App {
                 Owner::Edge(e) => ents.edges.get(e).map(|x| x.attrs.layer),
                 Owner::Face(f) => ents.faces.get(f).map(|x| x.attrs.layer),
                 Owner::Instance(i) => ents.instances.get(i).map(|x| x.layer),
+                Owner::Section(_) => None,
             }
             .map(|l| l.unwrap_or(0))
         };
@@ -235,6 +236,7 @@ impl App {
                                     x.layer = layer;
                                 }
                             }
+                            Owner::Section(_) => {}
                         }
                     }
                     !items.is_empty()

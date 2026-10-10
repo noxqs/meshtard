@@ -40,6 +40,7 @@ impl Tool {
             "tool.offset" => Self::Modify("tool.offset"),
             "tool.follow_me" => Self::Modify("tool.follow_me"),
             "tool.paint_bucket" => Self::Modify("tool.paint_bucket"),
+            "tool.section_plane" => Self::Modify("tool.section_plane"),
             "camera.orbit" => Self::Orbit,
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,

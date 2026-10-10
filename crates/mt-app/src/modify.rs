@@ -58,6 +58,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.offset" => Box::new(Offset::default()),
         "tool.follow_me" => Box::new(FollowMe),
         "tool.paint_bucket" => Box::new(PaintBucket::default()),
+        "tool.section_plane" => Box::new(SectionPlaneTool),
         _ => return None,
     })
 }
@@ -70,6 +71,7 @@ fn split(targets: &[Owner]) -> (Vec<EdgeId>, Vec<FaceId>, Vec<usize>) {
             Owner::Edge(x) => e.push(x),
             Owner::Face(x) => f.push(x),
             Owner::Instance(x) => i.push(x),
+            Owner::Section(_) => {}
         }
     }
     (e, f, i)
@@ -87,6 +89,24 @@ fn targets(ctx: &Ctx) -> Vec<Owner> {
 
 /// Applies `xf` to the targets, or a transformed copy when `copy`.
 fn apply(ents: &mut Entities, targets: &[Owner], xf: DMat4, copy: bool) {
+    // Section planes move with the selection (or copy).
+    for t in targets {
+        if let Owner::Section(i) = *t
+            && let Some(sp) = ents.section_planes.get(i).cloned()
+        {
+            let moved = mt_kernel::SectionPlane {
+                point: xf.transform_point3(sp.point),
+                normal: (glam::DMat3::from_mat4(xf).inverse().transpose() * sp.normal)
+                    .normalize_or_zero(),
+                ..sp
+            };
+            if copy {
+                ents.section_planes.push(moved);
+            } else {
+                ents.section_planes[i] = moved;
+            }
+        }
+    }
     let (edges, faces, instances) = split(targets);
     if copy {
         mt_kernel::transform::copy_geometry(ents, &edges, &faces, xf);
@@ -781,7 +801,7 @@ impl ModifyTool for PaintBucket {
                         inst.material = m;
                     }
                 }
-                Owner::Edge(_) => {}
+                Owner::Edge(_) | Owner::Section(_) => {}
             }
         }
         changed
@@ -806,6 +826,76 @@ impl ModifyTool for PaintBucket {
     fn set_material(&mut self, material: Option<usize>) {
         self.material = material;
     }
+}
+
+// ------------------------------------------------------------------ Section Plane
+
+/// Places a section plane on the face under the cursor (facing the way the face does),
+/// or horizontally elsewhere, and makes it the active cut. SketchUp 2026 asks for a
+/// name and symbol first (not implemented); arrow-key orientation locks are missing.
+#[derive(Debug)]
+pub struct SectionPlaneTool;
+
+impl SectionPlaneTool {
+    fn normal(inf: &Inference) -> DVec3 {
+        inf.normal.filter(|n| n.length() > 0.5).unwrap_or(DVec3::Z)
+    }
+}
+
+impl ModifyTool for SectionPlaneTool {
+    fn status(&self) -> String {
+        "Select a face to place the section plane on.".into()
+    }
+
+    fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        ("", String::new())
+    }
+
+    fn anchor(&self) -> Option<DVec3> {
+        None
+    }
+
+    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        let n = ctx.ents.section_planes.len() + 1;
+        ctx.ents.section_planes.push(mt_kernel::SectionPlane {
+            point: inf.point,
+            normal: Self::normal(inf),
+            name: format!("Section Plane {n}"),
+            hidden: false,
+        });
+        ctx.ents.active_section = Some(ctx.ents.section_planes.len() - 1);
+        true
+    }
+
+    fn typed(
+        &mut self,
+        _ctx: &mut Ctx,
+        _cur: Option<&Inference>,
+        _text: &str,
+        _units: LengthUnit,
+    ) -> bool {
+        false
+    }
+
+    fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
+        let n = Self::normal(cur);
+        let (u, v) = n.any_orthonormal_pair();
+        let c = cur.point;
+        let h = 20.0;
+        let ring: Vec<DVec3> = [
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 1.0),
+            (-1.0, 1.0),
+            (-1.0, -1.0),
+        ]
+        .iter()
+        .map(|(a, b)| c + (u * *a + v * *b) * h)
+        .collect();
+        vec![ring, vec![c, c + n * h * 0.5]]
+    }
+
+    fn cancel(&mut self) {}
 }
 
 #[cfg(test)]

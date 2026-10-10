@@ -94,6 +94,22 @@ pub fn from_skp(src: &skp::Model) -> Model {
     }
     model.root = entities(&src.root, &maps);
     model.root.guides = guides(&src.root);
+    model.root.section_planes = src
+        .root
+        .section_planes
+        .iter()
+        .filter_map(|s| {
+            // a x + b y + c z + d = 0. Active state is not read from the file yet.
+            let n = DVec3::new(s.plane[0], s.plane[1], s.plane[2]);
+            let len = n.length();
+            (len > 1e-12).then(|| crate::entities::SectionPlane {
+                point: -n * s.plane[3] / (len * len),
+                normal: n / len,
+                name: s.name.clone(),
+                hidden: s.hidden,
+            })
+        })
+        .collect();
     for p in &src.pages {
         let (Some(eye), Some(target)) = (p.eye, p.target) else {
             continue;

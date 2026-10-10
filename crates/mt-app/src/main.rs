@@ -61,6 +61,15 @@ const IMPLEMENTED: &[&str] = &[
     "edit.explode",
     "edit.make_unique",
     "view.shadows",
+    "view.section_planes",
+    "view.section_cuts",
+    "view.wireframe",
+    "view.hidden_line",
+    "view.shaded",
+    "view.shaded_textures",
+    "view.monochrome",
+    "view.xray",
+    "tool.section_plane",
     "edit.delete_guides",
     "edit.undo",
     "edit.redo",
@@ -137,6 +146,8 @@ struct App {
     inference: Option<mt_infer::Inference>,
     /// The active drawing tool, when `tool` is `Tool::Draw`.
     draw: Option<Box<dyn tools::DrawTool>>,
+    /// Thick lines where the active section cuts the model.
+    cut_lines: Vec<Segment>,
     /// Tray state the model does not hold.
     active_tag: usize,
     current_material: Option<usize>,
@@ -185,6 +196,7 @@ impl App {
             modify: None,
             ctx_xf: glam::DMat4::IDENTITY,
             active_tag: 0,
+            cut_lines: Vec::new(),
             current_material: None,
             active_scene: None,
             scene_tabs: true,
@@ -241,7 +253,36 @@ impl App {
             .map_or(glam::DMat4::IDENTITY, Document::context_transform);
         self.engine.reference_edge = None;
         self.apply_shadows();
+        self.cut_lines.clear();
+        let mut cut = None;
+        if let (Some((p, n)), Some(doc)) = (self.scene.section, &self.document) {
+            cut = Some(mt_render::SectionCut {
+                point: p.as_vec3().to_array(),
+                normal: n.as_vec3().to_array(),
+            });
+            let width = doc.model.style.section_cut_width;
+            let f = |q: DVec3| q.as_vec3().to_array();
+            self.cut_lines = mt_render::section_lines(&self.scene.triangles, p, n)
+                .into_iter()
+                .map(|[a, b]| Segment::line(f(a), f(b), [0.0, 0.0, 0.0, 1.0], [width, 0.0]))
+                .collect();
+        }
+        self.viewport.set_section(cut);
         if let Some(doc) = &self.document {
+            let st = &doc.model.style;
+            let face_style = match st.face_style {
+                mt_kernel::FaceStyle::Wireframe => mt_render::FaceStyle::Wireframe,
+                mt_kernel::FaceStyle::HiddenLine => mt_render::FaceStyle::HiddenLine,
+                mt_kernel::FaceStyle::Shaded => mt_render::FaceStyle::Shaded,
+                mt_kernel::FaceStyle::ShadedWithTextures => {
+                    mt_render::FaceStyle::ShadedWithTextures
+                }
+                mt_kernel::FaceStyle::Monochrome => mt_render::FaceStyle::Monochrome,
+            };
+            self.viewport.set_face_style(face_style, st.xray);
+            let rgb = |c: [u8; 3]| c.map(|x| f32::from(x) / 255.0);
+            self.viewport
+                .set_monochrome_colors(rgb(doc.model.front_color), rgb(doc.model.back_color));
             let mut style = Style::from_spec(&self.spec.default_model);
             let st = &doc.model.style;
             style.profiles = (st.edges && st.profiles).then_some(st.profile_width);
@@ -311,7 +352,7 @@ impl App {
                     }
                 }
                 Owner::Instance(i) => self.scene.triangles[t].iter().for_each(|p| grow(i, *p)),
-                Owner::Edge(_) => {}
+                Owner::Edge(_) | Owner::Section(_) => {}
             }
         }
         for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
@@ -356,6 +397,7 @@ impl App {
         self.viewport
             .set_selected_faces(device, &vertices, &indices);
         edges.extend(guides);
+        edges.extend(self.cut_lines.iter().copied());
         self.viewport.set_edges(device, &edges);
     }
 
@@ -413,6 +455,14 @@ impl App {
                 doc.model.shadows.enabled = !doc.model.shadows.enabled;
                 self.apply_shadows();
             }
+        } else if let Some(rs) = frame.wgpu_render_state()
+            && id.starts_with("view.")
+            && let Some(doc) = self.document.as_mut()
+            && view_toggle(&mut doc.model.style, id)
+        {
+            // Display settings; not undo steps in this draft.
+            let device = rs.device.clone();
+            self.rebuild(&device);
         } else if id == "file.exit" {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -1043,6 +1093,19 @@ impl App {
                 return;
             };
             match hit {
+                // Double click on a section plane activates or deactivates it.
+                Some(Owner::Section(i)) if clicks == 2 => {
+                    if doc.edit(|ents| {
+                        ents.active_section = if ents.active_section == Some(i) {
+                            None
+                        } else {
+                            Some(i)
+                        };
+                        true
+                    }) {
+                        self.rebuild(device);
+                    }
+                }
                 // Double click on a group or component opens it for editing.
                 Some(Owner::Instance(i)) if clicks == 2 => {
                     if doc.open_instance(i) {
@@ -1114,6 +1177,38 @@ fn to_local(inf: &mt_infer::Inference, ctx_xf: glam::DMat4) -> mt_infer::Inferen
     }
 }
 
+/// Applies a View menu display toggle; false if `id` is not one.
+fn view_toggle(s: &mut mt_kernel::StyleSettings, id: &str) -> bool {
+    use mt_kernel::FaceStyle as F;
+    match id {
+        "view.section_planes" => s.section_planes = !s.section_planes,
+        "view.section_cuts" => s.section_cuts = !s.section_cuts,
+        "view.xray" => s.xray = !s.xray,
+        "view.wireframe" => s.face_style = F::Wireframe,
+        "view.hidden_line" => s.face_style = F::HiddenLine,
+        "view.shaded" => s.face_style = F::Shaded,
+        "view.shaded_textures" => s.face_style = F::ShadedWithTextures,
+        "view.monochrome" => s.face_style = F::Monochrome,
+        _ => return false,
+    }
+    true
+}
+
+fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
+    use mt_kernel::FaceStyle as F;
+    match id {
+        "view.section_planes" => s.section_planes,
+        "view.section_cuts" => s.section_cuts,
+        "view.xray" => s.xray,
+        "view.wireframe" => s.face_style == F::Wireframe,
+        "view.hidden_line" => s.face_style == F::HiddenLine,
+        "view.shaded" => s.face_style == F::Shaded,
+        "view.shaded_textures" => s.face_style == F::ShadedWithTextures,
+        "view.monochrome" => s.face_style == F::Monochrome,
+        _ => false,
+    }
+}
+
 /// The kernel's view of a selection.
 fn kernel_selection(items: &[Owner]) -> mt_kernel::group::Selection {
     let mut sel = mt_kernel::group::Selection::default();
@@ -1122,6 +1217,7 @@ fn kernel_selection(items: &[Owner]) -> mt_kernel::group::Selection {
             Owner::Edge(e) => sel.edges.push(e),
             Owner::Face(f) => sel.faces.push(f),
             Owner::Instance(i) => sel.instances.push(i),
+            Owner::Section(_) => {}
         }
     }
     sel
@@ -1210,6 +1306,16 @@ impl App {
                     ],
                 }
             }
+            [Owner::Section(i)] if *i < root.section_planes.len() => mt_ui::EntityInfo {
+                title: "Section Plane".into(),
+                rows: vec![
+                    ("Name".into(), root.section_planes[*i].name.clone()),
+                    (
+                        "Active".into(),
+                        if root.active_section == Some(*i) { "Yes" } else { "No" }.into(),
+                    ),
+                ],
+            },
             _ => mt_ui::EntityInfo {
                 title: format!("{} Entities", items.len()),
                 rows: Vec::new(),
@@ -1254,6 +1360,7 @@ impl eframe::App for App {
             .document
             .as_ref()
             .is_some_and(|d| d.model.shadows.enabled);
+        let style = self.document.as_ref().map(|d| d.model.style.clone());
         let can_undo = self.document.as_ref().is_some_and(Document::can_undo);
         let can_redo = self.document.as_ref().is_some_and(Document::can_redo);
         let spec = self.spec.clone();
@@ -1268,7 +1375,10 @@ impl eframe::App for App {
                 "edit.redo" => can_redo,
                 _ => IMPLEMENTED.contains(&id),
             },
-            is_checked: &|id| id == "view.shadows" && shadows_on,
+            is_checked: &|id| {
+                (id == "view.shadows" && shadows_on)
+                    || style.as_ref().is_some_and(|s| view_checked(s, id))
+            },
             entity_info: &info,
         };
         shell.set_tray_data(self.tray_data());

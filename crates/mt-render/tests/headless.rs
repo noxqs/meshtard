@@ -4,7 +4,7 @@
 
 use egui_wgpu::wgpu;
 use glam::{DVec2, DVec3};
-use mt_render::{Camera, FaceVertex, SectionCut, Segment, Shadows, Style, Viewport};
+use mt_render::{Camera, FaceStyle, FaceVertex, SectionCut, Segment, Shadows, Style, Viewport};
 use mt_spec::Spec;
 
 const SIZE: [u32; 2] = [640, 400];
@@ -835,4 +835,191 @@ fn box_shadow_with_app_sun() {
         (back - (0.45f32 * 255.0) as i32).abs() <= 4,
         "+Y face {back}"
     );
+}
+
+// ---------------------------------------------------------------- face styles
+
+/// The cube with `front`/`back` faces and black edges 2 points wide, seen from the
+/// default view direction. Its nearest corner is (-50, -50, 50) and its farthest
+/// (50, 50, -50); the three edges at the farthest corner are hidden.
+fn face_style_cube(
+    device: &wgpu::Device,
+    style: Style,
+    front: [f32; 4],
+    back: [f32; 4],
+) -> (Viewport, Camera) {
+    let mut viewport = Viewport::new(device, style);
+    let (vertices, indices) = quads_mesh(&cube_quads(), front, back);
+    viewport.set_faces(device, &vertices, &indices);
+    let segments: Vec<Segment> = cube_edges()
+        .iter()
+        .map(|(a, b, _)| {
+            Segment::line(
+                a.as_vec3().into(),
+                b.as_vec3().into(),
+                [0.0, 0.0, 0.0, 1.0],
+                [2.0, 0.0],
+            )
+        })
+        .collect();
+    viewport.set_edges(device, &segments);
+    (viewport, cube_camera(600.0, true))
+}
+
+/// Midpoint of the hidden bottom edge along X at the back (y = 50, z = -50).
+const HIDDEN_EDGE: DVec3 = DVec3::new(0.0, HALF, -HALF);
+/// Center of the visible -Y face.
+const FRONT_FACE: DVec3 = DVec3::new(0.0, -HALF, 0.0);
+/// Midpoint of the visible vertical edge nearest the camera.
+const NEAR_EDGE: DVec3 = DVec3::new(-HALF, -HALF, 0.0);
+
+#[test]
+fn wireframe_draws_edges_only() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    // Plain background, so "no face" means the background color.
+    let mut style = face_style();
+    style.sky = None;
+    style.ground = None;
+    let background = style.background;
+    let (mut viewport, camera) = face_style_cube(&device, style, RED, BLUE);
+    viewport.set_face_style(FaceStyle::Wireframe, false);
+    let img = render(&device, &queue, &mut viewport, &camera, "style_wireframe");
+    let face = pixel_at(&img, &camera, FRONT_FACE);
+    assert!(close(&face, background, 2), "background, got {face:?}");
+    for p in [NEAR_EDGE, HIDDEN_EDGE] {
+        let px = pixel_at(&img, &camera, p);
+        assert!(luma(&px) < 60, "edge at {p} drawn, got {px:?}");
+    }
+    // X-ray changes nothing in wireframe.
+    viewport.set_face_style(FaceStyle::Wireframe, true);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        "style_wireframe_xray",
+    );
+    let face = pixel_at(&img, &camera, FRONT_FACE);
+    assert!(close(&face, background, 2), "background, got {face:?}");
+}
+
+#[test]
+fn hidden_line_fills_faces_with_background() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let style = face_style();
+    let background = style.background;
+    let (mut viewport, camera) = face_style_cube(&device, style, RED, BLUE);
+    viewport.set_face_style(FaceStyle::HiddenLine, false);
+    let img = render(&device, &queue, &mut viewport, &camera, "style_hidden_line");
+    // Unshaded: every visible face is exactly the background color.
+    for p in [
+        FRONT_FACE,
+        DVec3::new(-HALF, 0.0, 0.0),
+        DVec3::new(0.0, 0.0, HALF),
+    ] {
+        let px = pixel_at(&img, &camera, p);
+        assert!(close(&px, background, 1), "face at {p}, got {px:?}");
+    }
+    let hidden = pixel_at(&img, &camera, HIDDEN_EDGE);
+    assert!(
+        close(&hidden, background, 1),
+        "hidden edge covered, got {hidden:?}"
+    );
+    let near = pixel_at(&img, &camera, NEAR_EDGE);
+    assert!(luma(&near) < 60, "visible edge drawn, got {near:?}");
+}
+
+#[test]
+fn monochrome_ignores_material_color() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let (mut viewport, camera) = face_style_cube(&device, face_style(), RED, RED);
+    let top = DVec3::new(0.0, 0.0, HALF);
+    let img = render(&device, &queue, &mut viewport, &camera, "style_shaded");
+    let px = pixel_at(&img, &camera, top);
+    assert!(
+        px[0] > px[2] + 60,
+        "shaded shows the red material, got {px:?}"
+    );
+
+    viewport.set_face_style(FaceStyle::Monochrome, false);
+    let img = render(&device, &queue, &mut viewport, &camera, "style_monochrome");
+    let sides = [FRONT_FACE, DVec3::new(-HALF, 0.0, 0.0), top].map(|p| pixel_at(&img, &camera, p));
+    for px in &sides {
+        // Default front color: white, shaded to a grey.
+        assert!(
+            px[0].abs_diff(px[1]) <= 2 && px[0].abs_diff(px[2]) <= 2 && luma(px) > 100,
+            "white-ish front, got {px:?}"
+        );
+    }
+    let l = sides.map(|px| luma(&px));
+    assert!(l[0] != l[1] || l[1] != l[2], "still shaded: {l:?}");
+
+    // The back color shows from inside.
+    viewport.set_monochrome_colors([1.0; 3], [0.0, 0.0, 1.0]);
+    let inside = Camera {
+        eye: DVec3::new(-10.0, -20.0, 5.0),
+        target: DVec3::new(50.0, 10.0, 0.0),
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &inside,
+        "style_monochrome_inside",
+    );
+    let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
+    assert!(
+        px[2] > 100 && px[0] < 30 && px[1] < 30,
+        "back color, got {px:?}"
+    );
+}
+
+#[test]
+fn xray_shows_edges_behind_faces() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let white = [1.0; 4];
+    let (mut viewport, camera) = face_style_cube(&device, face_style(), white, white);
+    // A point on the same faces a few pixels off the hidden edge.
+    let off_edge = HIDDEN_EDGE + DVec3::new(0.0, 0.0, 10.0);
+    let img = render(&device, &queue, &mut viewport, &camera, "style_xray_off");
+    let (on, off) = (
+        luma(&pixel_at(&img, &camera, HIDDEN_EDGE)),
+        luma(&pixel_at(&img, &camera, off_edge)),
+    );
+    assert!((on - off).abs() < 10, "hidden edge covered: {on} vs {off}");
+
+    for (style, name) in [
+        (FaceStyle::Shaded, "style_xray"),
+        (FaceStyle::Monochrome, "style_xray_monochrome"),
+        (FaceStyle::HiddenLine, "style_xray_hidden_line"),
+    ] {
+        viewport.set_face_style(style, true);
+        let img = render(&device, &queue, &mut viewport, &camera, name);
+        let (on, off) = (
+            luma(&pixel_at(&img, &camera, HIDDEN_EDGE)),
+            luma(&pixel_at(&img, &camera, off_edge)),
+        );
+        eprintln!("{name}: hidden edge {on}, beside it {off}");
+        assert!(
+            on < off - 40,
+            "{name}: hidden edge shows through: {on} vs {off}"
+        );
+        // Visible edges stay solid.
+        let near = pixel_at(&img, &camera, NEAR_EDGE);
+        assert!(luma(&near) < 60, "{name}: visible edge, got {near:?}");
+    }
 }

@@ -37,6 +37,8 @@ pub enum Owner {
     Edge(EdgeId),
     /// Index into the context's `instances`.
     Instance(usize),
+    /// Index into the context's `section_planes`.
+    Section(usize),
 }
 
 /// Everything the viewport draws for the model, with the owner of each piece.
@@ -52,6 +54,8 @@ pub struct Scene {
     pub tri_owner: Vec<Option<Owner>>,
     /// Construction guides drawn as dashed lines (not pickable as edges).
     pub guides: Vec<Segment>,
+    /// The active section cut in world space: point and normal (removed side).
+    pub section: Option<(DVec3, DVec3)>,
 }
 
 /// Where entities being collected sit relative to the open context.
@@ -74,6 +78,10 @@ fn fade(c: [f32; 4]) -> [f32; 4] {
     let l = |x: f32| x + (1.0 - x) * 0.55;
     [l(c[0]), l(c[1]), l(c[2]), c[3]]
 }
+
+/// Section plane outline colors (drafts; SketchUp's are unverified).
+const SECTION_COLOR: [f32; 4] = [0.85, 0.55, 0.2, 1.0];
+const SECTION_ACTIVE: [f32; 4] = [0.95, 0.4, 0.05, 1.0];
 
 /// Half-length of drawn guide lines, in inches.
 const GUIDE_EXTENT: f64 = 1e5;
@@ -274,6 +282,7 @@ impl Document {
             &mut scene,
         );
         let f = |p: DVec3| p.as_vec3().to_array();
+        self.section_planes(&mut scene);
         for g in &root.guides {
             match g.dir {
                 Some(d) => scene.guides.push(Segment::line(
@@ -296,6 +305,76 @@ impl Document {
             }
         }
         scene
+    }
+
+    /// Section plane objects of the open context (selectable) and its active cut.
+    fn section_planes(&self, scene: &mut Scene) {
+        let ents = self.active();
+        let xf = self.context_transform();
+        let normal_xf = DMat3::from_mat4(xf).inverse().transpose();
+        if self.model.style.section_cuts
+            && let Some(sp) = ents.active_section.and_then(|i| ents.section_planes.get(i))
+        {
+            scene.section = Some((
+                xf.transform_point3(sp.point),
+                (normal_xf * sp.normal).normalize_or_zero(),
+            ));
+        }
+        if !self.model.style.section_planes {
+            return;
+        }
+        // Plane size from the model's extent (SketchUp sizes it to the model; exact
+        // rule unverified).
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        for t in &scene.triangles {
+            for p in t {
+                lo = lo.min(*p);
+                hi = hi.max(*p);
+            }
+        }
+        let half = if lo.is_finite() {
+            ((hi - lo).length() * 0.35).max(12.0)
+        } else {
+            24.0
+        };
+        let f = |p: DVec3| p.as_vec3().to_array();
+        for (i, sp) in ents.section_planes.iter().enumerate() {
+            if sp.hidden {
+                continue;
+            }
+            let c = xf.transform_point3(sp.point);
+            let n = (normal_xf * sp.normal).normalize_or_zero();
+            let (u, v) = n.any_orthonormal_pair();
+            let corner = |a: f64, b: f64| c + (u * a + v * b) * half;
+            let pts = [
+                corner(-1.0, -1.0),
+                corner(1.0, -1.0),
+                corner(1.0, 1.0),
+                corner(-1.0, 1.0),
+            ];
+            let active = ents.active_section == Some(i);
+            let color = if active {
+                SECTION_ACTIVE
+            } else {
+                SECTION_COLOR
+            };
+            let mut lines: Vec<(DVec3, DVec3)> =
+                (0..4).map(|k| (pts[k], pts[(k + 1) % 4])).collect();
+            // Arrows at two corners pointing to the kept side (the removed side would
+            // clip them; SketchUp's arrow direction is unverified).
+            for p in [pts[0], pts[2]] {
+                let tip = p - n * half * 0.25;
+                lines.push((p, tip));
+                lines.push((tip, tip + n * half * 0.08 + u * half * 0.05));
+                lines.push((tip, tip + n * half * 0.08 - u * half * 0.05));
+            }
+            for (a, b) in lines {
+                scene
+                    .edges
+                    .push(Segment::line(f(a), f(b), color, [EDGE_WIDTH, 0.0]));
+                scene.edge_owner.push(Some(Owner::Section(i)));
+            }
+        }
     }
 
     fn color(&self, m: Option<MaterialId>, fallback: [u8; 3]) -> [f32; 4] {
@@ -455,8 +534,10 @@ impl Document {
 
     fn delete_in(root: &mut Entities, items: &[Owner]) {
         let mut instances: Vec<usize> = Vec::new();
+        let mut sections: Vec<usize> = Vec::new();
         for item in items {
             match *item {
+                Owner::Section(i) => sections.push(i),
                 Owner::Face(f) => {
                     root.remove_face(f);
                 }
@@ -466,6 +547,18 @@ impl Document {
                     }
                 }
                 Owner::Instance(i) => instances.push(i),
+            }
+        }
+        sections.sort_unstable();
+        sections.dedup();
+        for i in sections.into_iter().rev() {
+            if i < root.section_planes.len() {
+                root.section_planes.remove(i);
+                root.active_section = match root.active_section {
+                    Some(a) if a == i => None,
+                    Some(a) if a > i => Some(a - 1),
+                    a => a,
+                };
             }
         }
         instances.sort_unstable();

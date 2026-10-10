@@ -66,6 +66,10 @@ pub struct StyleSettings {
     pub section_cut_width: f32,
     pub face_style: FaceStyle,
     pub xray: bool,
+    /// View > Section Planes: draw section plane objects.
+    pub section_planes: bool,
+    /// View > Section Cuts: the active section cuts the model.
+    pub section_cuts: bool,
 }
 
 impl Default for StyleSettings {
@@ -77,6 +81,8 @@ impl Default for StyleSettings {
             section_cut_width: 3.0,
             face_style: FaceStyle::Shaded,
             xray: false,
+            section_planes: true,
+            section_cuts: true,
         }
     }
 }

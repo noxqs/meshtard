@@ -164,6 +164,21 @@ pub struct Entities {
     /// Construction guides (Tape Measure, Protractor). Not geometry: they never split
     /// edges or bound faces.
     pub guides: Vec<Guide>,
+    /// Section planes placed in this context (Section Plane tool).
+    pub section_planes: Vec<SectionPlane>,
+    /// The section plane cutting this context, an index into `section_planes`.
+    pub active_section: Option<usize>,
+}
+
+/// A section plane: cuts away the geometry on the side `normal` points to (which side
+/// SketchUp removes is unverified; here the arrows point at the removed side).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SectionPlane {
+    pub point: DVec3,
+    /// Unit normal.
+    pub normal: DVec3,
+    pub name: String,
+    pub hidden: bool,
 }
 
 /// A construction line (infinite, through `point` along `dir`) or construction point.

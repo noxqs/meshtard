@@ -226,8 +226,10 @@ impl Style {
 }
 
 /// SketchUp's default front and back face colors, (255, 255, 255) and (164, 178, 187).
-const DEFAULT_MONOCHROME: ([f32; 3], [f32; 3]) =
-    ([1.0, 1.0, 1.0], [164.0 / 255.0, 178.0 / 255.0, 187.0 / 255.0]);
+const DEFAULT_MONOCHROME: ([f32; 3], [f32; 3]) = (
+    [1.0, 1.0, 1.0],
+    [164.0 / 255.0, 178.0 / 255.0, 187.0 / 255.0],
+);
 
 fn axis_segments(axes: &AxesStyle) -> Vec<Segment> {
     let mut out = Vec::with_capacity(6);

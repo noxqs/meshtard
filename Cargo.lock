@@ -1471,6 +1471,7 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
+ "mt-cuda",
  "mt-infer",
  "mt-kernel",
  "mt-render",
