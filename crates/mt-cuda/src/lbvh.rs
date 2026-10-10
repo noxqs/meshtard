@@ -333,6 +333,16 @@ fn fill_bounds(triangles: &[[DVec3; 3]], nodes: &mut [Node], i: usize) {
     }
 }
 
+impl mt_kernel::bvh::RayIndex for Lbvh {
+    fn ray(&self, origin: DVec3, dir: DVec3) -> Option<Hit> {
+        Lbvh::ray(self, origin, dir)
+    }
+
+    fn triangle(&self, i: usize) -> [DVec3; 3] {
+        Lbvh::triangle(self, i)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

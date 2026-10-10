@@ -56,6 +56,38 @@ struct Globals {
     shadow: [f32; 4],
     /// x: world size of a shadow texel, y: 1 / shadow map size.
     shadow_texel: [f32; 4],
+    /// x: face coloring (0 material, 1 background color unshaded, 2 monochrome),
+    /// y: opacity cap (1, or [`XRAY_OPACITY`] in X-ray).
+    face_style: [f32; 4],
+    /// Monochrome front and back colors (rgb, w unused).
+    mono_front: [f32; 4],
+    mono_back: [f32; 4],
+}
+
+/// Face opacity in X-ray mode. SketchUp's X-ray looks like about 50% (unverified).
+pub const XRAY_OPACITY: f32 = 0.5;
+
+/// SketchUp's View > Face Style. Set with [`Viewport::set_face_style`]; X-ray is a
+/// separate toggle that combines with every style except [`FaceStyle::Wireframe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FaceStyle {
+    /// Edges only. Faces are not drawn at all (no color, no depth), so every edge is
+    /// visible. Profiles are drawn at normal edge width and there is no lighting or
+    /// shadows (SketchUp hides profiles in wireframe as far as known; unverified).
+    /// Selected faces show no dots, since there is no face to put them on.
+    Wireframe,
+    /// Faces filled with the style's background color, unshaded, hiding what is behind
+    /// them. No shadows. Material opacity still applies (unverified vs SketchUp).
+    HiddenLine,
+    /// Material colors with shading (the default).
+    #[default]
+    Shaded,
+    /// Same as [`FaceStyle::Shaded`] for now: textures are not supported yet.
+    ShadedWithTextures,
+    /// Every face in the monochrome front/back colors (see
+    /// [`Viewport::set_monochrome_colors`]) with shading, ignoring material colors
+    /// but keeping material opacity (unverified vs SketchUp).
+    Monochrome,
 }
 
 /// SketchUp's Shadows panel. Draft: the lighting and shadow look only roughly
@@ -192,6 +224,10 @@ impl Style {
         }
     }
 }
+
+/// SketchUp's default front and back face colors, (255, 255, 255) and (164, 178, 187).
+const DEFAULT_MONOCHROME: ([f32; 3], [f32; 3]) =
+    ([1.0, 1.0, 1.0], [164.0 / 255.0, 178.0 / 255.0, 187.0 / 255.0]);
 
 fn axis_segments(axes: &AxesStyle) -> Vec<Segment> {
     let mut out = Vec::with_capacity(6);
@@ -360,6 +396,9 @@ pub struct Viewport {
     shadow_map: ShadowMap,
     shadows: Option<Shadows>,
     section: Option<SectionCut>,
+    face_style: FaceStyle,
+    xray: bool,
+    mono_colors: ([f32; 3], [f32; 3]),
     faces_opaque: wgpu::RenderPipeline,
     faces_translucent: wgpu::RenderPipeline,
     faces: Option<FaceBuffers>,
@@ -588,6 +627,9 @@ impl Viewport {
             shadow_map,
             shadows: None,
             section: None,
+            face_style: FaceStyle::Shaded,
+            xray: false,
+            mono_colors: DEFAULT_MONOCHROME,
             faces_opaque,
             faces_translucent,
             faces: None,
@@ -651,6 +693,23 @@ impl Viewport {
         self.shadows = shadows;
     }
 
+    /// Sets the face style and X-ray. X-ray draws every face at most
+    /// [`XRAY_OPACITY`] opaque (faces with lower material opacity keep theirs), without
+    /// depth, after the edges, so edges behind faces show through dimmed. It has no
+    /// effect in [`FaceStyle::Wireframe`]. Shadows (when set) are only drawn in the
+    /// shaded styles; in X-ray faces still cast them as their material says.
+    pub fn set_face_style(&mut self, style: FaceStyle, xray: bool) {
+        self.face_style = style;
+        self.xray = xray;
+    }
+
+    /// Front and back colors (sRGB 0..1) of [`FaceStyle::Monochrome`]. Defaults to
+    /// SketchUp's default front and back face colors, white and (164, 178, 187); the
+    /// app should pass the model's front/back colors.
+    pub fn set_monochrome_colors(&mut self, front: [f32; 3], back: [f32; 3]) {
+        self.mono_colors = (front, back);
+    }
+
     pub fn set_style(&mut self, device: &wgpu::Device, style: Style) {
         let segments = style.axes.as_ref().map(axis_segments).unwrap_or_default();
         self.axes_count = segments.len() as u32;
@@ -678,13 +737,22 @@ impl Viewport {
             self.targets = Some(Targets::new(device, size));
         }
 
+        let face_style = self.face_style;
+        let wireframe = face_style == FaceStyle::Wireframe;
+        let xray = self.xray && !wireframe;
+        // Shadows (and sun lighting) only in the shaded styles.
+        let shadows = self.shadows.filter(|_| {
+            matches!(
+                face_style,
+                FaceStyle::Shaded | FaceStyle::ShadedWithTextures | FaceStyle::Monochrome
+            )
+        });
         // Sun: lighting whenever shadows are set, a shadow map only when it is up and
         // something receives shadows.
-        let sun = self
-            .shadows
+        let sun = shadows
             .map(|s| Vec3::from(s.sun_dir).normalize_or_zero())
             .filter(|d| d.z > 0.0);
-        let shadow_fit = match (self.shadows, sun, &self.faces) {
+        let shadow_fit = match (shadows, sun, &self.faces) {
             (Some(s), Some(sun), Some(faces)) if s.on_faces || s.on_ground => {
                 Some(fit_sun(sun, faces.bounds))
             }
@@ -750,7 +818,7 @@ impl Viewport {
             },
             profile: [
                 style.profiles.unwrap_or(0.0),
-                f32::from(u8::from(style.profiles.is_some())),
+                f32::from(u8::from(style.profiles.is_some() && !wireframe)),
                 0.0,
                 0.0,
             ],
@@ -769,10 +837,10 @@ impl Viewport {
                 .unwrap_or([0.0, 0.0, 0.0, -1.0]),
             sun: {
                 let d = sun.unwrap_or(Vec3::ZERO);
-                [d.x, d.y, d.z, f32::from(u8::from(self.shadows.is_some()))]
+                [d.x, d.y, d.z, f32::from(u8::from(shadows.is_some()))]
             },
             shadow: {
-                let s = self.shadows.unwrap_or(Shadows {
+                let s = shadows.unwrap_or(Shadows {
                     sun_dir: [0.0; 3],
                     light: 0.0,
                     dark: 0.0,
@@ -793,6 +861,18 @@ impl Viewport {
                 0.0,
                 0.0,
             ],
+            face_style: [
+                match face_style {
+                    FaceStyle::HiddenLine => 1.0,
+                    FaceStyle::Monochrome => 2.0,
+                    _ => 0.0,
+                },
+                if xray { XRAY_OPACITY } else { 1.0 },
+                0.0,
+                0.0,
+            ],
+            mono_front: rgb_w(self.mono_colors.0, false),
+            mono_back: rgb_w(self.mono_colors.1, false),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -851,8 +931,10 @@ impl Viewport {
             // camera so lines on a face win the depth test and lines behind it fail.
             // Translucent faces last (without depth write) so they blend over
             // everything behind them, including the edges they cover; edges on their
-            // own boundary are in front of them thanks to the same pull.
-            if let Some(faces) = &self.faces {
+            // own boundary are in front of them thanks to the same pull. In X-ray all
+            // faces are drawn as translucent; in wireframe none are.
+            let faces = self.faces.as_ref().filter(|_| !wireframe);
+            if let Some(faces) = faces.filter(|_| !xray) {
                 pass.set_vertex_buffer(0, faces.vertices.slice(..));
                 pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
                 if !faces.opaque.is_empty() {
@@ -863,7 +945,7 @@ impl Viewport {
             if let Some(sel) = self
                 .selected
                 .as_ref()
-                .filter(|f| !f.opaque.is_empty() || !f.translucent.is_empty())
+                .filter(|f| !wireframe && (!f.opaque.is_empty() || !f.translucent.is_empty()))
             {
                 pass.set_pipeline(&self.selection);
                 pass.set_vertex_buffer(0, sel.vertices.slice(..));
@@ -880,11 +962,19 @@ impl Viewport {
                 pass.set_vertex_buffer(0, axes.slice(..));
                 pass.draw(0..6, 0..self.axes_count);
             }
-            if let Some(faces) = self.faces.as_ref().filter(|f| !f.translucent.is_empty()) {
+            // X-ray: opaque triangles unsorted first, then the sorted translucent ones.
+            let range = |f: &FaceBuffers| {
+                if xray {
+                    f.opaque.start..f.translucent.end
+                } else {
+                    f.translucent.clone()
+                }
+            };
+            if let Some(faces) = faces.filter(|f| !range(f).is_empty()) {
                 pass.set_pipeline(&self.faces_translucent);
                 pass.set_vertex_buffer(0, faces.vertices.slice(..));
                 pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(faces.translucent.clone(), 0, 0..1);
+                pass.draw_indexed(range(faces), 0, 0..1);
             }
         }
         queue.submit([encoder.finish()]);

@@ -16,6 +16,7 @@ mt-skp.workspace = true
 mt-kernel.workspace = true
 mt-infer.workspace = true
 mt-ui = { path = "../mt-ui" }
+mt-cuda = { path = "../mt-cuda" }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 eframe.workspace = true
 egui.workspace = true
@@ -23,6 +24,10 @@ egui-wgpu.workspace = true
 glam.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[features]
+# Build large models' pick index on the GPU (needs an NVIDIA driver at run time).
+cuda = ["mt-cuda/cuda"]
 
 [lints]
 workspace = true

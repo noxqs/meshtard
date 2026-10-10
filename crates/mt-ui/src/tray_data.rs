@@ -35,6 +35,12 @@ pub struct TrayData {
     /// Tag of the selected entities, shown as a Tag dropdown in Entity Info; `None`
     /// hides the row (nothing selected).
     pub entity_tag: Option<usize>,
+    /// Component definitions in the model ("In Model" collection of the Components
+    /// panel), groups excluded.
+    pub components: Vec<ComponentRow>,
+    /// Index into `components` of the definition the panel shows and edits (last
+    /// picked, or the definition of the selected instance); `None` = none.
+    pub current_component: Option<usize>,
 }
 
 impl Default for TrayData {
@@ -56,6 +62,8 @@ impl Default for TrayData {
             style: StyleSettings::default(),
             shadows: ShadowSettings::default(),
             entity_tag: None,
+            components: Vec::new(),
+            current_component: None,
         }
     }
 }
@@ -76,6 +84,40 @@ pub struct MaterialRow {
     pub color: [u8; 3],
     /// Opacity in percent, 0..=100 (SketchUp's Opacity slider works in whole percent).
     pub opacity: u8,
+}
+
+/// One component definition of the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentRow {
+    pub name: String,
+    pub description: String,
+    /// Number of instances placed in the model (0 = unused; Purge Unused removes it).
+    pub instances: usize,
+}
+
+/// "1 instance" / "3 instances": the instance count of a component definition.
+pub fn instances_label(count: usize) -> String {
+    match count {
+        1 => "1 instance".to_owned(),
+        n => format!("{n} instances"),
+    }
+}
+
+/// What committing the Components panel's Edit fields changes, if anything: the
+/// new `(name, description)`. The name is trimmed and an empty name keeps the old
+/// one (SketchUp refuses empty definition names as far as remembered, unverified);
+/// the description is kept as typed except for trailing whitespace.
+pub fn component_edit(
+    row: &ComponentRow,
+    name: &str,
+    description: &str,
+) -> Option<(String, String)> {
+    let name = match name.trim() {
+        "" => row.name.clone(),
+        n => n.to_owned(),
+    };
+    let description = description.trim_end().to_owned();
+    (name != row.name || description != row.description).then_some((name, description))
 }
 
 /// Kind of an Outliner entry.
@@ -468,6 +510,28 @@ mod tests {
         assert_eq!(time_label(0), "12:00 AM");
         assert_eq!(time_label(12 * 60 + 5), "12:05 PM");
         assert_eq!(time_label(9 * 60), "09:00 AM");
+    }
+
+    #[test]
+    fn component_labels_and_edits() {
+        assert_eq!(instances_label(0), "0 instances");
+        assert_eq!(instances_label(1), "1 instance");
+        assert_eq!(instances_label(12), "12 instances");
+        let row = ComponentRow {
+            name: "Door".to_owned(),
+            description: "Single door".to_owned(),
+            instances: 2,
+        };
+        assert_eq!(component_edit(&row, " Door ", "Single door "), None);
+        assert_eq!(component_edit(&row, "  ", "Single door"), None);
+        assert_eq!(
+            component_edit(&row, " Front door", "Single door"),
+            Some(("Front door".to_owned(), "Single door".to_owned()))
+        );
+        assert_eq!(
+            component_edit(&row, "", ""),
+            Some(("Door".to_owned(), String::new()))
+        );
     }
 
     #[test]

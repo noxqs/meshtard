@@ -58,6 +58,7 @@
 //! |-----------|-----------------------------------------------|--------|
 //! | Tags      | [`TrayData::tags`] (0 = "Untagged"), eye, color swatch, pencil on [`TrayData::active_tag`]; double-click renames | [`Event::TagAdd`], [`Event::TagDelete`], [`Event::TagRename`], [`Event::TagVisible`], [`Event::TagActive`], [`Event::TagColor`] |
 //! | Materials | "In Model" grid of [`TrayData::materials`], current material preview, Edit tab (name, color, opacity) | [`Event::MaterialPick`], [`Event::MaterialEdit`] |
+//! | Components | Select tab: "In Model" list of [`TrayData::components`] (icon, name, instance count; groups are not definitions and not listed), Details menu with Purge Unused; header and Edit tab (name, description) for [`TrayData::current_component`] | [`Event::ComponentPick`], [`Event::ComponentEdit`], [`Event::ComponentPurge`] |
 //! | Outliner  | [`TrayData::outliner`] tree under [`TrayData::outliner_root`], filter field | [`Event::OutlinerSelect`] |
 //! | Scenes    | [`TrayData::scenes`], [`TrayData::active_scene`] | [`Event::SceneAdd`], [`Event::SceneDelete`], [`Event::SceneUpdate`], [`Event::SceneActivate`] |
 //! | Styles    | [`TrayData::style`]: edges, profiles, section cut width, face style, X-ray | [`Event::StyleChanged`] |
@@ -74,7 +75,8 @@
 //! filter, the selected tag and the open tabs are shell UI state.
 //!
 //! Pure helpers are public for tests and reuse: [`outliner_rows`] (flattening and
-//! filtering), [`OutlinerNode::label`], [`time_label`], [`date_label`].
+//! filtering), [`OutlinerNode::label`], [`time_label`], [`date_label`],
+//! [`instances_label`], [`component_edit`].
 //!
 //! # Measurements box
 //!
@@ -107,9 +109,9 @@ use mt_spec::Spec;
 
 pub use theme::apply as apply_theme;
 pub use tray_data::{
-    FaceStyle, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow, SelectMode, ShadowSettings,
-    StyleSettings, TagRow, TrayData, date_label, day_of_year, month_day, outliner_node,
-    outliner_rows, time_label,
+    ComponentRow, FaceStyle, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow, SelectMode,
+    ShadowSettings, StyleSettings, TagRow, TrayData, component_edit, date_label, day_of_year,
+    instances_label, month_day, outliner_node, outliner_rows, time_label,
 };
 
 /// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection")
@@ -186,6 +188,22 @@ pub enum Event {
         color: [u8; 3],
         opacity: u8,
     },
+
+    /// Components: definition clicked in the "In Model" list. As in SketchUp, the
+    /// app starts placing a new instance of it at the cursor (Component tool). The
+    /// shell also shows it as the current definition at once.
+    ComponentPick(usize),
+    /// Components: name or description of the current definition committed (Enter
+    /// or focus loss) in the Edit tab. Carries both fields; `name` is trimmed and
+    /// non-empty.
+    ComponentEdit {
+        index: usize,
+        name: String,
+        description: String,
+    },
+    /// Components: Details menu > Purge Unused; remove definitions with no
+    /// instances.
+    ComponentPurge,
 
     /// Outliner: row clicked. `path` = child indices from the root down
     /// (see [`OutlinerNode`]); `mode` from the Ctrl/Shift keys.
@@ -448,7 +466,7 @@ impl Shell {
         }
     }
 
-    /// Sets what the tray panels (Tags, Materials, Outliner, Scenes, Styles, Shadows)
+    /// Sets what the tray panels (Tags, Materials, Components, Outliner, Scenes, Styles, Shadows)
     /// and the scene tabs show. Call before [`Shell::show`] whenever the model changed
     /// (calling it every frame is fine).
     pub fn set_tray_data(&mut self, data: TrayData) {

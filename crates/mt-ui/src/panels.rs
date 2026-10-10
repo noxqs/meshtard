@@ -14,8 +14,8 @@ use egui::{
 
 use crate::theme::Theme32;
 use crate::tray_data::{
-    FaceStyle, OutlinerKind, SelectMode, TrayData, date_label, outliner_node, outliner_rows,
-    time_label,
+    FaceStyle, OutlinerKind, SelectMode, TrayData, component_edit, date_label, instances_label,
+    outliner_node, outliner_rows, time_label,
 };
 use crate::{Event, Shell};
 
@@ -40,6 +40,19 @@ pub(crate) struct TrayUi {
     outliner_root_collapsed: bool,
     outliner_filter: String,
     styles_page: StylesPage,
+    component_tab: ComponentTab,
+    /// Edit tab fields of the Components panel and the definition they were loaded
+    /// from.
+    component_name: String,
+    component_description: String,
+    component_fields_of: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ComponentTab {
+    #[default]
+    Select,
+    Edit,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +82,10 @@ impl Shell {
             }
             "window.materials" => {
                 self.materials_panel(ui, &mut data);
+                true
+            }
+            "window.components" => {
+                self.components_panel(ui, &mut data);
                 true
             }
             "window.outliner" => {
@@ -391,6 +408,224 @@ impl Shell {
                         opacity: m.opacity,
                     });
                 }
+            }
+        }
+    }
+
+    /// Components panel: header with an icon, the name and the description of the
+    /// current definition; Select tab with the "In Model" list (click = place an
+    /// instance) and a Details menu (Purge Unused); Edit tab with the name and
+    /// description fields.
+    ///
+    /// Unverified against SketchUp 2026: SketchUp edits name and description in the
+    /// header fields and its Edit tab holds the component behaviors (Glue to, Cut
+    /// opening, Always face camera, Shadows face sun, axes), which are left out; the
+    /// list shows rendered thumbnails (a drawn icon here) in an icon grid by default
+    /// (the Details menu's List view is used); the instance count is shown here on
+    /// each row and in the tooltip, SketchUp shows it in the Statistics tab (left
+    /// out); the 3D Warehouse search field and collection navigation are left out.
+    fn components_panel(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
+        let t = self.theme.clone();
+        let current = data
+            .current_component
+            .filter(|&i| i < data.components.len());
+
+        // Header: icon, name, description.
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
+            ui.painter().rect(
+                rect,
+                0.0,
+                t.field,
+                Stroke::new(1.0, t.border),
+                StrokeKind::Inside,
+            );
+            let ink = if current.is_some() {
+                t.text
+            } else {
+                t.text_disabled
+            };
+            paint_cube(ui.painter(), rect.shrink(8.0), ink);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                match current {
+                    Some(i) => {
+                        let c = &data.components[i];
+                        ui.label(RichText::new(&c.name).strong());
+                        if !c.description.is_empty() {
+                            ui.label(RichText::new(&c.description).color(t.text_disabled));
+                        }
+                    }
+                    None => {
+                        ui.label(RichText::new("No component").color(t.text_disabled));
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (tab, label) in [
+                (ComponentTab::Select, "Select"),
+                (ComponentTab::Edit, "Edit"),
+            ] {
+                if tab_button(ui, &t, label, self.tray_ui.component_tab == tab).clicked() {
+                    self.tray_ui.component_tab = tab;
+                }
+            }
+        });
+
+        match self.tray_ui.component_tab {
+            ComponentTab::Select => self.components_select(ui, data, current, &t),
+            ComponentTab::Edit => self.components_edit(ui, data, current, &t),
+        }
+    }
+
+    fn components_select(
+        &mut self,
+        ui: &mut egui::Ui,
+        data: &mut TrayData,
+        current: Option<usize>,
+        t: &Theme32,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("In Model");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let r = icon_button(ui, t, "Details", true, paint_details);
+                let any_unused = data.components.iter().any(|c| c.instances == 0);
+                egui::Popup::menu(&r).show(|ui| {
+                    ui.set_min_width(140.0);
+                    if ui
+                        .add_enabled(any_unused, egui::Button::new("Purge Unused"))
+                        .clicked()
+                    {
+                        self.pending.push(Event::ComponentPurge);
+                        ui.close();
+                    }
+                });
+            });
+        });
+        if data.components.is_empty() {
+            ui.label(RichText::new("No components in the model.").color(t.text_disabled));
+            return;
+        }
+        let w = ui.available_width();
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let top = ui.cursor().top();
+        let font = FontId::proportional(t.sizes.font);
+        for (i, c) in data.components.iter().enumerate() {
+            let (row, r) = ui.allocate_exact_size(vec2(w, ROW + 4.0), Sense::click());
+            let (fill, ink, sub) = if current == Some(i) {
+                (t.selection, Color32::WHITE, Color32::WHITE)
+            } else if r.hovered() {
+                (t.hover, t.text, t.text_disabled)
+            } else {
+                (t.field, t.text, t.text_disabled)
+            };
+            ui.painter().rect_filled(row, 0.0, fill);
+            let icon =
+                Rect::from_center_size(pos2(row.left() + 13.0, row.center().y), vec2(16.0, 16.0));
+            paint_cube(ui.painter(), icon, ink);
+            let count = c.instances.to_string();
+            let count_w = ui
+                .painter()
+                .layout_no_wrap(count.clone(), font.clone(), sub)
+                .size()
+                .x;
+            let name_clip = Rect::from_min_max(
+                pos2(icon.right() + 5.0, row.top()),
+                pos2(row.right() - count_w - 12.0, row.bottom()),
+            );
+            ui.painter().with_clip_rect(name_clip).text(
+                pos2(name_clip.left(), row.center().y),
+                Align2::LEFT_CENTER,
+                &c.name,
+                font.clone(),
+                ink,
+            );
+            ui.painter().text(
+                pos2(row.right() - 6.0, row.center().y),
+                Align2::RIGHT_CENTER,
+                count,
+                font.clone(),
+                sub,
+            );
+            let mut tip = format!("{}\n{}", c.name, instances_label(c.instances));
+            if !c.description.is_empty() {
+                tip = format!("{tip}\n{}", c.description);
+            }
+            if r.on_hover_text(tip).clicked() {
+                data.current_component = Some(i);
+                self.pending.push(Event::ComponentPick(i));
+            }
+        }
+        let area = Rect::from_x_y_ranges(
+            ui.min_rect().left()..=ui.min_rect().left() + w,
+            top..=ui.cursor().top(),
+        );
+        ui.painter()
+            .rect_stroke(area, 0.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    }
+
+    fn components_edit(
+        &mut self,
+        ui: &mut egui::Ui,
+        data: &mut TrayData,
+        current: Option<usize>,
+        t: &Theme32,
+    ) {
+        let Some(i) = current else {
+            ui.label(
+                RichText::new("Pick a component in the Select tab to edit it.")
+                    .color(t.text_disabled),
+            );
+            return;
+        };
+        let name_id = ui.id().with("mt_ui_component_name");
+        let desc_id = ui.id().with("mt_ui_component_description");
+        let focused = ui.memory(|m| m.has_focus(name_id) || m.has_focus(desc_id));
+        if !focused || self.tray_ui.component_fields_of != current {
+            self.tray_ui.component_fields_of = current;
+            self.tray_ui.component_name = data.components[i].name.clone();
+            self.tray_ui.component_description = data.components[i].description.clone();
+        }
+        let width = ui.available_width();
+        ui.label("Name");
+        let name = ui.add(
+            egui::TextEdit::singleline(&mut self.tray_ui.component_name)
+                .id(name_id)
+                .desired_width(width),
+        );
+        ui.label("Description");
+        let desc = ui.add(
+            egui::TextEdit::multiline(&mut self.tray_ui.component_description)
+                .id(desc_id)
+                .desired_rows(3)
+                .desired_width(width),
+        );
+        ui.label(
+            RichText::new(instances_label(data.components[i].instances)).color(t.text_disabled),
+        );
+        if name.lost_focus() || desc.lost_focus() {
+            if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                // Cancel: reload from the model next frame.
+                self.tray_ui.component_fields_of = None;
+                return;
+            }
+            let row = &mut data.components[i];
+            if let Some((name, description)) = component_edit(
+                row,
+                &self.tray_ui.component_name,
+                &self.tray_ui.component_description,
+            ) {
+                row.name.clone_from(&name);
+                row.description.clone_from(&description);
+                self.pending.push(Event::ComponentEdit {
+                    index: i,
+                    name,
+                    description,
+                });
             }
         }
     }
@@ -1010,4 +1245,47 @@ fn paint_component_icon(p: &Painter, r: Rect, ink: Color32) {
         let cell = Rect::from_min_size(r.min + vec2(x * h, y * h), vec2(h, h)).shrink(1.0);
         p.rect_filled(cell, 0.0, ink);
     }
+}
+
+/// Isometric cube outline: icon of a component definition (SketchUp shows a
+/// rendered thumbnail instead).
+fn paint_cube(p: &Painter, r: Rect, ink: Color32) {
+    let s = Stroke::new(1.2, ink);
+    let c = r.center();
+    let a = r.width().min(r.height()) / 2.0;
+    let dx = a * 0.866;
+    let top = pos2(c.x, c.y - a);
+    let ul = pos2(c.x - dx, c.y - a / 2.0);
+    let ur = pos2(c.x + dx, c.y - a / 2.0);
+    let ll = pos2(c.x - dx, c.y + a / 2.0);
+    let lr = pos2(c.x + dx, c.y + a / 2.0);
+    let bottom = pos2(c.x, c.y + a);
+    p.add(egui::Shape::closed_line(
+        vec![top, ur, lr, bottom, ll, ul],
+        s,
+    ));
+    p.line_segment([ul, c], s);
+    p.line_segment([ur, c], s);
+    p.line_segment([c, bottom], s);
+}
+
+/// Details menu button: a right-pointing arrow head over three lines (unverified;
+/// SketchUp uses a small arrow icon).
+fn paint_details(p: &Painter, r: Rect, ink: Color32) {
+    let s = Stroke::new(1.2, ink);
+    for k in 0..3 {
+        let y = r.top() + 3.0 + k as f32 * 4.0;
+        p.hline(r.left()..=r.right() - 6.0, y, s);
+    }
+    let x = r.right() - 3.0;
+    let c = r.center().y;
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(x - 3.0, c - 4.0),
+            pos2(x + 1.0, c),
+            pos2(x - 3.0, c + 4.0),
+        ],
+        ink,
+        Stroke::NONE,
+    ));
 }

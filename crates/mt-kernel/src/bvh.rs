@@ -61,6 +61,24 @@ pub struct Hit {
     pub triangle: usize,
 }
 
+/// Nearest-hit ray queries over a triangle set: [`Bvh`] here, or a GPU-built index
+/// (`mt-cuda`'s `Lbvh`) for large models. Picking and inference take this.
+pub trait RayIndex: Send + Sync {
+    /// Nearest triangle hit by the ray.
+    fn ray(&self, origin: DVec3, dir: DVec3) -> Option<Hit>;
+    fn triangle(&self, i: usize) -> [DVec3; 3];
+}
+
+impl RayIndex for Bvh {
+    fn ray(&self, origin: DVec3, dir: DVec3) -> Option<Hit> {
+        Bvh::ray(self, origin, dir)
+    }
+
+    fn triangle(&self, i: usize) -> [DVec3; 3] {
+        Bvh::triangle(self, i)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Bvh {
     triangles: Vec<[DVec3; 3]>,

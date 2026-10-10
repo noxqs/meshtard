@@ -12,7 +12,7 @@ use std::collections::{HashSet, VecDeque};
 
 use glam::{DVec2, DVec3};
 use mt_kernel::Entities;
-use mt_kernel::bvh::Bvh;
+use mt_kernel::bvh::RayIndex;
 use mt_render::Camera;
 
 use crate::document::{Owner, Scene};
@@ -179,7 +179,7 @@ fn v3(p: [f32; 3]) -> DVec3 {
 /// a face, else the nearest face.
 pub fn pick(
     scene: &Scene,
-    bvh: &Bvh,
+    bvh: &dyn RayIndex,
     camera: &Camera,
     cursor: DVec2,
     viewport: DVec2,
@@ -419,7 +419,7 @@ mod pick_tests {
             .join("../../tests/corpus/openskp/capilla_quiroz_v17.skp");
         let doc = Document::open(&path).unwrap();
         let scene = doc.scene();
-        let bvh = Bvh::build(scene.triangles.clone());
+        let bvh = mt_kernel::bvh::Bvh::build(scene.triangles.clone());
         let camera = doc
             .saved_camera()
             .or_else(|| doc.extents_camera(35.0))

@@ -11,7 +11,7 @@ mod tray;
 use eframe::egui;
 use egui_wgpu::wgpu;
 use glam::{DVec2, DVec3};
-use mt_kernel::bvh::Bvh;
+use mt_kernel::bvh::{Bvh, RayIndex};
 use mt_render::{Camera, FaceVertex, Segment, Style, Viewport};
 use mt_spec::{Shortcut, Spec};
 
@@ -26,6 +26,10 @@ const SELECTED: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 const POINTS_PER_NOTCH: f32 = 40.0;
 
 /// Commands that do something today. Every other menu item is shown disabled.
+/// Models with fewer triangles build their pick index on the CPU: below this the GPU
+/// round trip costs more than it saves (draft threshold; measure on real models).
+const GPU_MIN_TRIANGLES: usize = 20_000;
+
 const IMPLEMENTED: &[&str] = &[
     "file.open",
     "file.exit",
@@ -121,7 +125,9 @@ struct App {
     document: Option<Document>,
     /// Drawn geometry of the document and its pick index.
     scene: Scene,
-    bvh: Bvh,
+    /// Pick index of `scene.triangles`; GPU-built for large models with `cuda`.
+    bvh: Box<dyn RayIndex>,
+    accel: mt_cuda::Accel,
     selection: Selection,
     /// Where a selection box drag started, in viewport pixels.
     box_start: Option<DVec2>,
@@ -168,7 +174,8 @@ impl App {
             spec,
             document: None,
             scene: Scene::default(),
-            bvh: Bvh::default(),
+            bvh: Box::new(Bvh::default()),
+            accel: mt_cuda::Accel::new(),
             selection: Selection::default(),
             box_start: None,
             geometry: mt_infer::Geometry::default(),
@@ -198,7 +205,20 @@ impl App {
             .as_ref()
             .map(Document::scene)
             .unwrap_or_default();
-        self.bvh = Bvh::build(self.scene.triangles.clone());
+        let triangles = self.scene.triangles.clone();
+        let start = std::time::Instant::now();
+        let gpu = self.accel.is_gpu() && triangles.len() >= GPU_MIN_TRIANGLES;
+        self.bvh = if gpu {
+            Box::new(self.accel.build_bvh(triangles))
+        } else {
+            Box::new(Bvh::build(triangles))
+        };
+        log::debug!(
+            "pick index: {} triangles on the {} in {:?}",
+            self.scene.triangles.len(),
+            if gpu { "GPU" } else { "CPU" },
+            start.elapsed()
+        );
         let v3 = |p: [f32; 3]| DVec3::new(p[0].into(), p[1].into(), p[2].into());
         self.geometry = mt_infer::Geometry::from_edges(
             self.scene
@@ -780,7 +800,7 @@ impl App {
                 viewport: viewport_px,
             };
             self.engine
-                .infer(&self.geometry, &self.bvh, view, c, anchor)
+                .infer(&self.geometry, self.bvh.as_ref(), view, c, anchor)
         });
         let (Some(inf), Some(doc)) = (self.inference, self.document.as_mut()) else {
             return;
@@ -867,7 +887,7 @@ impl App {
                 viewport: viewport_px,
             };
             self.engine
-                .infer(&self.geometry, &self.bvh, view, c, anchor)
+                .infer(&self.geometry, self.bvh.as_ref(), view, c, anchor)
         });
         let (Some(inf), Some(c), Some(doc)) = (self.inference, cursor, self.document.as_mut())
         else {
@@ -877,7 +897,7 @@ impl App {
         if !response.clicked_by(egui::PointerButton::Primary) {
             return;
         }
-        let picked = selection::pick(&self.scene, &self.bvh, &self.camera, c, viewport_px);
+        let picked = selection::pick(&self.scene, self.bvh.as_ref(), &self.camera, c, viewport_px);
         let selection = self.selection.items().to_vec();
         let eye = self.ctx_xf.inverse().transform_point3(self.camera.eye);
         let changed = doc.edit(|root| {
@@ -919,8 +939,14 @@ impl App {
             )
         };
         let pick = |app: &Self, p: egui::Pos2| {
-            selection::pick(&app.scene, &app.bvh, &app.camera, to_px(p), viewport_px)
-                .filter(|o| !matches!(o, Owner::Face(_)))
+            selection::pick(
+                &app.scene,
+                app.bvh.as_ref(),
+                &app.camera,
+                to_px(p),
+                viewport_px,
+            )
+            .filter(|o| !matches!(o, Owner::Face(_)))
         };
         let primary = egui::PointerButton::Primary;
         let pos = response.interact_pointer_pos();
@@ -1006,7 +1032,13 @@ impl App {
             } else {
                 1
             };
-            let hit = selection::pick(&self.scene, &self.bvh, &self.camera, cursor, viewport_px);
+            let hit = selection::pick(
+                &self.scene,
+                self.bvh.as_ref(),
+                &self.camera,
+                cursor,
+                viewport_px,
+            );
             let Some(doc) = self.document.as_mut() else {
                 return;
             };

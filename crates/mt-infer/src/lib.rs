@@ -13,7 +13,7 @@
 pub mod units;
 
 use glam::{DVec2, DVec3};
-use mt_kernel::bvh::Bvh;
+use mt_kernel::bvh::RayIndex;
 use mt_render::Camera;
 
 /// Pixels within which the cursor snaps to a point (endpoint, midpoint, origin).
@@ -277,7 +277,7 @@ impl Engine {
     pub fn infer(
         &mut self,
         geom: &Geometry,
-        bvh: &Bvh,
+        bvh: &dyn RayIndex,
         view: View,
         cursor: DVec2,
         anchor: Option<DVec3>,
@@ -290,7 +290,7 @@ impl Engine {
     fn infer_point(
         &mut self,
         geom: &Geometry,
-        bvh: &Bvh,
+        bvh: &dyn RayIndex,
         view: View,
         cursor: DVec2,
         anchor: Option<DVec3>,
@@ -643,6 +643,7 @@ fn free_point(ro: DVec3, rd: DVec3, anchor: Option<DVec3>) -> DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mt_kernel::bvh::Bvh;
 
     const VIEWPORT: DVec2 = DVec2::new(800.0, 600.0);
 

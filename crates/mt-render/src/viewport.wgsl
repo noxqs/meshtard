@@ -33,6 +33,11 @@ struct Globals {
     shadow: vec4<f32>,
     // x: world size of one shadow map texel, y: 1 / shadow map size.
     shadow_texel: vec4<f32>,
+    // x: face coloring (0 material, 1 background color unshaded (hidden line),
+    // 2 monochrome), y: opacity cap (< 1 in X-ray).
+    face_style: vec4<f32>,
+    mono_front: vec4<f32>,
+    mono_back: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -150,7 +155,13 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     if (section_clipped(in.world)) {
         discard;
     }
-    let color = select(in.back, in.front, front);
+    var color = select(in.back, in.front, front);
+    color.a = min(color.a, g.face_style.y);
+    if (g.face_style.x > 1.5) {
+        color = vec4<f32>(select(g.mono_back.rgb, g.mono_front.rgb, front), color.a);
+    } else if (g.face_style.x > 0.5) {
+        return vec4<f32>(g.background.rgb, color.a);
+    }
     let n = normalize(select(-in.normal, in.normal, front));
     var shade: f32;
     if (g.sun.w > 0.5) {
