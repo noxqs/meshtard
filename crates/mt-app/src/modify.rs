@@ -828,6 +828,63 @@ impl ModifyTool for PaintBucket {
     }
 }
 
+// ------------------------------------------------------------------ Place Component
+
+/// Places instances of a component picked in the Components panel at clicked points
+/// (SketchUp glues the component to the cursor at its origin; rotating with the
+/// cursor and gluing to faces are not implemented).
+#[derive(Debug)]
+pub struct PlaceComponent {
+    pub definition: mt_kernel::DefinitionId,
+}
+
+impl ModifyTool for PlaceComponent {
+    fn status(&self) -> String {
+        "Select a point to place the component.".into()
+    }
+
+    fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        ("", String::new())
+    }
+
+    fn anchor(&self) -> Option<DVec3> {
+        None
+    }
+
+    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        ctx.ents.instances.push(mt_kernel::Instance {
+            definition: self.definition,
+            transform: DMat4::from_translation(inf.point),
+            name: String::new(),
+            hidden: false,
+            layer: None,
+            material: None,
+        });
+        true
+    }
+
+    fn typed(
+        &mut self,
+        _ctx: &mut Ctx,
+        _cur: Option<&Inference>,
+        _text: &str,
+        _units: LengthUnit,
+    ) -> bool {
+        false
+    }
+
+    fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
+        // A small axis cross at the insertion point.
+        let p = cur.point;
+        [DVec3::X, DVec3::Y, DVec3::Z]
+            .iter()
+            .map(|a| vec![p - *a * 6.0, p + *a * 6.0])
+            .collect()
+    }
+
+    fn cancel(&mut self) {}
+}
+
 // ------------------------------------------------------------------ Section Plane
 
 /// Places a section plane on the face under the cursor (facing the way the face does),

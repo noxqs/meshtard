@@ -27,6 +27,8 @@ pub struct Definition {
     pub name: String,
     pub guid: String,
     pub entities: Entities,
+    /// Components panel description.
+    pub description: String,
     /// A group's definition (one instance, edited without affecting others, listed
     /// apart from components). Imported from the `Group#n` names SketchUp gives group
     /// definitions (unverified that every group follows this).

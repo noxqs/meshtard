@@ -157,7 +157,11 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Groups and components: Create Group, Make Component (G), Explode, Make Unique; double-click edits in place (rest of the model faded, not selectable; Esc, click outside or Edit > Close Group/Component closes). Undo covers the whole model and edit context.
 - [x] Tray panels: Tags (add, delete, rename, visibility, color; Entity Info Tag dropdown), Materials (In Model, Create Material, edit color and opacity; Paint Bucket), Outliner, Scenes (add, update, delete, activate; scene tabs), Styles (edges, profiles), Shadows (time, date, light, dark, on faces, on ground; View > Shadows).
 - [x] Renderer: sun shadows (shadow map), section cut clipping and cut lines (renderer API), transparent materials sorted back to front.
-- [ ] Not yet: Section Plane tool and section planes in the model; face styles (wireframe, hidden line, X-ray, monochrome) in the renderer; Components panel and component axes dialog; textures; scene transitions; tag folders and dashes; Entity Info editing beyond Tag.
+- [x] Section Plane tool: planes per context, drawn, selectable, movable, deletable; double-click toggles the active cut; View > Section Planes / Section Cuts; cut lines.
+- [x] Face styles (Wireframe, Hidden Line, Shaded, Shaded With Textures, Monochrome) and X-ray.
+- [x] Components panel: In Model list with instance counts, place instances, edit name and description, Purge Unused.
+- [x] Large models build their pick index on the GPU (`--features cuda`, from 20k triangles; threshold being measured).
+- [ ] Left for later: textures (Shaded With Textures equals Shaded), section fill, scene transitions, component axes dialog and gluing, tag folders and dashes, Statistics tab.
 
 ### M8: `.skp` writing
 - Legacy format (2013-2020) via the OpenSKP port.

@@ -154,6 +154,12 @@ impl Document {
         xf
     }
 
+    /// Whether `def` is open for editing (or contains the open context): placing it
+    /// in the open context would make it contain itself.
+    pub fn in_context_path(&self, def: DefinitionId) -> bool {
+        Self::path_definitions(&self.model, &self.context).is_some_and(|d| d.contains(&def))
+    }
+
     /// Opens instance `index` of the active context for editing.
     pub fn open_instance(&mut self, index: usize) -> bool {
         if index >= self.active().instances.len() {

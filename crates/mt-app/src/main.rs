@@ -151,6 +151,7 @@ struct App {
     /// Tray state the model does not hold.
     active_tag: usize,
     current_material: Option<usize>,
+    current_component: Option<usize>,
     active_scene: Option<usize>,
     scene_tabs: bool,
     /// Open group or component space to world space (identity at the root).
@@ -198,6 +199,7 @@ impl App {
             active_tag: 0,
             cut_lines: Vec::new(),
             current_material: None,
+            current_component: None,
             active_scene: None,
             scene_tabs: true,
             erase_drag: Vec::new(),
@@ -1312,7 +1314,12 @@ impl App {
                     ("Name".into(), root.section_planes[*i].name.clone()),
                     (
                         "Active".into(),
-                        if root.active_section == Some(*i) { "Yes" } else { "No" }.into(),
+                        if root.active_section == Some(*i) {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
+                        .into(),
                     ),
                 ],
             },

@@ -81,6 +81,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
 
     for (&id, d) in &src.definitions {
         let key = model.definitions.insert(Definition {
+            description: String::new(),
             name: d.name.clone(),
             guid: d.guid.clone(),
             entities: Entities::new(),

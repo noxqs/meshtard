@@ -227,6 +227,7 @@ pub fn make_group(
     }
 
     let definition = defs.insert(Definition {
+        description: String::new(),
         name: name.clone(),
         guid: new_guid(defs.len()),
         entities: inner,

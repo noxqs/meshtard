@@ -59,6 +59,16 @@ impl App {
             Vec::new()
         };
         data.outliner = outliner(m, &m.root, &selected, 0);
+        let defs = component_definitions(m);
+        data.components = defs
+            .iter()
+            .map(|&d| mt_ui::ComponentRow {
+                name: m.definitions[d].name.clone(),
+                description: m.definitions[d].description.clone(),
+                instances: mt_kernel::group::instance_count(m, d),
+            })
+            .collect();
+        data.current_component = self.current_component;
         data.scenes = m.pages.iter().map(|p| p.name.clone()).collect();
         data.style = mt_ui::StyleSettings {
             edges: m.style.edges,
@@ -242,6 +252,49 @@ impl App {
                     !items.is_empty()
                 })
             }
+            Event::ComponentPick(i) => {
+                let Some(&d) = component_definitions(&doc.model).get(i) else {
+                    return false;
+                };
+                self.current_component = Some(i);
+                if doc.in_context_path(d) {
+                    self.message = Some("A component cannot be placed inside itself.".into());
+                    return false;
+                }
+                self.tool = crate::nav::Tool::Modify("tool.place_component");
+                self.draw = None;
+                self.modify = Some(Box::new(crate::modify::PlaceComponent { definition: d }));
+                false
+            }
+            Event::ComponentEdit {
+                index,
+                name,
+                description,
+            } => {
+                let Some(&d) = component_definitions(&doc.model).get(index) else {
+                    return false;
+                };
+                doc.edit_model(|m, _| {
+                    let def = &mut m.definitions[d];
+                    let changed = def.name != name || def.description != description;
+                    def.name = name;
+                    def.description = description;
+                    changed
+                })
+            }
+            Event::ComponentPurge => doc.edit_model(|m, ents| {
+                // Definitions used nowhere (the open context's entities are taken out of
+                // the model during the edit, so count them too).
+                let used = |m: &Model, d| {
+                    mt_kernel::group::instance_count(m, d) > 0
+                        || ents.instances.iter().any(|i| i.definition == d)
+                };
+                let unused: Vec<_> = m.definitions.keys().filter(|&d| !used(m, d)).collect();
+                for d in &unused {
+                    m.definitions.remove(*d);
+                }
+                !unused.is_empty()
+            }),
             Event::MaterialEdit {
                 index,
                 name,
@@ -356,6 +409,15 @@ impl App {
             _ => false,
         }
     }
+}
+
+/// Component definitions in Components panel order (groups are not listed).
+fn component_definitions(m: &Model) -> Vec<mt_kernel::DefinitionId> {
+    m.definitions
+        .iter()
+        .filter(|(_, d)| !d.is_group)
+        .map(|(k, _)| k)
+        .collect()
 }
 
 /// A scene from the current view and tag visibility.

@@ -69,3 +69,6 @@
 | Scenes | Add/Update/Delete/Activate, tabs | differs | no transition animation, no per-scene property toggles |
 | Shadows | Sun position (NOAA), shadow map, light/dark | unverified | default location and time from memory |
 | Styles | Edges and profiles toggles | unverified | face styles not rendered yet |
+| Section Plane | Place on face, active cut, cut lines, arrows | differs | no name/symbol dialog; arrows drawn on the kept side; section fill missing |
+| Face styles | Wireframe, Hidden Line, Shaded, Monochrome, X-ray 50% | unverified | textures missing |
+| Components | In Model list, place, edit, Purge Unused | differs | list with icons instead of thumbnails; no gluing or cursor rotation when placing |
