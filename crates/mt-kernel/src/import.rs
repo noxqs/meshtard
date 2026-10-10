@@ -42,6 +42,18 @@ pub fn from_skp(src: &skp::Model) -> Model {
         if let Some(c) = style.back_color {
             model.back_color = c;
         }
+        // style.xml item 2001 looks like the render mode (2 = shaded in every corpus
+        // style) and 2005 like "show textures": both are set in "[Simple Style]", whose
+        // description says "Shaded with textures face style". Unverified guesses; other
+        // modes are left at the default.
+        let item = |id: i32| style.items.get(&id).map(|i| i.value.trim());
+        if item(2001) == Some("2") {
+            model.style.face_style = if item(2005) == Some("1") {
+                crate::model::FaceStyle::ShadedWithTextures
+            } else {
+                crate::model::FaceStyle::Shaded
+            };
+        }
     }
 
     let mut maps = Maps {
@@ -56,6 +68,15 @@ pub fn from_skp(src: &skp::Model) -> Model {
             name: m.name.clone(),
             color: [m.color[0], m.color[1], m.color[2]],
             opacity: m.transparency,
+            texture: m.texture.as_ref().and_then(|t| {
+                Some(crate::texture::Texture {
+                    filename: t.filename.clone(),
+                    data: t.data.as_deref()?.into(),
+                    width: t.width,
+                    height: t.height,
+                    colorize: m.colorized,
+                })
+            }),
         });
     }
     for (id, m) in src.materials_by_id() {
@@ -108,6 +129,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
     }
     model.root = entities(&src.root, &maps);
     model.root.guides = guides(&src.root);
+    model.root.dimensions = crate::annotation::dimensions_from_skp(&src.dimensions);
     model.root.section_planes = src
         .root
         .section_planes
@@ -206,6 +228,7 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             back_material: material(f.back_material_id),
             hidden: f.hidden,
             layer: layer(&f.layer),
+            uv: crate::texture::FaceUv::boxed(f.uv_transform, f.uv_transform_back),
         };
         ents.add_raw_face(outer, loops, normal, attrs);
     }

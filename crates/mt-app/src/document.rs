@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use glam::{DMat3, DMat4, DVec3};
-use mt_kernel::{DefinitionId, EdgeId, Entities, FaceId, MaterialId, Model, import, tessellate};
+use mt_kernel::{
+    DefinitionId, EdgeId, Entities, FaceId, MaterialId, Model, import, tessellate, texture,
+};
 use mt_render::{Camera, FaceVertex, Segment};
 
 /// Edge color and width of the default style. Draft; check against SketchUp 2026.
@@ -46,6 +48,10 @@ pub enum Owner {
     Instance(usize),
     /// Index into the context's `section_planes`.
     Section(usize),
+    /// Index into the context's `dimensions`.
+    Dimension(usize),
+    /// Index into the context's `texts`.
+    Text(usize),
 }
 
 /// Everything the viewport draws for the model, with the owner of each piece.
@@ -63,6 +69,13 @@ pub struct Scene {
     pub guides: Vec<Segment>,
     /// The active section cut in world space: point and normal (removed side).
     pub section: Option<(DVec3, DVec3)>,
+    /// Dimension and text labels, drawn over the view (their lines are in `edges`).
+    pub annotations: Vec<crate::annot::Annotation>,
+    /// The textures `FaceVertex::texture` indexes, for `Viewport::set_textures`.
+    pub textures: Vec<mt_render::TextureSource>,
+    /// Index into `textures` of each model material (`FaceVertex::NO_TEXTURE` when
+    /// untextured).
+    texture_of: Vec<u32>,
 }
 
 /// Where entities being collected sit relative to the open context.
@@ -311,6 +324,19 @@ impl Document {
     /// and soft edges are left out.
     pub fn scene(&self) -> Scene {
         let mut scene = Scene::default();
+        for m in &self.model.materials {
+            let layer = match &m.texture {
+                Some(t) => {
+                    scene.textures.push(mt_render::TextureSource {
+                        data: t.data.clone(),
+                        tint: t.colorize.then_some(m.color),
+                    });
+                    scene.textures.len() as u32 - 1
+                }
+                None => FaceVertex::NO_TEXTURE,
+            };
+            scene.texture_of.push(layer);
+        }
         let mut active = HashSet::new();
         let root = &self.model.root;
         self.collect(
@@ -323,6 +349,7 @@ impl Document {
         );
         let f = |p: DVec3| p.as_vec3().to_array();
         self.section_planes(&mut scene);
+        crate::annot::collect(self, &mut scene);
         for g in &root.guides {
             match g.dir {
                 Some(d) => scene.guides.push(Segment::line(
@@ -494,36 +521,54 @@ impl Document {
             if face.attrs.hidden || !self.layer_visible(face.attrs.layer) {
                 continue;
             }
-            let mut front = self.color(face.attrs.material.or(inherited), self.model.front_color);
-            let mut back = self.color(
-                face.attrs.back_material.or(inherited),
-                self.model.back_color,
-            );
+            let front_material = face.attrs.material.or(inherited);
+            let back_material = face.attrs.back_material.or(inherited);
+            let mut front = self.color(front_material, self.model.front_color);
+            let mut back = self.color(back_material, self.model.back_color);
             if faded {
                 front = fade(front);
                 back = fade(back);
             }
+            // Texture mapping per side, in the face's own coordinates. Faded geometry
+            // (outside the open context) shows its lightened colors, not textures.
+            let side = |m: Option<MaterialId>, is_back: bool| {
+                let i = m.filter(|_| !faded)?;
+                let layer = *out.texture_of.get(i)?;
+                let map = texture::face_mapping(face, is_back, self.model.materials.get(i)?)?;
+                // Shift by whole repeats so the numbers stay small in f32.
+                let first = ents.loop_points(&face.outer).first().copied()?;
+                let shift = texture::uv_at(&map, first).floor();
+                Some((layer, map, shift))
+            };
+            let (front_tex, back_tex) = (side(front_material, false), side(back_material, true));
+            let uv = |t: &Option<(u32, mt_skp::uv::UvMapping, glam::DVec2)>, p: DVec3| {
+                t.as_ref().map_or([0.0; 2], |(_, map, shift)| {
+                    (texture::uv_at(map, p) - *shift).as_vec2().to_array()
+                })
+            };
+            let layer =
+                |t: &Option<(u32, _, _)>| t.as_ref().map_or(FaceVertex::NO_TEXTURE, |t| t.0);
+            let texture = [layer(&front_tex), layer(&back_tex)];
             let n = world_normal(f);
-            for [a, b, c] in tessellate::triangulate(ents, f) {
-                let (a, b, c) = (
-                    xf.transform_point3(a),
-                    xf.transform_point3(b),
-                    xf.transform_point3(c),
-                );
+            for local in tessellate::triangulate(ents, f) {
+                let [a, b, c] = local.map(|p| xf.transform_point3(p));
                 // A mirroring transform flips the winding; keep it counter-clockwise
                 // around the front normal.
-                let tri = if (b - a).cross(c - a).dot(n) < 0.0 {
-                    [a, c, b]
+                let order = if (b - a).cross(c - a).dot(n) < 0.0 {
+                    [0, 2, 1]
                 } else {
-                    [a, b, c]
+                    [0, 1, 2]
                 };
-                for p in tri {
+                let world = [a, b, c];
+                let tri = order.map(|k| world[k]);
+                for k in order {
+                    let [fu, fv] = uv(&front_tex, local[k]);
+                    let [bu, bv] = uv(&back_tex, local[k]);
                     out.indices.push(out.vertices.len() as u32);
                     out.vertices.push(FaceVertex {
-                        position: f32x3(p),
-                        normal: f32x3(n),
-                        front,
-                        back,
+                        uv: [fu, fv, bu, bv],
+                        texture,
+                        ..FaceVertex::new(f32x3(world[k]), f32x3(n), front, back)
                     });
                 }
                 out.triangles.push(tri);
@@ -575,9 +620,11 @@ impl Document {
     fn delete_in(root: &mut Entities, items: &[Owner]) {
         let mut instances: Vec<usize> = Vec::new();
         let mut sections: Vec<usize> = Vec::new();
+        crate::annot::delete(root, items);
         for item in items {
             match *item {
                 Owner::Section(i) => sections.push(i),
+                Owner::Dimension(_) | Owner::Text(_) => {}
                 Owner::Face(f) => {
                     root.remove_face(f);
                 }
@@ -648,7 +695,9 @@ impl Document {
                         None => erase.push(*item),
                     }
                 }
-                (Owner::Instance(_), false, false) => erase.push(*item),
+                (Owner::Instance(_) | Owner::Dimension(_) | Owner::Text(_), false, false) => {
+                    erase.push(*item)
+                }
                 _ => {}
             }
         }

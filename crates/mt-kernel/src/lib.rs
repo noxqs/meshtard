@@ -3,6 +3,7 @@
 //!
 //! Units are inches, Z up, as in `.skp` files.
 
+pub mod annotation;
 pub mod arrangement;
 pub mod bvh;
 pub mod entities;
@@ -17,9 +18,11 @@ pub mod offset;
 pub mod ops;
 pub mod push_pull;
 pub mod tessellate;
+pub mod texture;
 pub mod transform;
 pub mod validate;
 
+pub use annotation::{Dimension, DimensionKind, Text};
 pub use entities::*;
 pub use follow_me::follow_me;
 pub use intersect::intersect_faces;
@@ -29,6 +32,7 @@ pub use model::{
 pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};
 pub use push_pull::push_pull;
+pub use texture::{FaceUv, Texture};
 pub use transform::{copy_geometry, transform_vertices, vertices_of};
 pub use validate::{Checks, validate};
 

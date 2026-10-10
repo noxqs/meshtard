@@ -37,6 +37,9 @@ pub fn paint(
                 color32(inf.kind.color()),
                 if inf.locked { 3.0 } else { 2.0 },
             )
+        } else if inf.kind.is_hint() {
+            // Shape hints (Square, Half Circle, Tangent at Vertex...) tint the shape.
+            (color32(inf.kind.color()), 2.0)
         } else {
             (egui::Color32::BLACK, 1.5)
         };
@@ -50,8 +53,15 @@ pub fn paint(
     let fill = color32(inf.kind.color());
     let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
     match inf.kind {
-        Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::GuidePoint => {
+        Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::GuidePoint | Kind::Center => {
             painter.circle(p, 5.0, fill, outline);
+        }
+        Kind::Intersection => {
+            // A cross (SketchUp's intersection marker; unverified).
+            let d = 4.5;
+            let stroke = egui::Stroke::new(2.0, fill);
+            painter.line_segment([p + egui::vec2(-d, -d), p + egui::vec2(d, d)], stroke);
+            painter.line_segment([p + egui::vec2(-d, d), p + egui::vec2(d, -d)], stroke);
         }
         Kind::OnEdge | Kind::OnAxis(_) | Kind::OnGuide => {
             painter.rect(
@@ -72,7 +82,15 @@ pub fn paint(
             ];
             painter.add(egui::Shape::convex_polygon(pts, fill, outline));
         }
-        Kind::Free | Kind::Along(_) | Kind::Parallel | Kind::Perpendicular | Kind::FromPoint(_) => {
+        Kind::Free
+        | Kind::Along(_)
+        | Kind::Parallel
+        | Kind::Perpendicular
+        | Kind::FromPoint(_)
+        | Kind::Square
+        | Kind::GoldenSection
+        | Kind::HalfCircle
+        | Kind::Tangent => {
             painter.circle_stroke(p, 2.5, egui::Stroke::new(1.0, egui::Color32::BLACK));
         }
     }

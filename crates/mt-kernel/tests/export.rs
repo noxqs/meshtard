@@ -35,11 +35,13 @@ fn faces_edges_flags_materials_tags() {
         name: "Brick".into(),
         color: [180, 60, 40],
         opacity: 1.0,
+        texture: None,
     });
     m.materials.push(Material {
         name: "Glass".into(),
         color: [120, 180, 220],
         opacity: 0.4,
+        texture: None,
     });
     m.layers.push(Layer {
         name: "Walls".into(),
@@ -358,4 +360,70 @@ fn gondola_defs() {
             d.name, d.is_group, used_root, nested
         );
     }
+}
+
+/// Textured materials and positioned textures survive save and reopen: every textured
+/// face side maps its vertices to the same texture coordinates.
+#[test]
+fn textures_round_trip() {
+    use std::collections::BTreeSet;
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/openskp/capilla_quiroz_v17.skp");
+    let m = import::from_skp(&mt_skp::read(&p).unwrap());
+    let r = import::from_skp(&mt_skp::parse(&export::to_skp(&m).unwrap()).unwrap());
+    // (definition, material, vertex, uv) rounded, over every textured face side.
+    let uvs = |m: &Model| {
+        let mut out = BTreeSet::new();
+        let defs = m
+            .definitions
+            .values()
+            .map(|d| (d.name.clone(), &d.entities))
+            .chain([(String::new(), &m.root)]);
+        let round = |x: f64| (x * 1e4).round() as i64;
+        for (name, ents) in defs {
+            for face in ents.faces.values() {
+                for back in [false, true] {
+                    let mat = if back {
+                        face.attrs.back_material
+                    } else {
+                        face.attrs.material
+                    };
+                    let Some(mat) = mat.map(|i| &m.materials[i]) else {
+                        continue;
+                    };
+                    let Some(map) = mt_kernel::texture::face_mapping(face, back, mat) else {
+                        continue;
+                    };
+                    for p in ents.loop_points(&face.outer) {
+                        let uv = mt_kernel::texture::uv_at(&map, p);
+                        out.insert((
+                            name.clone(),
+                            mat.name.clone(),
+                            p.to_array().map(round),
+                            uv.to_array().map(round),
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    };
+    let textured = |m: &Model| m.materials.iter().filter(|x| x.texture.is_some()).count();
+    assert_eq!(textured(&m), 4);
+    assert_eq!(textured(&r), 4);
+    let positioned = |m: &Model| {
+        m.definitions
+            .values()
+            .map(|d| &d.entities)
+            .chain([&m.root])
+            .flat_map(|e| e.faces.values())
+            .filter(|f| f.attrs.uv.is_some())
+            .count()
+    };
+    assert!(positioned(&m) > 0);
+    assert_eq!(positioned(&m), positioned(&r));
+    let (a, b) = (uvs(&m), uvs(&r));
+    assert!(!a.is_empty());
+    let diff: Vec<_> = a.symmetric_difference(&b).take(4).collect();
+    assert!(diff.is_empty(), "{} vs {}: {diff:?}", a.len(), b.len());
 }

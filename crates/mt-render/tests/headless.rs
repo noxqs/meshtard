@@ -175,12 +175,12 @@ fn quads_mesh(
     for (n, corners) in quads {
         let base = vertices.len() as u32;
         for p in corners {
-            vertices.push(FaceVertex {
-                position: p.as_vec3().into(),
-                normal: n.as_vec3().into(),
+            vertices.push(FaceVertex::new(
+                p.as_vec3().into(),
+                n.as_vec3().into(),
                 front,
                 back,
-            });
+            ));
         }
         indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
     }
@@ -1022,4 +1022,72 @@ fn xray_shows_edges_behind_faces() {
         let near = pixel_at(&img, &camera, NEAR_EDGE);
         assert!(luma(&near) < 60, "{name}: visible edge, got {near:?}");
     }
+}
+
+/// A 64x64 PNG: red top-left, green top-right, blue bottom-left, yellow bottom-right.
+fn quadrant_png() -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(64, 64, |x, y| {
+        image::Rgba(match (x < 32, y < 32) {
+            (true, true) => [255, 0, 0, 255],
+            (false, true) => [0, 255, 0, 255],
+            (true, false) => [0, 0, 255, 255],
+            (false, false) => [255, 255, 0, 255],
+        })
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn textured_faces_show_texture_pixels() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let grey = [0.5, 0.5, 0.5, 1.0];
+    let (mut viewport, camera) = face_style_cube(&device, face_style(), grey, grey);
+    // One tile per cube side, front texture 0; corners go (0,0) (1,0) (1,1) (0,1).
+    let (mut vertices, indices) = quads_mesh(&cube_quads(), grey, grey);
+    for (i, v) in vertices.iter_mut().enumerate() {
+        let [u, w] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]][i % 4];
+        v.uv = [u, w, 0.0, 0.0];
+        v.texture = [0, FaceVertex::NO_TEXTURE];
+    }
+    viewport.set_faces(&device, &vertices, &indices);
+    viewport.set_textures(&[mt_render::TextureSource {
+        data: quadrant_png().into(),
+        tint: None,
+    }]);
+
+    // Shaded keeps the material color.
+    let img = render(&device, &queue, &mut viewport, &camera, "textures_shaded");
+    let px = pixel_at(&img, &camera, DVec3::new(-25.0, -HALF, 25.0));
+    assert!(
+        px[0].abs_diff(px[1]) <= 2 && px[1].abs_diff(px[2]) <= 2,
+        "grey material, got {px:?}"
+    );
+
+    // The -Y side runs u along +X and v up +Z: the image's top-left quadrant is at
+    // the upper left as seen from the front.
+    viewport.set_face_style(FaceStyle::ShadedWithTextures, false);
+    let img = render(&device, &queue, &mut viewport, &camera, "textures_shown");
+    let at = |x: f64, z: f64| pixel_at(&img, &camera, DVec3::new(x, -HALF, z));
+    let dominant = |px: image::Rgba<u8>, rgb: [bool; 3]| {
+        (0..3).all(|i| if rgb[i] { px[i] > 100 } else { px[i] < 30 })
+    };
+    let red = at(-25.0, 25.0);
+    let green = at(25.0, 25.0);
+    let blue = at(-25.0, -25.0);
+    let yellow = at(25.0, -25.0);
+    assert!(dominant(red, [true, false, false]), "red, got {red:?}");
+    assert!(
+        dominant(green, [false, true, false]),
+        "green, got {green:?}"
+    );
+    assert!(dominant(blue, [false, false, true]), "blue, got {blue:?}");
+    assert!(
+        dominant(yellow, [true, true, false]),
+        "yellow, got {yellow:?}"
+    );
 }

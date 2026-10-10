@@ -47,6 +47,14 @@ pub trait ModifyTool {
     fn cancel(&mut self);
     /// The material picked in the Materials panel (Paint Bucket).
     fn set_material(&mut self, _material: Option<usize>) {}
+    /// Ctrl pressed and released: toggles copy (Move, Rotate) or new faces
+    /// (Push/Pull) for the rest of the tool's use (SketchUp keeps the toggle while the
+    /// tool is active; unverified).
+    fn toggle_ctrl(&mut self) {}
+    /// A double click (after the click it also is). Returns whether the model changed.
+    fn double_click(&mut self, _ctx: &mut Ctx, _inf: &Inference) -> bool {
+        false
+    }
 }
 
 pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
@@ -71,7 +79,7 @@ fn split(targets: &[Owner]) -> (Vec<EdgeId>, Vec<FaceId>, Vec<usize>) {
             Owner::Edge(x) => e.push(x),
             Owner::Face(x) => f.push(x),
             Owner::Instance(x) => i.push(x),
-            Owner::Section(_) => {}
+            Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
         }
     }
     (e, f, i)
@@ -107,6 +115,7 @@ fn apply(ents: &mut Entities, targets: &[Owner], xf: DMat4, copy: bool) {
             }
         }
     }
+    crate::annot::transform(ents, targets, xf, copy);
     let (edges, faces, instances) = split(targets);
     if copy {
         mt_kernel::transform::copy_geometry(ents, &edges, &faces, xf);
@@ -179,9 +188,9 @@ fn transform_lines(lines: Vec<Vec<DVec3>>, xf: DMat4) -> Vec<Vec<DVec3>> {
 pub struct PushPull {
     /// Face, the clicked point on it, its normal.
     start: Option<(FaceId, DVec3, DVec3)>,
-    /// Ctrl at the first click: keep the start face (new faces).
+    /// Ctrl toggled: keep the start face (new faces).
     new_faces: bool,
-    /// Last distance, repeated by a double click in SketchUp (not yet).
+    /// Last distance, repeated on another face by a double click.
     last: Option<f64>,
 }
 
@@ -235,7 +244,6 @@ impl ModifyTool for PushPull {
                 if let Some(Owner::Face(f)) = ctx.picked {
                     let n = ctx.ents.faces[f].normal;
                     self.start = Some((f, inf.point, n));
-                    self.new_faces = ctx.ctrl;
                 }
                 false
             }
@@ -286,6 +294,20 @@ impl ModifyTool for PushPull {
 
     fn cancel(&mut self) {
         self.start = None;
+    }
+
+    fn toggle_ctrl(&mut self) {
+        self.new_faces = !self.new_faces;
+    }
+
+    /// SketchUp: double-clicking a face pushes or pulls it by the last distance.
+    fn double_click(&mut self, ctx: &mut Ctx, _inf: &Inference) -> bool {
+        let (Some(d), Some(Owner::Face(f))) = (self.last, ctx.picked) else {
+            return false;
+        };
+        self.start = None;
+        ctx.ents.faces.contains_key(f)
+            && mt_kernel::push_pull::push_pull(ctx.ents, f, d, self.new_faces || ctx.ctrl).is_some()
     }
 }
 
@@ -381,19 +403,24 @@ fn scale_about(c: DVec3, s: DVec3) -> DMat4 {
 
 impl ModifyTool for Transform {
     fn status(&self) -> String {
-        match (self.kind, self.points.len()) {
-            (Kind::Move, 0) => "Select object to move. Ctrl = copy.",
+        let text: String = match (self.kind, self.points.len()) {
+            (Kind::Move, 0) => "Select object to move. Ctrl = toggle copy.",
             (Kind::Move, _) => {
                 "Select destination or enter distance. After a copy: 5x or /5 for arrays."
             }
-            (Kind::Rotate, 0) => "Select center of rotation. Ctrl = copy.",
+            (Kind::Rotate, 0) => "Select center of rotation. Ctrl = toggle copy.",
             (Kind::Rotate, 1) => "Select start point of the angle.",
             (Kind::Rotate, _) => "Select end point or enter angle.",
             (Kind::Scale, 0) => "Select fixed point.",
             (Kind::Scale, 1) => "Select reference point.",
             (Kind::Scale, _) => "Select new point or enter scale factor.",
         }
-        .into()
+        .into();
+        if self.copy && self.kind != Kind::Scale {
+            format!("{text} (Copy)")
+        } else {
+            text
+        }
     }
 
     fn measurement(&self, cur: Option<&Inference>, units: LengthUnit) -> (&'static str, String) {
@@ -435,7 +462,6 @@ impl ModifyTool for Transform {
                 return false;
             }
             self.last_copy = None;
-            self.copy = ctx.ctrl;
         }
         if self.points.len() + 1 < self.needed() {
             if self
@@ -537,6 +563,12 @@ impl ModifyTool for Transform {
             out.push(guide);
         }
         out
+    }
+
+    fn toggle_ctrl(&mut self) {
+        if self.kind != Kind::Scale {
+            self.copy = !self.copy;
+        }
     }
 
     fn cancel(&mut self) {
@@ -801,7 +833,7 @@ impl ModifyTool for PaintBucket {
                         inst.material = m;
                     }
                 }
-                Owner::Edge(_) | Owner::Section(_) => {}
+                Owner::Edge(_) | Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
             }
         }
         changed
@@ -1094,5 +1126,36 @@ mod tests {
             .map(|v| v.pos.x)
             .fold(f64::MAX, f64::min);
         assert!((min_x + 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn push_pull_double_click_repeats_and_ctrl_toggles() {
+        let mut ents = Entities::default();
+        let f = square(&mut ents);
+        let mut pp = PushPull::default();
+        let p = DVec3::new(5.0, 5.0, 0.0);
+        let n = ents.faces[f].normal;
+        let mut ctx = Ctx { ents: &mut ents, picked: Some(Owner::Face(f)), selection: &[], ctrl: false, eye: DVec3::ZERO };
+        pp.click(&mut ctx, &inf(p));
+        assert!(pp.typed(&mut ctx, Some(&inf(p + n)), "4", LengthUnit::Inch));
+        // A separate square, double-clicked: pulled by the same 4".
+        let q = [DVec3::new(20.0, 0.0, 0.0), DVec3::new(30.0, 0.0, 0.0), DVec3::new(30.0, 10.0, 0.0), DVec3::new(20.0, 10.0, 0.0)];
+        for i in 0..4 {
+            mt_kernel::add_line(&mut ents, q[i], q[(i + 1) % 4]);
+        }
+        let g = ents.faces.keys().find(|&k| ents.faces[k].outer.coedges.len() == 4 && ents.loop_points(&ents.faces[k].outer).iter().all(|p| p.x >= 20.0)).unwrap();
+        let before = ents.faces.len();
+        let mut ctx = Ctx { ents: &mut ents, picked: Some(Owner::Face(g)), selection: &[], ctrl: false, eye: DVec3::ZERO };
+        assert!(pp.double_click(&mut ctx, &inf(DVec3::new(25.0, 5.0, 0.0))));
+        assert_eq!(ents.faces.len(), before + 5, "a free-standing face keeps its base: four sides and a top");
+        let top = ents.vertices.values().filter(|v| v.pos.x >= 20.0).map(|v| v.pos.z.abs()).fold(0.0, f64::max);
+        assert!((top - 4.0).abs() < 1e-9);
+
+        let mut mv = Transform::new(Kind::Move);
+        assert!(!mv.copy);
+        mv.toggle_ctrl();
+        assert!(mv.copy && mv.status().ends_with("(Copy)"));
+        mv.toggle_ctrl();
+        assert!(!mv.copy);
     }
 }

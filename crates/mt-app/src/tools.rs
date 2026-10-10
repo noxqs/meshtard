@@ -1,5 +1,6 @@
 //! Drawing tools: Line, Rectangle, Rotated Rectangle, Circle, Polygon, Arc, 2 Point Arc,
-//! 3 Point Arc, Pie and Freehand. Each takes inferred points (clicks, or press-drag-
+//! 3 Point Arc, Pie and Freehand, and the construction tools Tape Measure, Protractor,
+//! Dimensions and Text. Each takes inferred points (clicks, or press-drag-
 //! release) and typed values from the Measurements box, and shows a preview.
 //!
 //! Shapes lie in the plane of the face clicked first, else on the ground; arrow keys
@@ -49,6 +50,18 @@ pub trait DrawTool {
     fn drag_end(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         self.click(ents, inf)
     }
+    /// The cursor snapped to a shape hint (Square, Half Circle...; `mt_infer::hints`).
+    fn hint(&self, _cur: &Inference) -> Option<Inference> {
+        None
+    }
+    /// The text being written (Text tool), for the inline editor.
+    fn text_draft(&mut self) -> Option<&mut TextDraft> {
+        None
+    }
+    /// Adds the text being written to the model. Returns whether the model changed.
+    fn finish_text(&mut self, _ents: &mut Entities) -> bool {
+        false
+    }
 }
 
 pub fn for_command(id: &str) -> Option<Box<dyn DrawTool>> {
@@ -64,6 +77,9 @@ pub fn for_command(id: &str) -> Option<Box<dyn DrawTool>> {
         "tool.arc_3pt" => Box::new(ThreePointArc::default()),
         "tool.freehand" => Box::new(Freehand::default()),
         "tool.tape_measure" => Box::new(TapeMeasure::default()),
+        "tool.protractor" => Box::new(Protractor::default()),
+        "tool.dimensions" => Box::new(DimensionTool::default()),
+        "tool.text" => Box::new(TextTool::default()),
         _ => return None,
     })
 }
@@ -227,6 +243,12 @@ impl Rectangle {
 }
 
 impl DrawTool for Rectangle {
+    fn hint(&self, cur: &Inference) -> Option<Inference> {
+        let (a, n) = self.first?;
+        let (u, v) = plane_axes(n);
+        mt_infer::hints::rectangle(cur, a, u, v)
+    }
+
     fn anchor(&self) -> Option<DVec3> {
         self.first.map(|f| f.0)
     }
@@ -629,6 +651,8 @@ pub fn arc_three_points(a: DVec3, b: DVec3, c: DVec3, segments: usize) -> Option
 pub struct TwoPointArc {
     points: Vec<DVec3>,
     normal: DVec3,
+    /// Direction of the edge ending at the start point, for "Tangent at Vertex".
+    tangent: Option<DVec3>,
     segments: Option<usize>,
     lock: Option<DVec3>,
 }
@@ -675,6 +699,11 @@ impl TwoPointArc {
 }
 
 impl DrawTool for TwoPointArc {
+    fn hint(&self, cur: &Inference) -> Option<Inference> {
+        let [a, b] = self.points[..] else { return None };
+        mt_infer::hints::two_point_arc(cur, a, b, self.normal, self.tangent)
+    }
+
     fn anchor(&self) -> Option<DVec3> {
         self.points.first().copied()
     }
@@ -705,6 +734,7 @@ impl DrawTool for TwoPointArc {
         match self.points.len() {
             0 => {
                 self.normal = plane_normal(self.lock, inf);
+                self.tangent = mt_infer::hints::tangent_at(inf);
                 self.points.push(inf.point);
                 false
             }
@@ -835,6 +865,11 @@ impl CenterArc {
 }
 
 impl DrawTool for CenterArc {
+    fn hint(&self, cur: &Inference) -> Option<Inference> {
+        let ((c, n), s) = (self.center?, self.start?);
+        mt_infer::hints::center_arc(cur, c, s, n)
+    }
+
     fn anchor(&self) -> Option<DVec3> {
         self.center.map(|c| c.0)
     }
@@ -1204,6 +1239,554 @@ impl DrawTool for TapeMeasure {
     }
 }
 
+// ------------------------------------------------------------------ Protractor
+
+/// Signed angle from `from` to `to` around `normal` (all in the plane), in
+/// `(-pi, pi]`.
+pub fn signed_angle(from: DVec3, to: DVec3, normal: DVec3) -> f64 {
+    from.cross(to).dot(normal).atan2(from.dot(to))
+}
+
+/// A typed protractor angle in radians: degrees (`30`, `-12.5°`) or a slope
+/// `rise:run` (`1:2`).
+pub fn parse_angle(text: &str) -> Option<f64> {
+    let t = text.trim();
+    if let Some((rise, run)) = t.split_once(':') {
+        let (rise, run): (f64, f64) = (rise.trim().parse().ok()?, run.trim().parse().ok()?);
+        return (rise != 0.0 || run != 0.0).then(|| rise.atan2(run));
+    }
+    let deg: f64 = t
+        .trim_end_matches('°')
+        .trim()
+        .replace(',', ".")
+        .parse()
+        .ok()?;
+    deg.is_finite().then(|| deg.to_radians())
+}
+
+/// Protractor: center (the protractor lies on the face under the cursor, else on the
+/// ground; arrow keys lock it), a click on the start direction, then a click or a
+/// typed angle places a guide line through the center at that angle.
+///
+/// Unverified against SketchUp: the protractor here is drawn at the radius of the
+/// start click (SketchUp's is a fixed screen size), angles do not snap to the 15°
+/// ticks, typed angles turn towards the side the cursor is on, and Ctrl (measure
+/// only, no guide) is not supported.
+#[derive(Debug, Default)]
+pub struct Protractor {
+    center: Option<(DVec3, DVec3)>,
+    /// Unit start direction in the plane, and the protractor radius.
+    base: Option<(DVec3, f64)>,
+    lock: Option<DVec3>,
+}
+
+/// Protractor ticks every 15 degrees (SketchUp's default angle snap).
+const PROTRACTOR_TICK: f64 = std::f64::consts::PI / 12.0;
+
+impl Protractor {
+    fn in_plane(&self, p: DVec3) -> Option<DVec3> {
+        let (c, n) = self.center?;
+        let d = p - c;
+        Some(d - n * d.dot(n))
+    }
+
+    /// Angle of the cursor from the start direction.
+    fn angle(&self, p: DVec3) -> Option<f64> {
+        let (_, n) = self.center?;
+        let (base, _) = self.base?;
+        let d = self.in_plane(p)?;
+        (d.length() > mt_kernel::TOL).then(|| signed_angle(base, d, n))
+    }
+
+    /// The guide direction at `angle` from the start direction.
+    pub fn direction(&self, angle: f64) -> Option<DVec3> {
+        let (_, n) = self.center?;
+        let (base, _) = self.base?;
+        Some(base * angle.cos() + n.cross(base) * angle.sin())
+    }
+
+    fn place(&mut self, ents: &mut Entities, angle: f64) -> bool {
+        let (Some((c, _)), Some(dir)) = (self.center, self.direction(angle)) else {
+            return false;
+        };
+        ents.guides.push(mt_kernel::Guide {
+            point: c,
+            dir: Some(dir.normalize()),
+        });
+        self.cancel();
+        true
+    }
+}
+
+impl DrawTool for Protractor {
+    fn anchor(&self) -> Option<DVec3> {
+        self.center.map(|c| c.0)
+    }
+
+    fn status(&self) -> String {
+        match (self.center, self.base) {
+            (None, _) => "Place the protractor center. Arrow keys lock its orientation.",
+            (Some(_), None) => "Select the start of the angle.",
+            _ => "Select the angle or enter value (degrees or rise:run).",
+        }
+        .into()
+    }
+
+    fn measurement(&self, cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        let v = cur
+            .and_then(|c| self.angle(c.point))
+            .map(|a| format!("{:.1}", a.to_degrees()));
+        ("Angle", v.unwrap_or_default())
+    }
+
+    fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        match (self.center, self.base) {
+            (None, _) => {
+                self.center = Some((inf.point, plane_normal(self.lock, inf)));
+                false
+            }
+            (Some(_), None) => {
+                let d = self.in_plane(inf.point).unwrap_or_default();
+                if d.length() > mt_kernel::TOL {
+                    self.base = Some((d.normalize(), d.length()));
+                }
+                false
+            }
+            _ => match self.angle(inf.point) {
+                Some(a) => self.place(ents, a),
+                None => false,
+            },
+        }
+    }
+
+    fn typed(
+        &mut self,
+        ents: &mut Entities,
+        cur: Option<&Inference>,
+        text: &str,
+        _units: LengthUnit,
+    ) -> bool {
+        let (Some(_), Some(a)) = (self.base, parse_angle(text)) else {
+            return false;
+        };
+        let side = cur
+            .and_then(|c| self.angle(c.point))
+            .map_or(1.0, |c| if c < 0.0 { -1.0 } else { 1.0 });
+        self.place(ents, a * side)
+    }
+
+    fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
+        let Some((c, n)) = self.center else {
+            return Vec::new();
+        };
+        let to_cur = self.in_plane(cur.point).unwrap_or_default();
+        let (x, r) = match self.base {
+            Some(b) => b,
+            None if to_cur.length() > mt_kernel::TOL => (to_cur.normalize(), to_cur.length()),
+            None => return Vec::new(),
+        };
+        let circle = Arc {
+            center: c,
+            normal: n,
+            x_axis: x,
+            radius: r,
+            start_angle: 0.0,
+            end_angle: TAU,
+            segments: 48,
+        };
+        let y = n.cross(x);
+        let mut out = vec![circle.points()];
+        for i in 0..24 {
+            let a = i as f64 * PROTRACTOR_TICK;
+            let d = x * a.cos() + y * a.sin();
+            let inner = if i % 6 == 0 { 0.8 } else { 0.9 };
+            out.push(vec![c + d * r * inner, c + d * r]);
+        }
+        out.push(vec![c, c + x * r]);
+        if let (Some(_), Some(a)) = (self.base, self.angle(cur.point)) {
+            let d = self.direction(a).unwrap_or(x);
+            out.push(vec![c, c + d * to_cur.length().max(r * 1.5)]);
+        }
+        out
+    }
+
+    fn cancel(&mut self) {
+        self.center = None;
+        self.base = None;
+    }
+
+    fn lock_plane(&mut self, axis: Axis) -> bool {
+        if self.base.is_some() {
+            return false;
+        }
+        self.lock = if self.lock == Some(axis.dir()) {
+            None
+        } else {
+            Some(axis.dir())
+        };
+        if let Some((c, _)) = self.center {
+            self.center = Some((c, self.lock.unwrap_or(DVec3::Z)));
+        }
+        true
+    }
+}
+
+// ------------------------------------------------------------------ Dimensions
+
+/// The arc an edge at `segment` belongs to, if it is part of an arc curve.
+fn arc_of(ents: &Entities, segment: [DVec3; 2]) -> Option<Arc> {
+    let a = ents.find_vertex(segment[0])?;
+    let b = ents.find_vertex(segment[1])?;
+    let e = ents.edge_between(a, b)?;
+    ents.curves.get(ents.edges[e].attrs.curve?)?.arc
+}
+
+/// Dimensions: click two points (or one edge), then the offset of the dimension line.
+/// A click on an arc makes a radius dimension, on a circle a diameter dimension.
+/// Typed text while placing becomes the dimension's text.
+///
+/// Unverified against SketchUp: the offset is taken perpendicular to the measured
+/// segment towards the cursor in 3D (SketchUp picks the dimension plane from the
+/// view), and the radial dimension's points (center and the clicked side) are a draft.
+#[derive(Debug, Default)]
+pub struct DimensionTool {
+    first: Option<DVec3>,
+    placing: Option<mt_kernel::Dimension>,
+}
+
+impl DimensionTool {
+    /// `d` with its offset following the cursor.
+    fn placed(d: &mt_kernel::Dimension, cursor: DVec3) -> mt_kernel::Dimension {
+        let mut d = d.clone();
+        d.offset = match d.kind {
+            mt_kernel::DimensionKind::Linear => {
+                mt_kernel::Dimension::offset_towards(d.a, d.b, cursor)
+            }
+            _ => cursor - d.b,
+        };
+        d
+    }
+
+    /// The dimension started by a click on an edge.
+    fn from_edge(ents: &Entities, seg: [DVec3; 2], at: DVec3) -> mt_kernel::Dimension {
+        use mt_kernel::{Dimension, DimensionKind};
+        let Some(arc) = arc_of(ents, seg) else {
+            return Dimension::linear(seg[0], seg[1], DVec3::ZERO);
+        };
+        let d = at - arc.center;
+        let d = (d - arc.normal * d.dot(arc.normal)).normalize_or_zero();
+        let d = if d == DVec3::ZERO { arc.x_axis } else { d };
+        let (a, b, kind) = if arc.is_circle() {
+            (
+                arc.center - d * arc.radius,
+                arc.center + d * arc.radius,
+                DimensionKind::Diameter,
+            )
+        } else {
+            (
+                arc.center,
+                arc.center + d * arc.radius,
+                DimensionKind::Radius,
+            )
+        };
+        Dimension {
+            kind,
+            ..Dimension::linear(a, b, DVec3::ZERO)
+        }
+    }
+}
+
+impl DrawTool for DimensionTool {
+    fn anchor(&self) -> Option<DVec3> {
+        self.first.or(self.placing.as_ref().map(|d| d.b))
+    }
+
+    fn status(&self) -> String {
+        match (self.first, &self.placing) {
+            (_, Some(_)) => "Select the dimension position, or type its text.",
+            (Some(_), None) => "Select second point.",
+            _ => "Select first point or an edge.",
+        }
+        .into()
+    }
+
+    fn measurement(&self, cur: Option<&Inference>, units: LengthUnit) -> (&'static str, String) {
+        let v = match (&self.placing, self.first, cur) {
+            (Some(d), _, _) => units.format(d.value()),
+            (None, Some(a), Some(c)) => units.format(a.distance(c.point)),
+            _ => String::new(),
+        };
+        ("Length", v)
+    }
+
+    fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        if let Some(d) = self.placing.take() {
+            ents.dimensions.push(Self::placed(&d, inf.point));
+            return true;
+        }
+        match self.first {
+            Some(a) => {
+                if a.distance(inf.point) > mt_kernel::TOL {
+                    self.placing = Some(mt_kernel::Dimension::linear(a, inf.point, DVec3::ZERO));
+                    self.first = None;
+                }
+            }
+            None => match inf.segment {
+                Some(seg) if inf.kind == mt_infer::Kind::OnEdge => {
+                    self.placing = Some(Self::from_edge(ents, seg, inf.point));
+                }
+                _ => self.first = Some(inf.point),
+            },
+        }
+        false
+    }
+
+    fn typed(
+        &mut self,
+        ents: &mut Entities,
+        cur: Option<&Inference>,
+        text: &str,
+        _units: LengthUnit,
+    ) -> bool {
+        let Some(d) = self.placing.take() else {
+            return false;
+        };
+        let mut d = match cur {
+            Some(c) => Self::placed(&d, c.point),
+            None => d,
+        };
+        let text = text.trim();
+        d.text = (!text.is_empty()).then(|| text.to_owned());
+        ents.dimensions.push(d);
+        true
+    }
+
+    fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
+        match (&self.placing, self.first) {
+            (Some(d), _) => {
+                let d = Self::placed(d, cur.point);
+                d.segments(0.0).into_iter().map(|s| s.to_vec()).collect()
+            }
+            (None, Some(a)) => vec![vec![a, cur.point]],
+            _ => Vec::new(),
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.first = None;
+        self.placing = None;
+    }
+}
+
+// ------------------------------------------------------------------ Text
+
+/// What a leader text says by default, formatted in the model's units when shown.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextLabel {
+    /// Edge or curve length.
+    Length(f64),
+    /// Face area in square inches.
+    Area(f64),
+    /// Point coordinates.
+    Point(DVec3),
+    Plain(String),
+}
+
+impl TextLabel {
+    pub fn format(&self, units: LengthUnit) -> String {
+        match self {
+            Self::Length(l) => units.format(*l),
+            Self::Area(a) => crate::annot::area_label(*a, units),
+            Self::Point(p) => crate::annot::point_label(*p, units),
+            Self::Plain(s) => s.clone(),
+        }
+    }
+
+    /// The default text for a click at `inf`: an edge's (or its curve's) length, a
+    /// face's area, a point's coordinates; `None` on empty space.
+    ///
+    /// SketchUp shows a component's name on components; here a click on a component
+    /// gives the coordinates (unverified formats throughout).
+    pub fn at(ents: &Entities, inf: &Inference) -> Option<Self> {
+        use mt_infer::Kind;
+        Some(match inf.kind {
+            Kind::OnEdge => {
+                let [a, b] = inf.segment?;
+                let curve = ents
+                    .find_vertex(a)
+                    .zip(ents.find_vertex(b))
+                    .and_then(|(a, b)| ents.edge_between(a, b))
+                    .and_then(|e| ents.edges[e].attrs.curve);
+                let len = match curve {
+                    Some(c) => ents
+                        .curve_edges(c)
+                        .iter()
+                        .map(|&e| {
+                            ents.pos(ents.edges[e].start)
+                                .distance(ents.pos(ents.edges[e].end))
+                        })
+                        .sum(),
+                    None => a.distance(b),
+                };
+                Self::Length(len)
+            }
+            Kind::OnFace => match ents
+                .faces
+                .keys()
+                .find(|&f| ents.face_contains(f, inf.point))
+            {
+                Some(f) => Self::Area(face_area(ents, f)),
+                None => Self::Point(inf.point),
+            },
+            // Directions and shape hints from the anchor: nothing under the cursor.
+            Kind::Free
+            | Kind::Along(_)
+            | Kind::Parallel
+            | Kind::Perpendicular
+            | Kind::FromPoint(_) => return None,
+            // Endpoints, midpoints, guides, centers, intersections, axes.
+            _ => Self::Point(inf.point),
+        })
+    }
+}
+
+/// Area of a face (holes subtracted), in square inches.
+pub fn face_area(ents: &Entities, f: mt_kernel::FaceId) -> f64 {
+    let plane = ents.face_plane(f);
+    let (outer, holes) = ents.face_polygons(f, &plane);
+    let area = |p: &[glam::DVec2]| mt_kernel::geom::signed_area2(p).abs() / 2.0;
+    area(&outer) - holes.iter().map(|h| area(h)).sum::<f64>()
+}
+
+/// A text being written: placed but not yet in the model.
+#[derive(Debug, Clone)]
+pub struct TextDraft {
+    pub text: mt_kernel::Text,
+    pub label: TextLabel,
+    /// The text as edited; `None` until the editor opens (it starts with `label`).
+    pub edited: Option<String>,
+    /// A screen text whose position the editor takes from the pointer.
+    pub needs_screen_pos: bool,
+    /// The editor took keyboard focus.
+    pub focused: bool,
+}
+
+/// Text: click an entity, then where the label goes, and edit the text (it starts as
+/// the entity's length, area or coordinates); a click on empty space makes a screen
+/// text. Enter or a click elsewhere finishes, Esc drops it. Text typed into the
+/// Measurements box replaces the text and finishes.
+///
+/// Unverified against SketchUp: the inline editor's look, empty texts being dropped,
+/// and the label formats.
+#[derive(Debug, Default)]
+pub struct TextTool {
+    /// The leader's point and the default label, waiting for the label position.
+    anchor: Option<(DVec3, TextLabel)>,
+    draft: Option<TextDraft>,
+}
+
+impl TextTool {
+    /// Adds the draft to the model (unless its text is empty).
+    pub fn finish(&mut self, ents: &mut Entities) -> bool {
+        let Some(d) = self.draft.take() else {
+            return false;
+        };
+        let text = d.edited.unwrap_or_else(|| d.label.format(LengthUnit::Inch));
+        if text.trim().is_empty() || (d.needs_screen_pos && d.text.screen) {
+            return false;
+        }
+        ents.texts.push(mt_kernel::Text { text, ..d.text });
+        true
+    }
+}
+
+impl DrawTool for TextTool {
+    fn anchor(&self) -> Option<DVec3> {
+        self.anchor.as_ref().map(|a| a.0)
+    }
+
+    fn status(&self) -> String {
+        match (&self.anchor, &self.draft) {
+            (_, Some(_)) => "Type the text. Enter to finish, Esc to cancel.",
+            (Some(_), None) => "Select the text position.",
+            _ => "Select an entity for leader text, or empty space for screen text.",
+        }
+        .into()
+    }
+
+    fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        ("Text", String::new())
+    }
+
+    fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        if self.draft.is_some() {
+            return self.finish(ents);
+        }
+        if let Some((point, label)) = self.anchor.take() {
+            self.draft = Some(TextDraft {
+                text: mt_kernel::Text::leader(point, inf.point - point, String::new()),
+                label,
+                edited: None,
+                needs_screen_pos: false,
+                focused: false,
+            });
+            return false;
+        }
+        match TextLabel::at(ents, inf) {
+            Some(label) => self.anchor = Some((inf.point, label)),
+            None => {
+                self.draft = Some(TextDraft {
+                    text: mt_kernel::Text::screen(0.0, 0.0, String::new()),
+                    label: TextLabel::Plain(String::new()),
+                    edited: None,
+                    needs_screen_pos: true,
+                    focused: false,
+                })
+            }
+        }
+        false
+    }
+
+    fn typed(
+        &mut self,
+        ents: &mut Entities,
+        _cur: Option<&Inference>,
+        text: &str,
+        _units: LengthUnit,
+    ) -> bool {
+        match self.draft.as_mut() {
+            Some(d) => {
+                d.edited = Some(text.to_owned());
+                self.finish(ents)
+            }
+            None => false,
+        }
+    }
+
+    fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
+        match (&self.anchor, &self.draft) {
+            (Some((p, _)), _) => vec![vec![*p, cur.point]],
+            (None, Some(d)) if !d.text.screen => {
+                vec![vec![d.text.point, d.text.point + d.text.leader]]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.anchor = None;
+        self.draft = None;
+    }
+
+    fn text_draft(&mut self) -> Option<&mut TextDraft> {
+        self.draft.as_mut()
+    }
+
+    fn finish_text(&mut self, ents: &mut Entities) -> bool {
+        self.finish(ents)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1334,6 +1917,148 @@ mod tests {
         t.click(&mut e, &endpoint);
         assert!(t.click(&mut e, &inf(v(10.0, 4.0, 0.0))));
         assert_eq!(e.guides[1].dir, None);
+    }
+
+    #[test]
+    fn protractor_places_angled_guide_through_center() {
+        let mut e = Entities::new();
+        let mut t = Protractor::default();
+        t.click(&mut e, &inf(v(1.0, 1.0, 0.0)));
+        t.click(&mut e, &inf(v(11.0, 1.0, 0.0)));
+        assert!(t.click(&mut e, &inf(v(1.0, 5.0, 0.0))));
+        assert_eq!(e.guides[0].point, v(1.0, 1.0, 0.0));
+        assert!((e.guides[0].dir.unwrap() - DVec3::Y).length() < 1e-12);
+        // Typed angles turn towards the cursor's side.
+        t.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        t.click(&mut e, &inf(v(10.0, 0.0, 0.0)));
+        assert!(t.typed(
+            &mut e,
+            Some(&inf(v(5.0, -1.0, 0.0))),
+            "30",
+            LengthUnit::Inch
+        ));
+        let d = e.guides[1].dir.unwrap();
+        assert!((d - v(3f64.sqrt() / 2.0, -0.5, 0.0)).length() < 1e-12);
+    }
+
+    #[test]
+    fn protractor_on_a_wall_and_slopes() {
+        let mut e = Entities::new();
+        let mut t = Protractor::default();
+        let mut wall = inf(v(0.0, 0.0, 0.0));
+        wall.normal = Some(DVec3::Y);
+        t.click(&mut e, &wall);
+        t.click(&mut e, &inf(v(10.0, 0.0, 0.0)));
+        assert!(t.typed(
+            &mut e,
+            Some(&inf(v(5.0, 0.0, 5.0))),
+            "1:1",
+            LengthUnit::Inch
+        ));
+        let d = e.guides[0].dir.unwrap();
+        assert!((d - v(1.0, 0.0, 1.0).normalize()).length() < 1e-12, "{d}");
+        assert_eq!(parse_angle("90°"), Some(90f64.to_radians()));
+        assert_eq!(parse_angle("1:2"), Some(0.5f64.atan()));
+        assert_eq!(parse_angle("abc"), None);
+    }
+
+    #[test]
+    fn dimension_between_points_and_on_edges() {
+        let mut e = Entities::new();
+        let mut t = DimensionTool::default();
+        t.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        t.click(&mut e, &inf(v(10.0, 0.0, 0.0)));
+        assert!(t.click(&mut e, &inf(v(3.0, 4.0, 0.0))));
+        assert_eq!(e.dimensions[0].offset, v(0.0, 4.0, 0.0));
+        assert_eq!(e.dimensions[0].value(), 10.0);
+        // One click on an edge measures it; typed text overrides the label.
+        let mut on_edge = inf(v(5.0, 5.0, 0.0));
+        on_edge.kind = mt_infer::Kind::OnEdge;
+        on_edge.segment = Some([v(0.0, 5.0, 0.0), v(10.0, 5.0, 0.0)]);
+        t.click(&mut e, &on_edge);
+        assert!(t.typed(
+            &mut e,
+            Some(&inf(v(2.0, 8.0, 0.0))),
+            "Wall",
+            LengthUnit::Inch
+        ));
+        let d = &e.dimensions[1];
+        assert_eq!(
+            (d.a, d.b, d.offset),
+            (v(0.0, 5.0, 0.0), v(10.0, 5.0, 0.0), v(0.0, 3.0, 0.0))
+        );
+        assert_eq!(d.text.as_deref(), Some("Wall"));
+    }
+
+    #[test]
+    fn dimension_on_circle_is_diameter() {
+        let mut e = Entities::new();
+        let mut c = Polygon::circle();
+        c.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        c.click(&mut e, &inf(v(10.0, 0.0, 0.0)));
+        let (a, b) = {
+            let edge = e.edges.values().next().unwrap();
+            (e.pos(edge.start), e.pos(edge.end))
+        };
+        let mut on_edge = inf((a + b) / 2.0);
+        on_edge.kind = mt_infer::Kind::OnEdge;
+        on_edge.segment = Some([a, b]);
+        let mut t = DimensionTool::default();
+        t.click(&mut e, &on_edge);
+        assert!(t.click(&mut e, &inf(v(20.0, 20.0, 0.0))));
+        let d = &e.dimensions[0];
+        assert_eq!(d.kind, mt_kernel::DimensionKind::Diameter);
+        assert!((d.value() - 20.0).abs() < 1e-9);
+        assert!((d.a + d.b).length() < 1e-9, "through the center");
+    }
+
+    #[test]
+    fn text_default_labels() {
+        let mut e = Entities::new();
+        let mut r = Rectangle::default();
+        r.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        r.click(&mut e, &inf(v(12.0, 24.0, 0.0)));
+        let mut on_face = inf(v(5.0, 5.0, 0.0));
+        on_face.kind = mt_infer::Kind::OnFace;
+        assert_eq!(TextLabel::at(&e, &on_face), Some(TextLabel::Area(288.0)));
+        assert_eq!(TextLabel::Area(288.0).format(LengthUnit::Foot), "2 ft²");
+        let mut on_edge = inf(v(6.0, 0.0, 0.0));
+        on_edge.kind = mt_infer::Kind::OnEdge;
+        on_edge.segment = Some([v(0.0, 0.0, 0.0), v(12.0, 0.0, 0.0)]);
+        assert_eq!(TextLabel::at(&e, &on_edge), Some(TextLabel::Length(12.0)));
+        let mut corner = inf(v(12.0, 24.0, 0.0));
+        corner.kind = mt_infer::Kind::Endpoint;
+        assert_eq!(
+            TextLabel::at(&e, &corner).unwrap().format(LengthUnit::Inch),
+            "(12\", 24\", 0\")"
+        );
+        assert_eq!(TextLabel::at(&e, &inf(v(50.0, 50.0, 0.0))), None);
+    }
+
+    #[test]
+    fn text_tool_leader_and_screen_text() {
+        let mut e = Entities::new();
+        let mut t = TextTool::default();
+        let mut on_edge = inf(v(6.0, 0.0, 0.0));
+        on_edge.kind = mt_infer::Kind::OnEdge;
+        on_edge.segment = Some([v(0.0, 0.0, 0.0), v(12.0, 0.0, 0.0)]);
+        assert!(!t.click(&mut e, &on_edge));
+        assert!(!t.click(&mut e, &inf(v(10.0, 10.0, 5.0))));
+        assert!(t.text_draft().is_some());
+        // A click elsewhere finishes the text with its default label.
+        assert!(t.click(&mut e, &inf(v(0.0, 0.0, 0.0))));
+        assert_eq!(e.texts[0].text, "12\"");
+        assert_eq!(e.texts[0].leader, v(4.0, 10.0, 5.0));
+        // Empty space: a screen text, kept only once positioned and not empty.
+        t.click(&mut e, &inf(v(50.0, 50.0, 0.0)));
+        assert!(!t.finish_text(&mut e));
+        t.click(&mut e, &inf(v(50.0, 50.0, 0.0)));
+        let d = t.text_draft().unwrap();
+        d.needs_screen_pos = false;
+        d.text.point = v(0.1, 0.2, 0.0);
+        assert!(t.typed(&mut e, None, "Title", LengthUnit::Inch));
+        assert!(e.texts[1].screen);
+        assert_eq!(e.texts[1].text, "Title");
     }
 
     #[test]

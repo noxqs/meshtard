@@ -1,5 +1,6 @@
 //! meshtard desktop application.
 
+mod annot;
 mod confirm;
 mod document;
 #[cfg(target_os = "macos")]
@@ -55,6 +56,9 @@ const IMPLEMENTED: &[&str] = &[
     "tool.freehand",
     "tool.eraser",
     "tool.tape_measure",
+    "tool.protractor",
+    "tool.dimensions",
+    "tool.text",
     "tool.push_pull",
     "tool.move",
     "tool.rotate",
@@ -160,6 +164,8 @@ struct App {
     /// The macOS menu bar (the shell draws the menus itself elsewhere).
     #[cfg(target_os = "macos")]
     native_menu: macos_menu::NativeMenu,
+    /// Ctrl held in the previous frame (modify tools toggle on press).
+    ctrl_was_down: bool,
     /// An action waiting for the "Save changes?" answer.
     pending: Option<confirm::Pending>,
     /// The window may close (the question was answered or not needed).
@@ -241,6 +247,7 @@ impl App {
             active_tag: 0,
             last_title: String::new(),
             pending: None,
+            ctrl_was_down: false,
             closing: false,
             #[cfg(target_os = "macos")]
             native_menu,
@@ -285,7 +292,10 @@ impl App {
             self.scene
                 .edges
                 .iter()
-                .map(|s| [v3(s.a), v3(s.b)])
+                .zip(&self.scene.edge_owner)
+                // Dimension and text lines are not snapped to.
+                .filter(|(_, o)| !matches!(o, Some(Owner::Dimension(_) | Owner::Text(_))))
+                .map(|(s, _)| [v3(s.a), v3(s.b)])
                 .collect(),
         );
         if let Some(doc) = &self.document {
@@ -300,7 +310,31 @@ impl App {
             .document
             .as_ref()
             .map_or(glam::DMat4::IDENTITY, Document::context_transform);
-        self.engine.reference_edge = None;
+        // Arcs and circles of the open context, for the "center" inference.
+        if let Some(doc) = &self.document {
+            let ents = doc.active();
+            let mut arcs: std::collections::BTreeMap<_, (mt_kernel::Arc, Vec<usize>)> =
+                std::collections::BTreeMap::new();
+            for (i, owner) in self.scene.edge_owner.iter().enumerate() {
+                let Some(Owner::Edge(e)) = owner else { continue };
+                let Some(c) = ents.edges.get(*e).and_then(|e| e.attrs.curve) else {
+                    continue;
+                };
+                if let Some(arc) = ents.curves.get(c).and_then(|c| c.arc) {
+                    arcs.entry(c).or_insert((arc, Vec::new())).1.push(i);
+                }
+            }
+            let xf = self.ctx_xf;
+            for (arc, edges) in arcs.into_values() {
+                let curve = mt_infer::ArcCurve {
+                    center: xf.transform_point3(arc.center),
+                    normal: xf.transform_vector3(arc.normal).normalize_or_zero(),
+                    radius: xf.transform_vector3(arc.x_axis * arc.radius).length(),
+                };
+                self.geometry.add_arc(curve, edges);
+            }
+        }
+        self.engine.geometry_changed();
         self.apply_shadows();
         self.cut_lines.clear();
         let mut cut = None;
@@ -339,6 +373,7 @@ impl App {
         }
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
+        self.viewport.set_textures(&self.scene.textures);
         self.update_highlight(device);
     }
 
@@ -401,7 +436,7 @@ impl App {
                     }
                 }
                 Owner::Instance(i) => self.scene.triangles[t].iter().for_each(|p| grow(i, *p)),
-                Owner::Edge(_) | Owner::Section(_) => {}
+                Owner::Edge(_) | Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
             }
         }
         for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
@@ -867,6 +902,9 @@ impl App {
             egui::Color32::WHITE,
         );
         self.draw_selection_box(ui, &response, rect);
+        if self.annotations(ui, rect, viewport_px) {
+            self.rebuild(&render_state.device);
+        }
         if let Some(inf) = &self.inference {
             let camera = &self.camera;
             let to_screen = |p: DVec3| {
@@ -900,6 +938,32 @@ impl App {
                 &previews,
                 inf,
             );
+        }
+    }
+
+    /// Paints dimension and text labels, and the Text tool's editor. Returns whether
+    /// the model changed.
+    fn annotations(&mut self, ui: &egui::Ui, rect: egui::Rect, viewport_px: DVec2) -> bool {
+        let ppp = ui.ctx().pixels_per_point();
+        let camera = &self.camera;
+        let to_screen = |p: DVec3| {
+            camera
+                .project(p, viewport_px)
+                .map(|q| rect.min + egui::vec2(q.x as f32, q.y as f32) / ppp)
+        };
+        let selection = &self.selection;
+        annot::paint(
+            &ui.painter().with_clip_rect(rect),
+            &to_screen,
+            rect,
+            &self.scene.annotations,
+            &|o| selection.contains(o),
+        );
+        match (self.draw.as_mut(), self.document.as_mut()) {
+            (Some(draw), Some(doc)) => {
+                annot::text_editor(ui, rect, &to_screen, self.ctx_xf, draw.as_mut(), doc)
+            }
+            _ => false,
         }
     }
 
@@ -969,13 +1033,19 @@ impl App {
                 )
             });
         let anchor = draw.anchor().map(|a| self.ctx_xf.transform_point3(a));
+        let now = ui.input(|i| i.time);
+        let ctx_xf = self.ctx_xf;
         self.inference = cursor.map(|c| {
             let view = mt_infer::View {
                 camera: &self.camera,
                 viewport: viewport_px,
             };
-            self.engine
-                .infer(&self.geometry, self.bvh.as_ref(), view, c, anchor)
+            let inf =
+                self.engine
+                    .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now);
+            // The tool's shape hints (Square, Half Circle...), in its own space.
+            draw.hint(&to_local(&inf, ctx_xf))
+                .map_or(inf, |h| to_world(&h, ctx_xf))
         });
         let (Some(inf), Some(doc)) = (self.inference, self.document.as_mut()) else {
             return;
@@ -1024,9 +1094,16 @@ impl App {
                 ],
             )
         });
+        // Pressing Ctrl (Option on macOS in SketchUp; unverified) toggles copy / new
+        // faces; holding it is no longer needed.
+        let ctrl_down = ctrl && !self.ctrl_was_down;
+        self.ctrl_was_down = ctrl;
         let Some(tool) = self.modify.as_mut() else {
             return;
         };
+        if ctrl_down {
+            tool.toggle_ctrl();
+        }
         for (pressed, axis) in arrows.into_iter().zip([
             mt_infer::Axis::Red,
             mt_infer::Axis::Green,
@@ -1056,13 +1133,14 @@ impl App {
                 )
             });
         let anchor = tool.anchor().map(|a| self.ctx_xf.transform_point3(a));
+        let now = ui.input(|i| i.time);
         self.inference = cursor.map(|c| {
             let view = mt_infer::View {
                 camera: &self.camera,
                 viewport: viewport_px,
             };
             self.engine
-                .infer(&self.geometry, self.bvh.as_ref(), view, c, anchor)
+                .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now)
         });
         let (Some(inf), Some(c), Some(doc)) = (self.inference, cursor, self.document.as_mut())
         else {
@@ -1072,6 +1150,7 @@ impl App {
         if !response.clicked_by(egui::PointerButton::Primary) {
             return;
         }
+        let double = response.double_clicked();
         let picked = selection::pick(&self.scene, self.bvh.as_ref(), &self.camera, c, viewport_px);
         let selection = self.selection.items().to_vec();
         let eye = self.ctx_xf.inverse().transform_point3(self.camera.eye);
@@ -1080,10 +1159,12 @@ impl App {
                 ents: root,
                 picked,
                 selection: &selection,
-                ctrl,
+                // Ctrl works as a toggle (above), not while held.
+                ctrl: false,
                 eye,
             };
-            tool.click(&mut ctx, &inf)
+            let clicked = tool.click(&mut ctx, &inf);
+            clicked | (double && tool.double_click(&mut ctx, &inf))
         });
         if tool.constraint().is_none() && tool.anchor().is_none() {
             self.engine.unlock();
@@ -1285,6 +1366,22 @@ impl App {
 }
 
 /// Wheel movement this frame in notches; positive is away from the user (zoom in).
+/// An inference from the open context's space back to world space.
+fn to_world(inf: &mt_infer::Inference, ctx_xf: glam::DMat4) -> mt_infer::Inference {
+    if ctx_xf == glam::DMat4::IDENTITY {
+        return *inf;
+    }
+    let p = |q: DVec3| ctx_xf.transform_point3(q);
+    let normal_xf = glam::DMat3::from_mat4(ctx_xf).inverse().transpose();
+    mt_infer::Inference {
+        point: p(inf.point),
+        guide: inf.guide.map(|(a, b)| (p(a), p(b))),
+        normal: inf.normal.map(|n| (normal_xf * n).normalize_or_zero()),
+        segment: inf.segment.map(|[a, b]| [p(a), p(b)]),
+        ..*inf
+    }
+}
+
 /// An inference in the open context's space.
 fn to_local(inf: &mt_infer::Inference, ctx_xf: glam::DMat4) -> mt_infer::Inference {
     if ctx_xf == glam::DMat4::IDENTITY {
@@ -1356,7 +1453,7 @@ fn kernel_selection(items: &[Owner]) -> mt_kernel::group::Selection {
             Owner::Edge(e) => sel.edges.push(e),
             Owner::Face(f) => sel.faces.push(f),
             Owner::Instance(i) => sel.instances.push(i),
-            Owner::Section(_) => {}
+            Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
         }
     }
     sel
@@ -1459,6 +1556,17 @@ impl App {
                         .into(),
                     ),
                 ],
+            },
+            [Owner::Dimension(i)] if *i < root.dimensions.len() => mt_ui::EntityInfo {
+                title: "Dimension".into(),
+                rows: vec![(
+                    "Text".into(),
+                    annot::dimension_label(&root.dimensions[*i], doc.units),
+                )],
+            },
+            [Owner::Text(i)] if *i < root.texts.len() => mt_ui::EntityInfo {
+                title: "Text".into(),
+                rows: vec![("Text".into(), root.texts[*i].text.clone())],
             },
             _ => mt_ui::EntityInfo {
                 title: format!("{} Entities", items.len()),

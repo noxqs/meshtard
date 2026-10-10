@@ -43,6 +43,8 @@ struct Globals {
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
+@group(2) @binding(0) var face_textures: texture_2d_array<f32>;
+@group(2) @binding(1) var face_sampler: sampler;
 
 fn section_clipped(p: vec3<f32>) -> bool {
     return dot(g.section.xyz, p) + g.section.w > 0.0;
@@ -129,6 +131,10 @@ struct FaceVertex {
     @location(1) normal: vec3<f32>,
     @location(2) front: vec4<f32>,
     @location(3) back: vec4<f32>,
+    // Front (xy) and back (zw) texture coordinates, in repeats, v up.
+    @location(4) uv: vec4<f32>,
+    // Front and back texture layer; 0xffffffff for none.
+    @location(5) texture: vec2<u32>,
 };
 
 struct FaceOut {
@@ -137,6 +143,8 @@ struct FaceOut {
     @location(1) front: vec4<f32>,
     @location(2) back: vec4<f32>,
     @location(3) world: vec3<f32>,
+    @location(4) uv: vec4<f32>,
+    @location(5) @interpolate(flat) texture: vec2<u32>,
 };
 
 @vertex
@@ -147,15 +155,33 @@ fn face_vs(v: FaceVertex) -> FaceOut {
     out.front = v.front;
     out.back = v.back;
     out.world = v.position;
+    out.uv = v.uv;
+    out.texture = v.texture;
     return out;
 }
 
 @fragment
 fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // Sampled before any branching (implicit derivatives need uniform control flow).
+    // Image rows run top down, SketchUp's v up.
+    let layer = select(in.texture.y, in.texture.x, front);
+    let uv = select(in.uv.zw, in.uv.xy, front);
+    let texel = textureSample(
+        face_textures, face_sampler, vec2<f32>(uv.x, 1.0 - uv.y), i32(min(layer, 2147483647u))
+    );
     if (section_clipped(in.world)) {
         discard;
     }
     var color = select(in.back, in.front, front);
+    let textured = g.face_style.z > 0.5 && f32(layer) < g.face_style.w;
+    if (textured) {
+        // Cut-out textures (alpha) on opaque materials are alpha-tested; translucent
+        // materials blend with the texture's alpha too.
+        if (color.a >= 1.0 && texel.a < 0.5) {
+            discard;
+        }
+        color = vec4<f32>(texel.rgb, select(color.a * texel.a, 1.0, color.a >= 1.0));
+    }
     color.a = min(color.a, g.face_style.y);
     if (g.face_style.x > 1.5) {
         color = vec4<f32>(select(g.mono_back.rgb, g.mono_front.rgb, front), color.a);
@@ -205,6 +231,8 @@ fn shadow_vs(v: FaceVertex) -> FaceOut {
     out.front = v.front;
     out.back = v.back;
     out.world = v.position;
+    out.uv = v.uv;
+    out.texture = v.texture;
     return out;
 }
 

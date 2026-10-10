@@ -90,7 +90,7 @@ impl App {
                 Owner::Edge(e) => ents.edges.get(e).map(|x| x.attrs.layer),
                 Owner::Face(f) => ents.faces.get(f).map(|x| x.attrs.layer),
                 Owner::Instance(i) => ents.instances.get(i).map(|x| x.layer),
-                Owner::Section(_) => None,
+                Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => None,
             }
             .map(|l| l.unwrap_or(0))
         };
@@ -215,6 +215,7 @@ impl App {
                         name: n,
                         color: [200, 200, 200],
                         opacity: 1.0,
+                        texture: None,
                     });
                     true
                 });
@@ -246,7 +247,7 @@ impl App {
                                     x.layer = layer;
                                 }
                             }
-                            Owner::Section(_) => {}
+                            Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
                         }
                     }
                     !items.is_empty()
@@ -304,10 +305,16 @@ impl App {
                 let Some(x) = m.materials.get_mut(index) else {
                     return false;
                 };
+                // A recolored texture shows colorized, as in SketchUp.
+                let texture = x.texture.clone().map(|mut t| {
+                    t.colorize |= color != x.color;
+                    t
+                });
                 let new = Material {
                     name,
                     color,
                     opacity: f64::from(opacity) / 100.0,
+                    texture,
                 };
                 let changed = *x != new;
                 *x = new;

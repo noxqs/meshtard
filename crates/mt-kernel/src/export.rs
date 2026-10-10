@@ -1,9 +1,10 @@
 //! Saves a [`Model`] as a SketchUp 2017 (legacy v17) `.skp` through `mt_skp::write`.
 //!
-//! What is written: materials (color, opacity), tags, component and group definitions
-//! with their instances (nested too), faces with holes, front/back materials, tags and
-//! hidden state, every edge with its soft/smooth/hidden flags, curves, guides and section
-//! planes (root only).
+//! What is written: materials (color, opacity, PNG/JPEG textures), tags, component and
+//! group definitions with their instances (nested too), faces with holes, front/back
+//! materials, positioned textures (as three pins), tags and hidden state, every edge
+//! with its soft/smooth/hidden flags, curves, guides, section planes, dimensions and
+//! leader texts (root only; see `annotation::write_root` for what of them is lost).
 //!
 //! Known gaps (format support missing in the writer, see `mt_skp::write`):
 //! - Arcs and circles are written as polyline curves through their actual vertices, so
@@ -41,6 +42,8 @@ fn is_empty(model: &Model) -> bool {
         && r.instances.is_empty()
         && r.guides.is_empty()
         && r.section_planes.is_empty()
+        && r.dimensions.is_empty()
+        && r.texts.is_empty()
         && model.materials.is_empty()
         && model.layers.len() <= 1
         && model.definitions.is_empty()
@@ -61,7 +64,25 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
             m.name.clone()
         };
         let [r, g, bl] = m.color;
-        materials.push(b.add_material_with_opacity(&name, [r, g, bl, 255], Some(m.opacity))?);
+        // Textures the writer accepts (PNG, JPEG) are embedded; others (BMP) are saved
+        // as the plain color. The colorize flag and color of textured materials are not
+        // written (the writer takes neither).
+        let texture = m.texture.as_ref().filter(|t| {
+            t.data.starts_with(b"\x89PNG\r\n\x1a\n") || t.data.starts_with(b"\xff\xd8\xff")
+        });
+        let id = match texture {
+            Some(t) => {
+                let size = |s: f64| (s > 1e-9).then_some(s);
+                b.add_texture_material(&w::TextureMaterial {
+                    width: size(t.width),
+                    height: size(t.height),
+                    opacity: Some(m.opacity),
+                    ..w::TextureMaterial::new(&name, &t.data, &t.filename)
+                })?
+            }
+            None => b.add_material_with_opacity(&name, [r, g, bl, 255], Some(m.opacity))?,
+        };
+        materials.push(id);
     }
     let mut layers = vec![None];
     for l in model.layers.iter().skip(1) {
@@ -107,6 +128,7 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
     for s in &root.section_planes {
         b.add_section_plane(s.point.to_array(), s.normal.to_array())?;
     }
+    crate::annotation::write_root(b, root)?;
     Ok(())
 }
 
@@ -288,6 +310,8 @@ fn write_body(
             back_material: maps.material(face.attrs.back_material),
             layer: maps.layer(face.attrs.layer),
             hidden: face.attrs.hidden,
+            front_uv: uv_pins(model, ents, face, false),
+            back_uv: uv_pins(model, ents, face, true),
             ..w::Face::default()
         };
         sink.face(&f)?;
@@ -301,6 +325,36 @@ fn write_body(
         }
     }
     Ok(())
+}
+
+/// Three texture pins reproducing a positioned texture on one side of `face` (`None`
+/// for the default projection or an untextured side). Pins fit an affine mapping, so
+/// distorted (projective) positioning is saved approximately.
+fn uv_pins(
+    model: &Model,
+    ents: &Entities,
+    face: &crate::entities::Face,
+    back: bool,
+) -> Option<[w::UvPin; 3]> {
+    let uv = face.attrs.uv.as_deref()?;
+    (if back { uv.back } else { uv.front })?;
+    let m = if back {
+        face.attrs.back_material
+    } else {
+        face.attrs.material
+    };
+    let mapping = crate::texture::face_mapping(face, back, model.materials.get(m?)?)?;
+    let (xr, yr) = mt_skp::uv::face_uv_basis(face.normal.to_array());
+    let p0 = *ents.loop_points(&face.outer).first()?;
+    let pin = |p: DVec3| w::UvPin {
+        point: p.to_array(),
+        uv: mapping.uv(p.to_array()),
+    };
+    Some([
+        pin(p0),
+        pin(p0 + DVec3::from_array(xr) * 12.0),
+        pin(p0 + DVec3::from_array(yr) * 12.0),
+    ])
 }
 
 /// The points of a curve's edges in chain order, and whether it closes.

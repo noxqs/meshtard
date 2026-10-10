@@ -17,16 +17,39 @@ pub struct FaceVertex {
     /// opacity) draws the triangle blended, after the opaque ones.
     pub front: [f32; 4],
     pub back: [f32; 4],
+    /// Texture coordinates of the front (xy) and back (zw) side, in repeats with v up
+    /// (SketchUp's convention: the image's bottom row at v = 0).
+    pub uv: [f32; 4],
+    /// Texture of the front and back side: an index into
+    /// [`crate::Viewport::set_textures`], or [`FaceVertex::NO_TEXTURE`]. Shown in
+    /// [`crate::FaceStyle::ShadedWithTextures`] instead of the color's RGB (alpha
+    /// multiplies).
+    pub texture: [u32; 2],
 }
 
 impl FaceVertex {
+    pub const NO_TEXTURE: u32 = u32::MAX;
+
     pub(crate) const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<FaceVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4
+            0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4,
+            4 => Float32x4, 5 => Uint32x2
         ],
     };
+
+    /// A vertex of an untextured face.
+    pub fn new(position: [f32; 3], normal: [f32; 3], front: [f32; 4], back: [f32; 4]) -> Self {
+        Self {
+            position,
+            normal,
+            front,
+            back,
+            uv: [0.0; 4],
+            texture: [Self::NO_TEXTURE; 2],
+        }
+    }
 
     fn opaque(&self) -> bool {
         self.front[3] >= 1.0 && self.back[3] >= 1.0

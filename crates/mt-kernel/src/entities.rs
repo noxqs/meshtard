@@ -119,6 +119,9 @@ pub struct FaceAttrs {
     pub back_material: Option<MaterialId>,
     pub hidden: bool,
     pub layer: Option<LayerId>,
+    /// Positioned texture mappings; `None` (the common case) when both sides use the
+    /// default projection.
+    pub uv: Option<Box<crate::texture::FaceUv>>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +171,10 @@ pub struct Entities {
     pub section_planes: Vec<SectionPlane>,
     /// The section plane cutting this context, an index into `section_planes`.
     pub active_section: Option<usize>,
+    /// Dimensions (Dimension tool).
+    pub dimensions: Vec<crate::annotation::Dimension>,
+    /// Leader and screen texts (Text tool).
+    pub texts: Vec<crate::annotation::Text>,
 }
 
 /// A section plane: cuts away the geometry on the side `normal` points to (which side

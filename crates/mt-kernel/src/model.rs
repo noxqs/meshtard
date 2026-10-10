@@ -13,6 +13,9 @@ pub struct Material {
     pub color: [u8; 3],
     /// 1 = opaque.
     pub opacity: f64,
+    /// `None` for a plain color. The color above is what Shaded shows (SketchUp stores
+    /// the texture's average color there).
+    pub texture: Option<crate::texture::Texture>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

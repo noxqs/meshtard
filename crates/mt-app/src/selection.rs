@@ -97,7 +97,10 @@ pub fn expand(ents: &Entities, hit: Owner, clicks: u32) -> Vec<Owner> {
         return ents.curve_edges(c).into_iter().map(Owner::Edge).collect();
     }
     match (hit, clicks) {
-        (_, 0 | 1) | (Owner::Instance(_) | Owner::Section(_), _) => vec![hit],
+        (_, 0 | 1)
+        | (Owner::Instance(_) | Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_), _) => {
+            vec![hit]
+        }
         (Owner::Face(f), 2) => {
             let mut v = vec![hit];
             let mut seen = HashSet::new();
@@ -130,7 +133,9 @@ fn connected(ents: &Entities, start: Owner) -> Vec<Owner> {
                 vertices.extend(ents.loop_vertices(l));
             }
         }
-        Owner::Instance(_) | Owner::Section(_) => return vec![start],
+        Owner::Instance(_) | Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {
+            return vec![start];
+        }
     }
     let mut seen_v = HashSet::new();
     let mut edges = Vec::new();
@@ -184,6 +189,10 @@ pub fn pick(
     cursor: DVec2,
     viewport: DVec2,
 ) -> Option<Owner> {
+    // Dimension and text labels are drawn over everything.
+    if let Some(o) = crate::annot::pick(scene, |p| camera.project(p, viewport), cursor, viewport) {
+        return Some(o);
+    }
     let ray = camera.ray(cursor, viewport);
     let face_hit = bvh.ray(ray.origin, ray.dir);
     let face_t = face_hit.map_or(f64::INFINITY, |h| h.t);
@@ -310,6 +319,10 @@ pub fn box_select(
             ),
             _ => note(*owner, false, false),
         }
+    }
+    for (owner, p) in crate::annot::label_points(scene, proj, viewport) {
+        let inside = p.is_some_and(|p| rect.contains(p));
+        note(owner, inside, inside);
     }
     for (tri, owner) in scene.triangles.iter().zip(&scene.tri_owner) {
         let Some(owner) = owner else { continue };

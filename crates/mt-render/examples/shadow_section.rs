@@ -157,12 +157,12 @@ fn mesh(quads: &[(Quad, [f32; 4], [f32; 4])]) -> (Vec<FaceVertex>, Vec<u32>, Vec
     for ((n, c), front, back) in quads {
         let base = vertices.len() as u32;
         for p in c {
-            vertices.push(FaceVertex {
-                position: p.as_vec3().into(),
-                normal: n.as_vec3().into(),
-                front: *front,
-                back: *back,
-            });
+            vertices.push(FaceVertex::new(
+                p.as_vec3().into(),
+                n.as_vec3().into(),
+                *front,
+                *back,
+            ));
         }
         indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
         triangles.push([c[0], c[1], c[2]]);

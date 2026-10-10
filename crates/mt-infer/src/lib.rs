@@ -1,15 +1,25 @@
 //! SketchUp's inference engine: where the cursor snaps while drawing.
 //!
-//! Point inferences (in priority order): endpoint, midpoint, origin, on edge, on axis,
-//! on face. With a start point (`anchor`), direction inferences: along the red, green
+//! Point inferences (in priority order): endpoint, midpoint, center (of the arc or circle
+//! hovered last), intersection (of two edges, or of an edge and a face), guide point,
+//! origin, on edge, on guide, on axis, on face. SketchUp's order is roughly endpoint >
+//! midpoint / center / intersection > on edge > on face (unverified in detail). With a start point (`anchor`), direction inferences: along the red, green
 //! and blue axes, parallel or perpendicular to the reference edge (the last edge
 //! hovered), and "from point" tracking from the last endpoint or midpoint hovered.
 //! A point inference beats a direction except "on face", which loses to a direction.
 //! A locked direction (Shift or arrow keys) constrains the point to that line; point
 //! inferences are then projected onto it.
 //!
+//! "From point" acquisition: with [`Engine::infer_at`] a point is acquired only after
+//! the cursor has rested on it for [`ACQUIRE_DELAY`] seconds; [`Engine::infer`]
+//! acquires at once.
+//!
+//! Shape hints for the drawing tools (Square, Golden Section, Half Circle, Tangent at
+//! Vertex) are in [`hints`].
+//!
 //! Pick distances in pixels are drafts (`spec/parity/STATUS.md`).
 
+pub mod hints;
 pub mod units;
 
 use glam::{DVec2, DVec3};
@@ -24,6 +34,9 @@ pub const EDGE_APERTURE: f64 = 6.0;
 pub const DIRECTION_APERTURE: f64 = 10.0;
 /// Half-length of the model axes considered for "on axis" inferences, in inches.
 const AXIS_EXTENT: f64 = 1e6;
+/// Seconds the cursor rests on a point before it is acquired for "from point"
+/// tracking (SketchUp: about a second; unverified).
+pub const ACQUIRE_DELAY: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -72,6 +85,10 @@ pub enum Kind {
     OnGuide,
     /// A construction point.
     GuidePoint,
+    /// Center of an arc or circle (shown after hovering the curve).
+    Center,
+    /// Where two edges (or guides) cross, or an edge pierces a face.
+    Intersection,
     /// Along an axis direction from the anchor.
     Along(Axis),
     Parallel,
@@ -80,6 +97,15 @@ pub enum Kind {
     FromPoint(Axis),
     /// No inference: a point on the working plane.
     Free,
+    /// Shape hints set by the drawing tools ([`hints`]), never by [`Engine::infer`]:
+    /// Rectangle with equal sides.
+    Square,
+    /// Rectangle with sides in the golden ratio.
+    GoldenSection,
+    /// Arc of 180 degrees.
+    HalfCircle,
+    /// Arc tangent to the edge ending at its start point.
+    Tangent,
 }
 
 impl Kind {
@@ -94,11 +120,17 @@ impl Kind {
             Kind::OnFace => "On Face".into(),
             Kind::OnGuide => "On Guide".into(),
             Kind::GuidePoint => "Guide Point".into(),
+            Kind::Center => "Center".into(),
+            Kind::Intersection => "Intersection".into(),
             Kind::Along(a) => format!("On {} Axis", a.name()),
             Kind::Parallel => "Parallel to Edge".into(),
             Kind::Perpendicular => "Perpendicular to Edge".into(),
             Kind::FromPoint(_) => "From Point".into(),
             Kind::Free => String::new(),
+            Kind::Square => "Square".into(),
+            Kind::GoldenSection => "Golden Section".into(),
+            Kind::HalfCircle => "Half Circle".into(),
+            Kind::Tangent => "Tangent at Vertex".into(),
         }
     }
 
@@ -114,7 +146,31 @@ impl Kind {
             Kind::OnAxis(a) | Kind::Along(a) | Kind::FromPoint(a) => a.color(),
             Kind::Parallel | Kind::Perpendicular => [220, 0, 220],
             Kind::Free => [0, 0, 0],
+            // Unverified: SketchUp's center and intersection marker colors.
+            Kind::Center => [0, 170, 0],
+            Kind::Intersection => [0, 0, 0],
+            // Unverified: the dashed diagonal / arc color of the shape hints; the
+            // tangent arc is cyan in SketchUp.
+            Kind::Square | Kind::GoldenSection | Kind::HalfCircle => [220, 0, 220],
+            Kind::Tangent => [0, 200, 220],
         }
+    }
+
+    /// A shape hint from [`hints`].
+    pub fn is_hint(self) -> bool {
+        matches!(
+            self,
+            Kind::Square | Kind::GoldenSection | Kind::HalfCircle | Kind::Tangent
+        )
+    }
+
+    /// Points that can be acquired for "from point" tracking (center and intersection
+    /// unverified).
+    fn is_acquirable(self) -> bool {
+        matches!(
+            self,
+            Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::Center | Kind::Intersection
+        )
     }
 
     fn is_point(self) -> bool {
@@ -124,6 +180,8 @@ impl Kind {
                 | Kind::Midpoint
                 | Kind::Origin
                 | Kind::GuidePoint
+                | Kind::Center
+                | Kind::Intersection
                 | Kind::OnEdge
                 | Kind::OnGuide
                 | Kind::OnAxis(_)
@@ -148,6 +206,15 @@ pub struct Inference {
     pub segment: Option<[DVec3; 2]>,
 }
 
+/// An arc or circle curve, for the "center" inference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArcCurve {
+    pub center: DVec3,
+    /// Unit normal of the arc's plane.
+    pub normal: DVec3,
+    pub radius: f64,
+}
+
 /// Snappable geometry in world space.
 #[derive(Debug, Clone, Default)]
 pub struct Geometry {
@@ -156,6 +223,11 @@ pub struct Geometry {
     /// Construction lines as (point, unit direction), and construction points.
     pub guide_lines: Vec<(DVec3, DVec3)>,
     pub guide_points: Vec<DVec3>,
+    /// Arc and circle curves.
+    pub arcs: Vec<ArcCurve>,
+    /// The arc (index into `arcs`) each edge is a segment of; may be shorter than
+    /// `edges` (missing entries are `None`).
+    pub edge_arc: Vec<Option<usize>>,
 }
 
 impl Geometry {
@@ -175,6 +247,24 @@ impl Geometry {
             ..Self::default()
         }
     }
+
+    /// Adds an arc curve made of `edges` (indices into `edges`); returns its index.
+    pub fn add_arc(&mut self, arc: ArcCurve, edges: impl IntoIterator<Item = usize>) -> usize {
+        let i = self.arcs.len();
+        self.arcs.push(arc);
+        for e in edges {
+            if self.edge_arc.len() <= e {
+                self.edge_arc.resize(e + 1, None);
+            }
+            self.edge_arc[e] = Some(i);
+        }
+        i
+    }
+
+    /// The arc curve edge `edge` belongs to.
+    pub fn arc_of(&self, edge: usize) -> Option<usize> {
+        self.edge_arc.get(edge).copied().flatten()
+    }
 }
 
 /// Camera and viewport size in pixels.
@@ -189,6 +279,29 @@ impl View<'_> {
         self.camera.project(p, self.viewport)
     }
 
+    /// Projects the part of segment `a b` in front of the camera (long guide and axis
+    /// lines reach behind it).
+    fn project_segment(&self, a: DVec3, b: DVec3) -> Option<(DVec2, DVec2)> {
+        let (mut a, mut b) = (a, b);
+        if self.camera.perspective {
+            let f = self.camera.forward();
+            let near = self.camera.near() * 1.01;
+            let (da, db) = (
+                (a - self.camera.eye).dot(f) - near,
+                (b - self.camera.eye).dot(f) - near,
+            );
+            if da < 0.0 && db < 0.0 {
+                return None;
+            }
+            if da < 0.0 {
+                a = a + (b - a) * (da / (da - db));
+            } else if db < 0.0 {
+                b = b + (a - b) * (db / (db - da));
+            }
+        }
+        Some((self.project(a)?, self.project(b)?))
+    }
+
     fn screen_dist(&self, p: DVec3, cursor: DVec2) -> f64 {
         self.project(p)
             .map_or(f64::INFINITY, |q| q.distance(cursor))
@@ -200,10 +313,16 @@ impl View<'_> {
 pub struct Engine {
     /// Last edge hovered: the reference for parallel and perpendicular.
     pub reference_edge: Option<usize>,
-    /// Last endpoint or midpoint hovered: the source for "from point".
+    /// Last point acquired (endpoint, midpoint, ... rested on): the source for "from
+    /// point".
     pub acquired: Option<DVec3>,
+    /// Last arc or circle hovered (index into `Geometry::arcs`): its center is snappable.
+    pub arc: Option<usize>,
     /// Locked direction and the inference kind that locked it.
     lock: Option<(DVec3, Kind)>,
+    /// The acquirable point under the cursor and since when (seconds), for delayed
+    /// acquisition.
+    hover: Option<(DVec3, f64)>,
 }
 
 /// Point on line `o + t * d` closest to the ray.
@@ -222,6 +341,13 @@ fn closest_on_line(o: DVec3, d: DVec3, ray_o: DVec3, ray_d: DVec3) -> DVec3 {
 impl Engine {
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Forgets indices into the old geometry (reference edge, hovered arc) after the
+    /// model changed.
+    pub fn geometry_changed(&mut self) {
+        self.reference_edge = None;
+        self.arc = None;
     }
 
     /// Locks the direction to an axis (arrow keys: right = red, left = green, up = blue).
@@ -273,8 +399,71 @@ impl Engine {
         self.lock.is_some()
     }
 
-    /// Infers the point under `cursor` (pixels), drawing from `anchor` if any.
+    /// Infers the point under `cursor` (pixels), drawing from `anchor` if any. Points
+    /// hovered are acquired for "from point" at once; see [`Engine::infer_at`].
     pub fn infer(
+        &mut self,
+        geom: &Geometry,
+        bvh: &dyn RayIndex,
+        view: View,
+        cursor: DVec2,
+        anchor: Option<DVec3>,
+    ) -> Inference {
+        let i = self.infer_inner(geom, bvh, view, cursor, anchor);
+        if i.kind.is_acquirable() {
+            self.acquired = Some(i.point);
+        }
+        i
+    }
+
+    /// Like [`Engine::infer`] at time `now` (seconds, any monotonic origin): a point is
+    /// acquired for "from point" once the cursor has rested on it for
+    /// [`ACQUIRE_DELAY`] (checked on each call, including the one moving away).
+    pub fn infer_at(
+        &mut self,
+        geom: &Geometry,
+        bvh: &dyn RayIndex,
+        view: View,
+        cursor: DVec2,
+        anchor: Option<DVec3>,
+        now: f64,
+    ) -> Inference {
+        let i = self.infer_inner(geom, bvh, view, cursor, anchor);
+        let same = |(q, _): (DVec3, f64)| q.distance(i.point) <= 1e-9;
+        match self.hover {
+            Some(h) if same(h) && i.kind.is_acquirable() => {}
+            _ => {
+                // Moved off: the point rested on long enough is still acquired.
+                self.tick(now);
+                self.hover = i.kind.is_acquirable().then_some((i.point, now));
+            }
+        }
+        self.tick(now);
+        i
+    }
+
+    /// Acquires the hovered point if the cursor has rested on it for
+    /// [`ACQUIRE_DELAY`] by `now`; true if it did. For apps that want the acquisition
+    /// without a mouse move.
+    pub fn tick(&mut self, now: f64) -> bool {
+        match self.hover {
+            Some((p, since)) if now - since >= ACQUIRE_DELAY && self.acquired != Some(p) => {
+                self.acquired = Some(p);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// When the point under the cursor will be acquired (seconds, same clock as
+    /// `infer_at`), if it is not yet.
+    pub fn acquire_due(&self) -> Option<f64> {
+        self.hover
+            .filter(|(p, _)| self.acquired != Some(*p))
+            .map(|(_, since)| since + ACQUIRE_DELAY)
+    }
+
+    fn infer_inner(
         &mut self,
         geom: &Geometry,
         bvh: &dyn RayIndex,
@@ -306,6 +495,7 @@ impl Engine {
 
         let point = self.point_inference(
             geom,
+            bvh,
             view,
             cursor,
             ray.origin,
@@ -333,7 +523,7 @@ impl Engine {
                 };
             }
             if let Some(p) = point.filter(|p| p.kind.is_point()) {
-                self.remember(&p);
+                self.remember(geom, &p);
                 return p;
             }
             if let Some(d) = self.direction_inference(geom, view, cursor, ray.origin, ray.dir, a) {
@@ -341,7 +531,7 @@ impl Engine {
             }
         }
         if let Some(p) = point {
-            self.remember(&p);
+            self.remember(geom, &p);
             return p;
         }
         if let Some(t) = self.tracking(view, cursor, ray.origin, ray.dir, None) {
@@ -358,12 +548,12 @@ impl Engine {
         }
     }
 
-    fn remember(&mut self, p: &Inference) {
+    fn remember(&mut self, geom: &Geometry, p: &Inference) {
         if matches!(p.kind, Kind::OnEdge | Kind::Midpoint | Kind::Endpoint) && p.edge.is_some() {
             self.reference_edge = p.edge;
         }
-        if matches!(p.kind, Kind::Endpoint | Kind::Midpoint | Kind::Origin) {
-            self.acquired = Some(p.point);
+        if let Some(a) = p.edge.and_then(|e| geom.arc_of(e)) {
+            self.arc = Some(a);
         }
     }
 
@@ -371,6 +561,7 @@ impl Engine {
     fn point_inference(
         &self,
         geom: &Geometry,
+        bvh: &dyn RayIndex,
         view: View,
         cursor: DVec2,
         ro: DVec3,
@@ -422,7 +613,7 @@ impl Engine {
         };
         let origin = || best_point(&mut std::iter::once((DVec3::ZERO, None)), Kind::Origin);
         let on_line = |a: DVec3, b: DVec3| -> Option<(f64, DVec3)> {
-            let (pa, pb) = (view.project(a)?, view.project(b)?);
+            let (pa, pb) = view.project_segment(a, b)?;
             let ab = pb - pa;
             let t = ((cursor - pa).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
             let d = cursor.distance(pa + ab * t);
@@ -499,8 +690,35 @@ impl Engine {
                     segment: None,
                 })
         };
+        // Center of the arc or circle hovered last.
+        let center = || {
+            best_point(
+                &mut self
+                    .arc
+                    .and_then(|a| geom.arcs.get(a))
+                    .map(|a| (a.center, None))
+                    .into_iter(),
+                Kind::Center,
+            )
+        };
+        let intersection = || {
+            let hit = face_normal
+                .filter(|_| face_t.is_finite())
+                .map(|n| (ro + rd * face_t, n));
+            intersection(geom, bvh, view, cursor, hit, &visible).map(|p| Inference {
+                point: p,
+                kind: Kind::Intersection,
+                edge: None,
+                guide: None,
+                locked: false,
+                normal: None,
+                segment: None,
+            })
+        };
         endpoint
             .or_else(midpoint)
+            .or_else(center)
+            .or_else(intersection)
             .or_else(guide_point)
             .or_else(origin)
             .or_else(on_edge)
@@ -613,6 +831,105 @@ impl Engine {
                 segment: None,
             })
     }
+}
+
+/// Closest points of segments `p1 q1` and `p2 q2` as parameters `(s, t)` along each,
+/// if the segments are not parallel and the closest points lie within both.
+fn segment_crossing(p1: DVec3, q1: DVec3, p2: DVec3, q2: DVec3) -> Option<(f64, f64)> {
+    let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
+    let (a, b, e) = (d1.dot(d1), d1.dot(d2), d2.dot(d2));
+    let (c, f) = (d1.dot(r), d2.dot(r));
+    let denom = a * e - b * b;
+    if denom <= 1e-12 * a * e {
+        return None;
+    }
+    let s = (b * f - c * e) / denom;
+    let t = (a * f - b * c) / denom;
+    let eps = 1e-9;
+    ((-eps..=1.0 + eps).contains(&s) && (-eps..=1.0 + eps).contains(&t)).then_some((s, t))
+}
+
+/// "Intersection": where two edges or guide lines that pass near the cursor meet in
+/// 3D (within the kernel tolerance; a vertex shared by both is an endpoint instead), or
+/// where an edge near the cursor pierces the face under it. The nearest such point
+/// within [`POINT_APERTURE`] pixels. SketchUp also intersects faces with faces and
+/// axes; that is left out (unverified which it shows).
+fn intersection(
+    geom: &Geometry,
+    bvh: &dyn RayIndex,
+    view: View,
+    cursor: DVec2,
+    hit: Option<(DVec3, DVec3)>,
+    visible: &impl Fn(DVec3) -> bool,
+) -> Option<DVec3> {
+    let near_line = |a: DVec3, b: DVec3| {
+        let Some((pa, pb)) = view.project_segment(a, b) else {
+            return false;
+        };
+        let ab = pb - pa;
+        let t = ((cursor - pa).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        cursor.distance(pa + ab * t) <= POINT_APERTURE
+    };
+    // Lines near the cursor; `true` for edges (guides do not pierce faces here).
+    let lines: Vec<(DVec3, DVec3, bool)> = geom
+        .edges
+        .iter()
+        .map(|&[a, b]| (a, b, true))
+        .chain(
+            geom.guide_lines
+                .iter()
+                .map(|&(p, d)| (p - d * AXIS_EXTENT, p + d * AXIS_EXTENT, false)),
+        )
+        .filter(|&(a, b, _)| near_line(a, b))
+        .collect();
+    let mut candidates = Vec::new();
+    for (i, &(p1, q1, _)) in lines.iter().enumerate() {
+        for &(p2, q2, _) in &lines[i + 1..] {
+            let Some((s, t)) = segment_crossing(p1, q1, p2, q2) else {
+                continue;
+            };
+            let at_end = |u: f64| !(1e-6..=1.0 - 1e-6).contains(&u);
+            if at_end(s) && at_end(t) {
+                continue;
+            }
+            let (x1, x2) = (p1 + (q1 - p1) * s, p2 + (q2 - p2) * t);
+            if x1.distance(x2) <= mt_kernel::TOL {
+                candidates.push((x1 + x2) / 2.0);
+            }
+        }
+    }
+    if let Some((h, n)) = hit {
+        for &(a, b, _) in lines.iter().filter(|l| l.2) {
+            let d = b - a;
+            let denom = d.dot(n);
+            if denom.abs() <= 1e-9 * d.length() {
+                continue;
+            }
+            let s = (h - a).dot(n) / denom;
+            if !(1e-6..=1.0 - 1e-6).contains(&s) {
+                continue;
+            }
+            let x = a + d * s;
+            // On a face: the view ray through `x` hits a triangle at `x`.
+            let on_face = view.project(x).is_some_and(|q| {
+                let ray = view.camera.ray(q, view.viewport);
+                bvh.ray(ray.origin, ray.dir).is_some_and(|hit| {
+                    (ray.origin + ray.dir * hit.t).distance(x)
+                        <= mt_kernel::TOL + 1e-5 * x.distance(ray.origin)
+                })
+            });
+            if on_face {
+                candidates.push(x);
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .filter(|&x| visible(x))
+        .map(|x| (view.screen_dist(x, cursor), x))
+        .filter(|(d, _)| *d <= POINT_APERTURE)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, x)| x)
 }
 
 /// A point with no inference: on the ground plane, or on the horizontal plane through
@@ -806,12 +1123,141 @@ mod tests {
     }
 
     #[test]
+    fn center_appears_after_hovering_the_arc() {
+        let c = DVec3::new(60.0, 40.0, 0.0);
+        let r = 30.0;
+        let pts: Vec<DVec3> = (0..=24)
+            .map(|i| {
+                let t = std::f64::consts::TAU * f64::from(i) / 24.0;
+                c + DVec3::new(t.cos(), t.sin(), 0.0) * r
+            })
+            .collect();
+        let mut g = Geometry::from_edges(pts.windows(2).map(|w| [w[0], w[1]]).collect());
+        let arc = g.add_arc(
+            ArcCurve {
+                center: c,
+                normal: DVec3::Z,
+                radius: r,
+            },
+            0..24,
+        );
+        assert_eq!(g.arc_of(5), Some(arc));
+        let b = Bvh::default();
+        let mut e = Engine::default();
+        // Not yet: the center is not inferred before the curve is hovered.
+        let i = infer(&mut e, &g, &b, at(c) + DVec2::new(2.0, 1.0), None);
+        assert_ne!(i.kind, Kind::Center);
+        // Hover the circle (on a segment, away from its vertices and midpoint).
+        let on = pts[3].lerp(pts[4], 0.3);
+        infer(&mut e, &g, &b, at(on), None);
+        assert_eq!(e.arc, Some(arc));
+        let i = infer(&mut e, &g, &b, at(c) + DVec2::new(2.0, 1.0), None);
+        assert_eq!((i.kind, i.point), (Kind::Center, c));
+        assert_eq!(e.acquired, Some(c), "the center is acquired for from point");
+        e.geometry_changed();
+        assert_eq!(e.arc, None);
+    }
+
+    #[test]
+    fn intersection_of_crossing_edges() {
+        let x = DVec3::new(70.0, 30.0, 0.0);
+        let g = Geometry::from_edges(vec![
+            [DVec3::new(0.0, 30.0, 0.0), DVec3::new(100.0, 30.0, 0.0)],
+            [DVec3::new(70.0, 0.0, 0.0), DVec3::new(70.0, 100.0, 0.0)],
+        ]);
+        let b = Bvh::default();
+        let mut e = Engine::default();
+        let i = infer(&mut e, &g, &b, at(x) + DVec2::new(3.0, -2.0), None);
+        assert_eq!(i.kind, Kind::Intersection);
+        assert!((i.point - x).length() < 1e-9, "{:?}", i.point);
+        // Endpoints still win over intersections.
+        let i = infer(&mut e, &g, &b, at(DVec3::new(100.0, 30.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::Endpoint);
+        // Edges that only cross on screen (one lifted) do not intersect.
+        let lifted = Geometry::from_edges(vec![
+            [DVec3::new(0.0, 30.0, 0.0), DVec3::new(100.0, 30.0, 0.0)],
+            [DVec3::new(70.0, 0.0, 5.0), DVec3::new(70.0, 100.0, 5.0)],
+        ]);
+        let i = infer(&mut e, &lifted, &b, at(x), None);
+        assert_ne!(i.kind, Kind::Intersection);
+        // A guide line crossing an edge.
+        let mut g = Geometry::from_edges(vec![[
+            DVec3::new(0.0, 30.0, 0.0),
+            DVec3::new(100.0, 30.0, 0.0),
+        ]]);
+        g.guide_lines.push((DVec3::new(70.0, 0.0, 0.0), DVec3::Y));
+        let i = infer(&mut e, &g, &b, at(x) + DVec2::new(1.0, 2.0), None);
+        assert_eq!(i.kind, Kind::Intersection);
+        assert!((i.point - x).length() < 1e-9);
+    }
+
+    #[test]
+    fn intersection_of_edge_and_face() {
+        let (mut g, b) = square();
+        let pierce = DVec3::new(30.0, 60.0, 0.0);
+        g = Geometry::from_edges(
+            g.edges
+                .iter()
+                .copied()
+                .chain([[DVec3::new(30.0, 60.0, -40.0), DVec3::new(30.0, 60.0, 100.0)]])
+                .collect(),
+        );
+        let mut e = Engine::default();
+        let i = infer(&mut e, &g, &b, at(pierce) + DVec2::new(2.0, -3.0), None);
+        assert_eq!(i.kind, Kind::Intersection);
+        assert!((i.point - pierce).length() < 1e-6, "{:?}", i.point);
+        // Further up the edge it is just on the edge.
+        let i = infer(
+            &mut e,
+            &g,
+            &b,
+            at(DVec3::new(30.0, 60.0, 70.0)) + DVec2::new(2.0, 0.0),
+            None,
+        );
+        assert_eq!(i.kind, Kind::OnEdge);
+    }
+
+    #[test]
+    fn acquisition_waits_for_the_hover_delay() {
+        let (g, b) = square();
+        let cam = camera();
+        let view = View {
+            camera: &cam,
+            viewport: VIEWPORT,
+        };
+        let corner = DVec3::new(100.0, 100.0, 0.0);
+        let face = at(DVec3::new(60.0, 70.0, 0.0));
+        let mut e = Engine::default();
+        // Resting on the corner: acquired only after the delay.
+        e.infer_at(&g, &b, view, at(corner), None, 10.0);
+        assert_eq!(e.acquired, None);
+        assert_eq!(e.acquire_due(), Some(10.0 + ACQUIRE_DELAY));
+        e.infer_at(&g, &b, view, at(corner) + DVec2::new(1.0, 0.0), None, 10.5);
+        assert_eq!(e.acquired, None);
+        assert!(e.tick(10.0 + ACQUIRE_DELAY));
+        assert_eq!(e.acquired, Some(corner));
+        // Passing over another point briefly does not acquire it.
+        let mid = DVec3::new(50.0, 0.0, 0.0);
+        e.infer_at(&g, &b, view, at(mid), None, 20.0);
+        e.infer_at(&g, &b, view, face, None, 20.3);
+        assert_eq!(e.acquired, Some(corner));
+        // Resting, then moving away: acquired on the move.
+        e.infer_at(&g, &b, view, at(mid), None, 30.0);
+        e.infer_at(&g, &b, view, face, None, 31.5);
+        assert_eq!(e.acquired, Some(mid));
+        assert_eq!(e.acquire_due(), None);
+    }
+
+    #[test]
     fn free_point_lands_on_ground() {
         let g = Geometry::default();
         let b = Bvh::default();
         let mut e = Engine::default();
-        let i = infer(&mut e, &g, &b, DVec2::new(600.0, 500.0), None);
+        // Away from the axes (the green axis runs near the lower right corner).
+        let i = infer(&mut e, &g, &b, at(DVec3::new(160.0, -60.0, 0.0)), None);
         assert_eq!(i.kind, Kind::Free);
-        assert!(i.point.z.abs() < 1e-6);
+        assert!(i.point.z.abs() < 1e-6);        // The green axis, which also reaches behind the camera, is still inferred.
+        let i = infer(&mut e, &g, &b, at(DVec3::new(0.0, 200.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::OnAxis(Axis::Green));
     }
 }

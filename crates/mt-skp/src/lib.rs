@@ -17,6 +17,7 @@ pub mod model;
 mod pages;
 mod raw;
 mod tlv;
+pub mod uv;
 mod vff;
 pub mod write;
 mod xml;

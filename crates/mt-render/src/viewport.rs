@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::{Camera, look_at_rh, orthographic_rh};
 use crate::mesh::{FaceBuffers, FaceVertex};
 use crate::section::SectionCut;
+use crate::texture::{TextureSource, Textures};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -57,7 +58,8 @@ struct Globals {
     /// x: world size of a shadow texel, y: 1 / shadow map size.
     shadow_texel: [f32; 4],
     /// x: face coloring (0 material, 1 background color unshaded, 2 monochrome),
-    /// y: opacity cap (1, or [`XRAY_OPACITY`] in X-ray).
+    /// y: opacity cap (1, or [`XRAY_OPACITY`] in X-ray), z: 1 when textures show,
+    /// w: number of texture layers.
     face_style: [f32; 4],
     /// Monochrome front and back colors (rgb, w unused).
     mono_front: [f32; 4],
@@ -82,7 +84,7 @@ pub enum FaceStyle {
     /// Material colors with shading (the default).
     #[default]
     Shaded,
-    /// Same as [`FaceStyle::Shaded`] for now: textures are not supported yet.
+    /// Like [`FaceStyle::Shaded`], with the textures of [`Viewport::set_textures`].
     ShadedWithTextures,
     /// Every face in the monochrome front/back colors (see
     /// [`Viewport::set_monochrome_colors`]) with shading, ignoring material colors
@@ -404,6 +406,7 @@ pub struct Viewport {
     faces_opaque: wgpu::RenderPipeline,
     faces_translucent: wgpu::RenderPipeline,
     faces: Option<FaceBuffers>,
+    textures: Textures,
     selection: wgpu::RenderPipeline,
     selected: Option<FaceBuffers>,
     axes: Option<wgpu::Buffer>,
@@ -474,9 +477,10 @@ impl Viewport {
             ..Default::default()
         });
         let shadow_map = ShadowMap::new(device, &shadow_layout, &shadow_sampler, 1);
+        let textures = Textures::new(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport"),
-            bind_group_layouts: &[Some(&layout), Some(&shadow_layout)],
+            bind_group_layouts: &[Some(&layout), Some(&shadow_layout), Some(textures.layout())],
             immediate_size: 0,
         });
 
@@ -635,6 +639,7 @@ impl Viewport {
             faces_opaque,
             faces_translucent,
             faces: None,
+            textures,
             selection,
             selected: None,
             axes: None,
@@ -664,6 +669,14 @@ impl Viewport {
     /// Triangles with any alpha below 1 are drawn translucent, after everything else.
     pub fn set_faces(&mut self, device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) {
         self.faces = FaceBuffers::new(device, vertices, indices);
+    }
+
+    /// The textures [`FaceVertex::texture`] indexes, decoded (PNG, JPEG, BMP) and
+    /// uploaded at the next render when the list changed. Decoded images are kept for
+    /// sources passed again (same `data` allocation and tint). Undecodable images draw
+    /// white; past the device's array layer limit textures are not shown.
+    pub fn set_textures(&mut self, textures: &[TextureSource]) {
+        self.textures.set(textures);
     }
 
     /// Faces shown as selected (SketchUp's blue dot pattern); empty slices clear it.
@@ -768,6 +781,7 @@ impl Viewport {
                 SHADOW_SIZE,
             );
         }
+        self.textures.upload(device, queue);
         if let Some(faces) = &mut self.faces {
             let eye = camera.eye.as_vec3();
             let forward = camera.forward().as_vec3();
@@ -870,8 +884,10 @@ impl Viewport {
                     _ => 0.0,
                 },
                 if xray { XRAY_OPACITY } else { 1.0 },
-                0.0,
-                0.0,
+                f32::from(u8::from(
+                    face_style == FaceStyle::ShadedWithTextures && self.textures.layers > 0,
+                )),
+                self.textures.layers as f32,
             ],
             mono_front: rgb_w(self.mono_colors.0, false),
             mono_back: rgb_w(self.mono_colors.1, false),
@@ -927,6 +943,7 @@ impl Viewport {
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, &self.shadow_map.bind_group, &[]);
+            pass.set_bind_group(2, &self.textures.bind_group, &[]);
             pass.set_pipeline(&self.background);
             pass.draw(0..3, 0..1);
             // Order: opaque faces, then edges and axes, which are pulled towards the
