@@ -6,16 +6,26 @@
 pub mod arrangement;
 pub mod bvh;
 pub mod entities;
+pub mod follow_me;
 pub mod geom;
 pub mod import;
+pub mod intersect;
 pub mod model;
+pub mod offset;
 pub mod ops;
+pub mod push_pull;
 pub mod tessellate;
+pub mod transform;
 pub mod validate;
 
 pub use entities::*;
+pub use follow_me::follow_me;
+pub use intersect::intersect_faces;
 pub use model::{Definition, Layer, Material, Model};
+pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};
+pub use push_pull::push_pull;
+pub use transform::{copy_geometry, transform_vertices, vertices_of};
 pub use validate::{Checks, validate};
 
 /// Distance below which two points are the same, in inches. SketchUp's internal tolerance

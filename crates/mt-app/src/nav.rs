@@ -9,6 +9,8 @@ pub enum Tool {
     Select,
     /// A drawing tool from `tools`, by command id.
     Draw(&'static str),
+    /// A modify tool from `modify`, by command id.
+    Modify(&'static str),
     Eraser,
     Orbit,
     Pan,
@@ -31,6 +33,12 @@ impl Tool {
             "tool.pie" => Self::Draw("tool.pie"),
             "tool.freehand" => Self::Draw("tool.freehand"),
             "tool.tape_measure" => Self::Draw("tool.tape_measure"),
+            "tool.push_pull" => Self::Modify("tool.push_pull"),
+            "tool.move" => Self::Modify("tool.move"),
+            "tool.rotate" => Self::Modify("tool.rotate"),
+            "tool.scale" => Self::Modify("tool.scale"),
+            "tool.offset" => Self::Modify("tool.offset"),
+            "tool.follow_me" => Self::Modify("tool.follow_me"),
             "camera.orbit" => Self::Orbit,
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,
@@ -42,7 +50,7 @@ impl Tool {
     pub fn command(self) -> &'static str {
         match self {
             Self::Select => "tool.select",
-            Self::Draw(id) => id,
+            Self::Draw(id) | Self::Modify(id) => id,
             Self::Eraser => "tool.eraser",
             Self::Orbit => "camera.orbit",
             Self::Pan => "camera.pan",
@@ -56,7 +64,7 @@ impl Tool {
             Self::Select => {
                 "Select objects. Shift to extend select. Drag mouse to select multiple."
             }
-            Self::Draw(_) => "",
+            Self::Draw(_) | Self::Modify(_) => "",
             Self::Eraser => {
                 "Select objects to erase. Shift = Hide, Ctrl = Soften/Smooth, Ctrl+Shift = Unsoften."
             }
@@ -88,7 +96,7 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
     }
     if input.left_drag != DVec2::ZERO {
         match tool {
-            Tool::Select | Tool::Draw(_) | Tool::Eraser => {}
+            Tool::Select | Tool::Draw(_) | Tool::Modify(_) | Tool::Eraser => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
             Tool::Orbit => camera.orbit(input.left_drag),
             Tool::Pan => camera.pan(input.left_drag, viewport),

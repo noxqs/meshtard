@@ -1,6 +1,7 @@
 //! meshtard desktop application.
 
 mod document;
+mod modify;
 mod nav;
 mod overlay;
 mod selection;
@@ -40,6 +41,14 @@ const IMPLEMENTED: &[&str] = &[
     "tool.freehand",
     "tool.eraser",
     "tool.tape_measure",
+    "tool.push_pull",
+    "tool.move",
+    "tool.rotate",
+    "tool.scale",
+    "tool.offset",
+    "tool.follow_me",
+    "edit.intersect_model",
+    "edit.intersect_selection",
     "edit.delete_guides",
     "edit.undo",
     "edit.redo",
@@ -114,6 +123,8 @@ struct App {
     inference: Option<mt_infer::Inference>,
     /// The active drawing tool, when `tool` is `Tool::Draw`.
     draw: Option<Box<dyn tools::DrawTool>>,
+    /// The active modify tool, when `tool` is `Tool::Modify`.
+    modify: Option<Box<dyn modify::ModifyTool>>,
     /// Edges picked during an Eraser drag, erased on release.
     erase_drag: Vec<Owner>,
     /// The direction lock comes from holding Shift (released with it).
@@ -149,6 +160,7 @@ impl App {
             engine: mt_infer::Engine::default(),
             inference: None,
             draw: None,
+            modify: None,
             erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
@@ -306,6 +318,7 @@ impl App {
         if let Some(tool) = Tool::from_command(id) {
             self.tool = tool;
             self.draw = tools::for_command(id);
+            self.modify = modify::for_command(id);
             self.erase_drag.clear();
             self.engine.unlock();
             self.inference = None;
@@ -320,6 +333,8 @@ impl App {
                     | "edit.undo"
                     | "edit.redo"
                     | "edit.delete_guides"
+                    | "edit.intersect_model"
+                    | "edit.intersect_selection"
             )
         {
             let device = rs.device.clone();
@@ -336,6 +351,31 @@ impl App {
                         self.rebuild(&device);
                     }
                 }
+                "edit.intersect_model" | "edit.intersect_selection" => {
+                    let faces: Vec<_> = self
+                        .selection
+                        .items()
+                        .iter()
+                        .filter_map(|o| match o {
+                            Owner::Face(f) => Some(*f),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(doc) = &mut self.document
+                        && !faces.is_empty()
+                        && doc.edit(|root| {
+                            let with: Vec<_> = if id == "edit.intersect_model" {
+                                root.faces.keys().collect()
+                            } else {
+                                faces.clone()
+                            };
+                            !mt_kernel::intersect_faces(root, &faces, &with).is_empty()
+                        })
+                    {
+                        self.selection.clear();
+                        self.rebuild(&device);
+                    }
+                }
                 "edit.undo" | "edit.redo" => {
                     if let Some(doc) = &mut self.document
                         && (if id == "edit.undo" {
@@ -346,6 +386,9 @@ impl App {
                     {
                         if let Some(d) = self.draw.as_mut() {
                             d.cancel();
+                        }
+                        if let Some(m) = self.modify.as_mut() {
+                            m.cancel();
                         }
                         self.selection.clear();
                         self.rebuild(&device);
@@ -434,6 +477,9 @@ impl App {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
             Tool::Draw(_) => self.draw_tool(ui, &response, rect, viewport_px, &render_state.device),
+            Tool::Modify(_) => {
+                self.modify_tool(ui, &response, rect, viewport_px, &render_state.device)
+            }
             Tool::Eraser => {
                 self.eraser_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
@@ -481,12 +527,16 @@ impl App {
                     .project(p, viewport_px)
                     .map(|q| rect.min + egui::vec2(q.x as f32, q.y as f32) / ppp)
             };
-            let previews = self
+            let mut previews = self
                 .draw
                 .as_ref()
                 .map(|d| d.preview(inf))
                 .unwrap_or_default();
-            let anchor = self.draw.as_ref().and_then(|d| d.anchor());
+            let mut anchor = self.draw.as_ref().and_then(|d| d.anchor());
+            if let (Some(m), Some(doc)) = (&self.modify, &self.document) {
+                previews = m.preview(&doc.model.root, inf);
+                anchor = m.anchor();
+            }
             overlay::paint(
                 &ui.painter().with_clip_rect(rect),
                 to_screen,
@@ -589,6 +639,95 @@ impl App {
         if changed {
             self.engine.unlock();
             self.shift_lock = false;
+            self.rebuild(device);
+        }
+    }
+
+    /// Mouse and keys of the modify tools (Push/Pull, Move, Rotate, Scale, Offset,
+    /// Follow Me).
+    fn modify_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        viewport_px: DVec2,
+        device: &wgpu::Device,
+    ) {
+        let ppp = ui.ctx().pixels_per_point();
+        let (escape, ctrl, arrows) = ui.input(|i| {
+            let k = |key| i.key_pressed(key);
+            (
+                k(egui::Key::Escape),
+                i.modifiers.command,
+                [
+                    k(egui::Key::ArrowRight),
+                    k(egui::Key::ArrowLeft),
+                    k(egui::Key::ArrowUp),
+                ],
+            )
+        });
+        let Some(tool) = self.modify.as_mut() else {
+            return;
+        };
+        for (pressed, axis) in arrows.into_iter().zip([
+            mt_infer::Axis::Red,
+            mt_infer::Axis::Green,
+            mt_infer::Axis::Blue,
+        ]) {
+            if pressed {
+                self.engine.toggle_axis_lock(axis);
+            }
+        }
+        if escape {
+            tool.cancel();
+            self.engine.unlock();
+        }
+        if let Some(dir) = tool.constraint() {
+            self.engine
+                .lock_direction(dir, mt_infer::Kind::Perpendicular);
+        }
+        let cursor = response
+            .hover_pos()
+            .or(response.interact_pointer_pos())
+            .map(|p| {
+                DVec2::new(
+                    f64::from((p.x - rect.min.x) * ppp),
+                    f64::from((p.y - rect.min.y) * ppp),
+                )
+            });
+        let anchor = tool.anchor();
+        self.inference = cursor.map(|c| {
+            let view = mt_infer::View {
+                camera: &self.camera,
+                viewport: viewport_px,
+            };
+            self.engine
+                .infer(&self.geometry, &self.bvh, view, c, anchor)
+        });
+        let (Some(inf), Some(c), Some(doc)) = (self.inference, cursor, self.document.as_mut())
+        else {
+            return;
+        };
+        if !response.clicked_by(egui::PointerButton::Primary) {
+            return;
+        }
+        let picked = selection::pick(&self.scene, &self.bvh, &self.camera, c, viewport_px);
+        let selection = self.selection.items().to_vec();
+        let changed = doc.edit(|root| {
+            let mut ctx = modify::Ctx {
+                ents: root,
+                picked,
+                selection: &selection,
+                ctrl,
+            };
+            tool.click(&mut ctx, &inf)
+        });
+        if tool.constraint().is_none() && tool.anchor().is_none() {
+            self.engine.unlock();
+        }
+        if changed {
+            self.engine.unlock();
+            self.selection.clear();
             self.rebuild(device);
         }
     }
@@ -835,6 +974,9 @@ impl eframe::App for App {
             .clone()
             .unwrap_or_else(|| match (&self.draw, self.tool) {
                 (Some(d), Tool::Draw(_)) => d.status(),
+                (_, Tool::Modify(_)) if self.modify.is_some() => {
+                    self.modify.as_ref().map(|m| m.status()).unwrap_or_default()
+                }
                 (_, t) => t.hint().to_owned(),
             });
         let units = self
@@ -843,6 +985,11 @@ impl eframe::App for App {
             .map_or(mt_infer::units::LengthUnit::Inch, |d| d.units);
         let (label, value) = match (&self.draw, self.tool) {
             (Some(d), Tool::Draw(_)) => d.measurement(self.inference.as_ref(), units),
+            (_, Tool::Modify(_)) if self.modify.is_some() => self
+                .modify
+                .as_ref()
+                .map(|m| m.measurement(self.inference.as_ref(), units))
+                .unwrap_or_default(),
             _ => ("Measurements", String::new()),
         };
         let can_undo = self.document.as_ref().is_some_and(Document::can_undo);
@@ -874,6 +1021,23 @@ impl eframe::App for App {
                     {
                         let device = rs.device.clone();
                         self.engine.unlock();
+                        self.rebuild(&device);
+                    } else if let (Some(tool), Some(doc)) =
+                        (self.modify.as_mut(), self.document.as_mut())
+                        && doc.edit(|root| {
+                            let mut ctx = modify::Ctx {
+                                ents: root,
+                                picked: None,
+                                selection: &[],
+                                ctrl: false,
+                            };
+                            tool.typed(&mut ctx, self.inference.as_ref(), &text, units)
+                        })
+                        && let Some(rs) = frame.wgpu_render_state()
+                    {
+                        let device = rs.device.clone();
+                        self.engine.unlock();
+                        self.selection.clear();
                         self.rebuild(&device);
                     }
                 }

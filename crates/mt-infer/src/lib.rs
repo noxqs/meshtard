@@ -258,6 +258,13 @@ impl Engine {
         }
     }
 
+    /// Holds the cursor to a line through the anchor (Push/Pull along a face normal).
+    pub fn lock_direction(&mut self, dir: DVec3, kind: Kind) {
+        if dir.length() > 1e-9 {
+            self.lock = Some((dir.normalize(), kind));
+        }
+    }
+
     pub fn unlock(&mut self) {
         self.lock = None;
     }
