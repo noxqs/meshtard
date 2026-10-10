@@ -80,7 +80,7 @@ pub fn triangulate(ents: &Entities, f: FaceId) -> Vec<[DVec3; 3]> {
         let Ok(idx) = earcutr::earcut(&flat, &starts, 2) else {
             continue;
         };
-        for t in idx.chunks_exact(3) {
+        for t in idx.as_chunks::<3>().0 {
             let (a, b, c) = (
                 ents.pos(ids[t[0]]),
                 ents.pos(ids[t[1]]),

@@ -204,7 +204,9 @@ pub fn interior_point(outer: &[DVec2], holes: &[&Vec<DVec2>]) -> DVec2 {
     }
     let at = |i: usize| DVec2::new(flat[2 * i], flat[2 * i + 1]);
     let tris = earcutr::earcut(&flat, &starts, 2).unwrap_or_default();
-    tris.chunks_exact(3)
+    tris.as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| (at(t[0]), at(t[1]), at(t[2])))
         .max_by(|a, b| tri_area(*a).total_cmp(&tri_area(*b)))
         .map_or(outer[0], |(a, b, c)| (a + b + c) / 3.0)

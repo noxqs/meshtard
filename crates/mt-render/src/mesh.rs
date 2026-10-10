@@ -53,8 +53,10 @@ impl FaceBuffers {
     /// vertices has a front or back alpha below 1.
     pub fn new(device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) -> Option<Self> {
         debug_assert_eq!(indices.len() % 3, 0, "indices must form triangles");
-        let (opaque, translucent): (Vec<&[u32]>, Vec<&[u32]>) = indices
-            .chunks_exact(3)
+        let (opaque, translucent): (Vec<&[u32; 3]>, Vec<&[u32; 3]>) = indices
+            .as_chunks::<3>()
+            .0
+            .iter()
             .partition(|tri| tri.iter().all(|&i| vertices[i as usize].opaque()));
         if opaque.is_empty() && translucent.is_empty() {
             return None;

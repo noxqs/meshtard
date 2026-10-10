@@ -25,3 +25,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
+      # mt-cuda loads CUDA at run time, so the feature builds without a toolkit; the GPU
+      # tests skip without a device.
+      - run: cargo clippy -p mt-cuda --all-targets --features cuda
+      - run: cargo test -p mt-cuda --features cuda

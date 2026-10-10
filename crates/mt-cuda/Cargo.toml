@@ -1,0 +1,26 @@
+[package]
+name = "mt-cuda"
+description = "CUDA versions of the kernel's parallel work (BVH build, ray batches, per-face math), each with a CPU fallback giving the same result"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Without this feature the crate builds and runs on the CPU only; no CUDA toolkit needed.
+cuda = ["dep:cudarc"]
+
+[dependencies]
+glam.workspace = true
+log.workspace = true
+mt-kernel.workspace = true
+mt-skp.workspace = true
+# Driver API + NVRTC, loaded at run time, so building needs no CUDA libraries.
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12060"] }
+
+# Not `workspace = true`: launching CUDA kernels needs `unsafe`, which the workspace
+# forbids. Here it is denied everywhere except the `gpu` module.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

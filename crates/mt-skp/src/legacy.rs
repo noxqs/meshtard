@@ -223,7 +223,7 @@ impl<'a> R<'a> {
 /// (surrogates come out as CESU-8, which a Rust `String` cannot hold);
 /// pairs are joined here and lone surrogates become U+FFFD.
 fn decode_utf16le(b: &[u8]) -> String {
-    char::decode_utf16(b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])))
+    char::decode_utf16(b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)))
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
 }
