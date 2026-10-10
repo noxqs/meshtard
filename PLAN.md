@@ -122,7 +122,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Validity checker after every operation: 16 scenario tests plus random sequences (3,000+ cases per run).
 - [x] `.skp` import into kernel entities (all 25 sample files pass topology checks), triangulation (exact area on every well-formed face).
 - [x] Renderer: shaded two-sided faces with materials, edges drawn on top, translucency. The app draws `.skp` files with faces.
-- [ ] Not yet: undo (transactions), spatial index for large models (lookups are linear today), Intersect Faces.
+- [ ] Not yet: spatial index for large kernel operations (lookups are linear today). (Undo and Intersect Faces came in M6.)
 
 ### M3: Renderer and GUI shell
 - [x] Faces, edges, profiles (borders and silhouettes), front/back face colors.
@@ -145,7 +145,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Curves in the kernel: arcs, circles and freehand curves select, erase and report (Entity Info) as one entity.
 - [x] Shapes lie on the clicked face's plane or the ground; arrow keys lock the plane. Typed values: rectangle `w,h`, radius, `24s` sides/segments, arc bulge, arc angle.
 - [x] Eraser: click or drag; Shift hides, Ctrl softens/smooths, Ctrl+Shift unsoftens.
-- [ ] Not yet: square/golden-section and tangent/half-circle inferences, rectangle orientation on tilted faces as SketchUp does it, Eraser drag preview highlighting in SketchUp's style, undo.
+- [ ] Not yet: rectangle orientation on tilted faces as SketchUp does it, Eraser drag preview highlighting in SketchUp's style. (Hints and undo are done.)
 
 ### M6: Modeling tools
 - [x] Undo/Redo (snapshot per edit, 100 steps).
@@ -153,7 +153,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Tape Measure: parallel guide from an edge, guide point otherwise; guides imported from `.skp`, used by inference; Edit > Delete Guides.
 - [x] Protractor (angle or slope guides), Dimensions (linear, radius, diameter), Text (leader and screen text), saved to .skp.
 - [x] Push/Pull double-click repeats the last distance; Ctrl toggles copy / new faces.
-- [ ] Not yet: Scale grips; Move/Rotate showing the moved geometry live (now an outline); Offset trimming partial collapses; Push/Pull double-click repeat; Ctrl toggling copy mid-operation.
+- [ ] Not yet: Scale grips; Move/Rotate showing the moved geometry live (now an outline); Offset trimming partial collapses.
 - [ ] CUDA: intersection and solid tools (mt-cuda in progress on the Linux machine).
 
 ### M7: Scene structure
