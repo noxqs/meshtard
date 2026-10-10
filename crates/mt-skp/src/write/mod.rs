@@ -72,8 +72,8 @@ const SCAFFOLD: &[u8] = include_bytes!("../scaffold/blank_v17.skp");
 
 // Offsets and slot numbers inside SCAFFOLD, as OpenSKP derives them by walking
 // it with the legacy reader (the material insertion point sits 9 bytes before
-// the `CLayer` class record). They are specific to this exact file; the test
-// suite re-derives them from the Python writer.
+// the `CLayer` class record). They are specific to this exact file; any error
+// shows up as a byte mismatch against OpenSKP in tests/write.rs.
 const MATERIAL_INSERT_POS: usize = 3400;
 /// First slot a material would occupy.
 const BASE_SLOT: u32 = 9;

@@ -1,6 +1,6 @@
 [package]
 name = "mt-skp"
-description = "SketchUp .skp reader: a Rust port of OpenSKP (MIT, Copyright (c) 2024-2026 Ahsan Mehmood)"
+description = "SketchUp .skp reader and legacy (v17) writer: a Rust port of OpenSKP (MIT, Copyright (c) 2024-2026 Ahsan Mehmood)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! SketchUp `.skp` reader, and a legacy-format (v17) writer in [`write`].
+//! SketchUp `.skp` reader, and a legacy-format (v17) writer in [`write`](mod@write).
 //!
 //! A Rust port of the reader in [OpenSKP](https://github.com/iamahsanmehmood/openskp)
 //! (MIT, Copyright (c) 2024-2026 Ahsan Mehmood). Both container formats are supported:
