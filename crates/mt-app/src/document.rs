@@ -137,7 +137,9 @@ impl Document {
         let mut ents = &self.model.root;
         let mut xf = DMat4::IDENTITY;
         for &i in &self.context {
-            let Some(inst) = ents.instances.get(i) else { break };
+            let Some(inst) = ents.instances.get(i) else {
+                break;
+            };
             xf *= inst.transform;
             ents = &self.model.definitions[inst.definition].entities;
         }
@@ -174,7 +176,8 @@ impl Document {
     /// taken out of the model while `f` runs (the model holds an empty one there).
     pub fn edit_model(&mut self, f: impl FnOnce(&mut Model, &mut Entities) -> bool) -> bool {
         let before = (self.model.clone(), self.context.clone());
-        let def = Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied());
+        let def =
+            Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied());
         let mut ents = match def {
             Some(d) => std::mem::take(&mut self.model.definitions[d].entities),
             None => std::mem::take(&mut self.model.root),
@@ -208,7 +211,10 @@ impl Document {
         let Some((model, context)) = self.undo.pop() else {
             return false;
         };
-        let now = (std::mem::replace(&mut self.model, model), std::mem::replace(&mut self.context, context));
+        let now = (
+            std::mem::replace(&mut self.model, model),
+            std::mem::replace(&mut self.context, context),
+        );
         self.redo.push(now);
         self.fix_context();
         true
@@ -218,7 +224,10 @@ impl Document {
         let Some((model, context)) = self.redo.pop() else {
             return false;
         };
-        let now = (std::mem::replace(&mut self.model, model), std::mem::replace(&mut self.context, context));
+        let now = (
+            std::mem::replace(&mut self.model, model),
+            std::mem::replace(&mut self.context, context),
+        );
         self.undo.push(now);
         self.fix_context();
         true
@@ -332,7 +341,12 @@ impl Document {
         let f32x3 = |n: DVec3| [n.x as f32, n.y as f32, n.z as f32];
 
         for (id, e) in &ents.edges {
-            if e.attrs.hidden || e.attrs.soft || !self.layer_visible(e.attrs.layer) {
+            // Styles > Edges off hides all edges (profiles too, in this draft).
+            if !self.model.style.edges
+                || e.attrs.hidden
+                || e.attrs.soft
+                || !self.layer_visible(e.attrs.layer)
+            {
                 continue;
             }
             let mut seg = Segment::line(
@@ -416,7 +430,14 @@ impl Document {
                 _ => Level::Outside,
             };
             let material = i.material.or(inherited);
-            self.collect(&def.entities, xf * i.transform, material, child, active, out);
+            self.collect(
+                &def.entities,
+                xf * i.transform,
+                material,
+                child,
+                active,
+                out,
+            );
             active.remove(&i.definition);
         }
     }
@@ -565,7 +586,12 @@ mod tests {
     #[test]
     fn edit_inside_group_and_undo() {
         let mut doc = Document::untitled();
-        let p = [DVec3::ZERO, DVec3::X * 10.0, DVec3::new(10.0, 10.0, 0.0), DVec3::Y * 10.0];
+        let p = [
+            DVec3::ZERO,
+            DVec3::X * 10.0,
+            DVec3::new(10.0, 10.0, 0.0),
+            DVec3::Y * 10.0,
+        ];
         doc.edit(|root| {
             for i in 0..4 {
                 mt_kernel::add_line(root, p[i], p[(i + 1) % 4]);
@@ -584,16 +610,34 @@ mod tests {
         // Move the group so context space differs from world space.
         doc.model.root.instances[0].transform = DMat4::from_translation(DVec3::Z * 5.0);
         assert!(doc.open_instance(0));
-        assert_eq!(doc.context_transform().transform_point3(DVec3::ZERO), DVec3::Z * 5.0);
+        assert_eq!(
+            doc.context_transform().transform_point3(DVec3::ZERO),
+            DVec3::Z * 5.0
+        );
         // A diagonal drawn inside splits the group's face, not the (empty) root.
         doc.edit(|ents| !mt_kernel::add_line(ents, p[0], p[2]).is_empty());
         assert_eq!(doc.active().faces.len(), 2);
         assert!(doc.model.root.faces.is_empty());
         let scene = doc.scene();
-        assert!(scene.tri_owner.iter().all(|o| matches!(o, Some(Owner::Face(_)))));
-        assert!(scene.vertices.iter().all(|v| (v.position[2] - 5.0).abs() < 1e-6));
+        assert!(
+            scene
+                .tri_owner
+                .iter()
+                .all(|o| matches!(o, Some(Owner::Face(_))))
+        );
+        assert!(
+            scene
+                .vertices
+                .iter()
+                .all(|v| (v.position[2] - 5.0).abs() < 1e-6)
+        );
         doc.close_instance();
-        assert!(doc.scene().tri_owner.iter().all(|o| *o == Some(Owner::Instance(0))));
+        assert!(
+            doc.scene()
+                .tri_owner
+                .iter()
+                .all(|o| *o == Some(Owner::Instance(0)))
+        );
         assert!(doc.undo(), "undo the diagonal; reopens the group");
         assert_eq!(doc.context, vec![0]);
         assert_eq!(doc.active().faces.len(), 1);

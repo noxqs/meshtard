@@ -362,7 +362,7 @@ impl Shell {
                 let m = &mut data.materials[i];
                 ui.label("Color");
                 let mut c = Color32::from_rgb(m.color[0], m.color[1], m.color[2]);
-                ui.spacing_mut().slider_width = (ui.available_width() - 20.0).clamp(80.0, 260.0);
+                ui.spacing_mut().slider_width = (ui.available_width() - 20.0).clamp(80.0, 180.0);
                 if egui::color_picker::color_picker_color32(
                     ui,
                     &mut c,

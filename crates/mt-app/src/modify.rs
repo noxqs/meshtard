@@ -749,17 +749,29 @@ impl ModifyTool for PaintBucket {
     }
 
     fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
-        let Some(picked) = ctx.picked else { return false };
-        let targets: Vec<Owner> = if ctx.selection.contains(&picked) { ctx.selection.to_vec() } else { vec![picked] };
+        let Some(picked) = ctx.picked else {
+            return false;
+        };
+        let targets: Vec<Owner> = if ctx.selection.contains(&picked) {
+            ctx.selection.to_vec()
+        } else {
+            vec![picked]
+        };
         let m = self.material;
         let mut changed = false;
         for t in targets {
             match t {
                 Owner::Face(f) => {
-                    let Some(face) = ctx.ents.faces.get_mut(f) else { continue };
+                    let Some(face) = ctx.ents.faces.get_mut(f) else {
+                        continue;
+                    };
                     // The side facing the camera.
                     let front = (ctx.eye - inf.point).dot(face.normal) >= 0.0 || t != picked;
-                    let slot = if front { &mut face.attrs.material } else { &mut face.attrs.back_material };
+                    let slot = if front {
+                        &mut face.attrs.material
+                    } else {
+                        &mut face.attrs.back_material
+                    };
                     changed |= *slot != m;
                     *slot = m;
                 }
@@ -775,7 +787,13 @@ impl ModifyTool for PaintBucket {
         changed
     }
 
-    fn typed(&mut self, _ctx: &mut Ctx, _cur: Option<&Inference>, _text: &str, _units: LengthUnit) -> bool {
+    fn typed(
+        &mut self,
+        _ctx: &mut Ctx,
+        _cur: Option<&Inference>,
+        _text: &str,
+        _units: LengthUnit,
+    ) -> bool {
         false
     }
 

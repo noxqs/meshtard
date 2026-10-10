@@ -6,6 +6,7 @@ mod nav;
 mod overlay;
 mod selection;
 mod tools;
+mod tray;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
@@ -55,6 +56,7 @@ const IMPLEMENTED: &[&str] = &[
     "edit.close_group",
     "edit.explode",
     "edit.make_unique",
+    "view.shadows",
     "edit.delete_guides",
     "edit.undo",
     "edit.redo",
@@ -129,6 +131,11 @@ struct App {
     inference: Option<mt_infer::Inference>,
     /// The active drawing tool, when `tool` is `Tool::Draw`.
     draw: Option<Box<dyn tools::DrawTool>>,
+    /// Tray state the model does not hold.
+    active_tag: usize,
+    current_material: Option<usize>,
+    active_scene: Option<usize>,
+    scene_tabs: bool,
     /// Open group or component space to world space (identity at the root).
     ctx_xf: glam::DMat4,
     /// The active modify tool, when `tool` is `Tool::Modify`.
@@ -170,6 +177,10 @@ impl App {
             draw: None,
             modify: None,
             ctx_xf: glam::DMat4::IDENTITY,
+            active_tag: 0,
+            current_material: None,
+            active_scene: None,
+            scene_tabs: true,
             erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
@@ -209,9 +220,46 @@ impl App {
             .as_ref()
             .map_or(glam::DMat4::IDENTITY, Document::context_transform);
         self.engine.reference_edge = None;
+        self.apply_shadows();
+        if let Some(doc) = &self.document {
+            let mut style = Style::from_spec(&self.spec.default_model);
+            let st = &doc.model.style;
+            style.profiles = (st.edges && st.profiles).then_some(st.profile_width);
+            self.viewport.set_style(device, style);
+        }
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
         self.update_highlight(device);
+    }
+
+    /// Passes the model's shadow settings to the viewport.
+    fn apply_shadows(&mut self) {
+        let shadows = self
+            .document
+            .as_ref()
+            .map(|d| &d.model.shadows)
+            .filter(|s| s.enabled)
+            .map(|s| {
+                // The settings hold no year; the current SketchUp default year is unverified.
+                let sun = mt_render::sun_direction(
+                    s.latitude,
+                    s.longitude,
+                    s.utc_offset,
+                    2026,
+                    s.month,
+                    s.day,
+                    s.hour,
+                    s.minute,
+                );
+                mt_render::Shadows {
+                    sun_dir: sun.as_vec3().to_array(),
+                    light: s.light as f32,
+                    dark: s.dark as f32,
+                    on_faces: s.on_faces,
+                    on_ground: s.on_ground,
+                }
+            });
+        self.viewport.set_shadows(shadows);
     }
 
     /// Colors selected edges, dots selected faces and boxes selected components.
@@ -332,9 +380,19 @@ impl App {
             self.tool = tool;
             self.draw = tools::for_command(id);
             self.modify = modify::for_command(id);
+            if let Some(m) = self.modify.as_mut() {
+                m.set_material(self.current_material);
+            }
             self.erase_drag.clear();
             self.engine.unlock();
             self.inference = None;
+        } else if id == "view.shadows" {
+            if let Some(doc) = &mut self.document {
+                // A view setting, not an undo step in this draft (SketchUp records
+                // shadow toggles in undo, unverified).
+                doc.model.shadows.enabled = !doc.model.shadows.enabled;
+                self.apply_shadows();
+            }
         } else if id == "file.exit" {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -1160,6 +1218,10 @@ impl eframe::App for App {
                 .unwrap_or_default(),
             _ => ("Measurements", String::new()),
         };
+        let shadows_on = self
+            .document
+            .as_ref()
+            .is_some_and(|d| d.model.shadows.enabled);
         let can_undo = self.document.as_ref().is_some_and(Document::can_undo);
         let can_redo = self.document.as_ref().is_some_and(Document::can_redo);
         let spec = self.spec.clone();
@@ -1174,9 +1236,10 @@ impl eframe::App for App {
                 "edit.redo" => can_redo,
                 _ => IMPLEMENTED.contains(&id),
             },
-            is_checked: &|_| false,
+            is_checked: &|id| id == "view.shadows" && shadows_on,
             entity_info: &info,
         };
+        shell.set_tray_data(self.tray_data());
         let events = shell.show(ui, &ui_frame, |ui| self.viewport_ui(ui, frame));
         self.shell = Some(shell);
         for event in events {
@@ -1212,7 +1275,14 @@ impl eframe::App for App {
                         self.rebuild(&device);
                     }
                 }
-                _ => {}
+                e => {
+                    if self.tray_event(e)
+                        && let Some(rs) = frame.wgpu_render_state()
+                    {
+                        let device = rs.device.clone();
+                        self.rebuild(&device);
+                    }
+                }
             }
         }
     }
