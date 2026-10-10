@@ -1,6 +1,8 @@
 //! meshtard desktop application.
 
 mod document;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod modify;
 mod nav;
 mod overlay;
@@ -154,6 +156,9 @@ struct App {
     draw: Option<Box<dyn tools::DrawTool>>,
     /// Thick lines where the active section cuts the model.
     cut_lines: Vec<Segment>,
+    /// The macOS menu bar (the shell draws the menus itself elsewhere).
+    #[cfg(target_os = "macos")]
+    native_menu: macos_menu::NativeMenu,
     /// Window title last sent (it changes when the model gets unsaved changes).
     last_title: String,
     /// Tray state the model does not hold.
@@ -193,8 +198,16 @@ impl App {
                 Some((shortcut, key, id))
             })
             .collect();
+        #[cfg(target_os = "macos")]
+        let native_menu = macos_menu::NativeMenu::install(&spec, VIEW_TOGGLES);
         let mut app = Self {
-            shell: Some(mt_ui::Shell::new(&spec)),
+            shell: Some({
+                #[allow(unused_mut)]
+                let mut shell = mt_ui::Shell::new(&spec);
+                #[cfg(target_os = "macos")]
+                shell.set_native_menu(true);
+                shell
+            }),
             camera: Camera::from_spec(&spec.default_model.camera),
             tool: Tool::Select,
             viewport: Viewport::new(&render_state.device, Style::from_spec(&spec.default_model)),
@@ -222,6 +235,8 @@ impl App {
             ctx_xf: glam::DMat4::IDENTITY,
             active_tag: 0,
             last_title: String::new(),
+            #[cfg(target_os = "macos")]
+            native_menu,
             cut_lines: Vec::new(),
             current_material: None,
             current_component: None,
@@ -737,6 +752,10 @@ impl App {
                     let m = i.modifiers;
                     // While typing into the Measurements box, plain keys are text.
                     let plain = !s.ctrl && !s.alt;
+                    // On macOS the native menu bar owns shortcuts with modifiers.
+                    if cfg!(target_os = "macos") && !plain {
+                        return false;
+                    }
                     !(typing && plain)
                         && i.key_pressed(*key)
                         // "Ctrl" in the keymap is Cmd on macOS (egui's `command`).
@@ -1302,6 +1321,20 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
     }
 }
 
+/// Menu commands shown with a check mark (native macOS menu).
+#[cfg(target_os = "macos")]
+const VIEW_TOGGLES: &[&str] = &[
+    "view.shadows",
+    "view.section_planes",
+    "view.section_cuts",
+    "view.xray",
+    "view.wireframe",
+    "view.hidden_line",
+    "view.shaded",
+    "view.shaded_textures",
+    "view.monochrome",
+];
+
 /// The kernel's view of a selection.
 fn kernel_selection(items: &[Owner]) -> mt_kernel::group::Selection {
     let mut sel = mt_kernel::group::Selection::default();
@@ -1486,8 +1519,15 @@ impl eframe::App for App {
             },
             entity_info: &info,
         };
+        #[cfg(target_os = "macos")]
+        self.native_menu
+            .update(ui_frame.is_enabled, ui_frame.is_checked);
         shell.set_tray_data(self.tray_data());
         let events = shell.show(ui, &ui_frame, |ui| self.viewport_ui(ui, frame));
+        #[cfg(target_os = "macos")]
+        for id in macos_menu::NativeMenu::poll() {
+            self.run_command(ui.ctx(), frame, &id);
+        }
         self.shell = Some(shell);
         for event in events {
             match event {

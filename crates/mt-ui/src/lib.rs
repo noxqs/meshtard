@@ -232,6 +232,8 @@ const TYPING_STARTERS: &str = ".,;-+[<'\"/*@=";
 
 /// UI state of the main window: tray panels, flyout choices, Measurements text.
 pub struct Shell {
+    /// The app shows the menus natively (macOS menu bar); don't draw them in the window.
+    native_menu: bool,
     theme: theme::Theme32,
     icon_palette: icons::Palette,
     styled: bool,
@@ -263,6 +265,7 @@ struct PanelState {
 impl Shell {
     pub fn new(spec: &Spec) -> Self {
         Self {
+            native_menu: false,
             theme: theme::Theme32::from_spec(&spec.ui_theme),
             icon_palette: icons::Palette::from_spec(&spec.ui_theme.icons),
             styled: false,
@@ -305,15 +308,17 @@ impl Shell {
         self.capture_typing(ui.ctx());
 
         let t = self.theme.clone();
-        egui::Panel::top("mt_ui_menu_bar")
-            .frame(
-                egui::Frame::NONE
-                    .fill(t.menu_bar)
-                    .inner_margin(egui::Margin::symmetric(2, 0)),
-            )
-            .exact_size(t.sizes.menu_bar_height)
-            .show_separator_line(false)
-            .show(ui, |ui| self.menu_bar(ui, frame));
+        if !self.native_menu {
+            egui::Panel::top("mt_ui_menu_bar")
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.menu_bar)
+                        .inner_margin(egui::Margin::symmetric(2, 0)),
+                )
+                .exact_size(t.sizes.menu_bar_height)
+                .show_separator_line(false)
+                .show(ui, |ui| self.menu_bar(ui, frame));
+        }
 
         self.top_toolbars(ui, frame);
 
@@ -469,6 +474,12 @@ impl Shell {
     /// Sets what the tray panels (Tags, Materials, Components, Outliner, Scenes, Styles, Shadows)
     /// and the scene tabs show. Call before [`Shell::show`] whenever the model changed
     /// (calling it every frame is fine).
+    /// Leaves the menu bar to the app (a native macOS menu bar built from the same
+    /// spec); the window then starts with the toolbars.
+    pub fn set_native_menu(&mut self, on: bool) {
+        self.native_menu = on;
+    }
+
     pub fn set_tray_data(&mut self, data: TrayData) {
         self.data = data;
     }

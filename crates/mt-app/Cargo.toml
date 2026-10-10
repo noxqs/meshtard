@@ -25,6 +25,9 @@ glam.workspace = true
 log.workspace = true
 env_logger.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+
 [features]
 # Build large models' pick index on the GPU (needs an NVIDIA driver at run time).
 cuda = ["mt-cuda/cuda"]
