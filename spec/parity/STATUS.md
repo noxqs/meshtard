@@ -72,3 +72,5 @@
 | Section Plane | Place on face, active cut, cut lines, arrows | differs | no name/symbol dialog; arrows drawn on the kept side; section fill missing |
 | Face styles | Wireframe, Hidden Line, Shaded, Monochrome, X-ray 50% | unverified | textures missing |
 | Components | In Model list, place, edit, Purge Unused | differs | list with icons instead of thumbnails; no gluing or cursor rotation when placing |
+| File | Save / Save As writes .skp (SketchUp 2017 format) | differs | SketchUp 2026 saves its own (VFF) format; view, scenes, styles not saved |
+| File | Unsaved-changes asterisk in title | unverified | |

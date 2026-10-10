@@ -164,9 +164,13 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] Left for later: textures (Shaded With Textures equals Shaded), section fill, scene transitions, component axes dialog and gluing, tag folders and dashes, Statistics tab.
 
 ### M8: `.skp` writing
-- Legacy format (2013-2020) via the OpenSKP port.
-- VFF (2021+) writing: not covered by OpenSKP. Needs own research, or skppy if its license allows.
-- Test: files we write open in real SketchUp and in OpenSKP.
+- [x] Writer: Rust port of OpenSKP's legacy v17 (SketchUp 2017) writer, byte-identical to OpenSKP on 17 models; extended with plain edges (per-edge soft/smooth/hidden), root group instances (shared group definitions), a plane tolerance for real models and empty-root files.
+- [x] File > New, Save (Ctrl+S), Save As, Save A Copy As; unsaved changes marked in the title.
+- [x] Every corpus model saves and reopens with identical counts in both our reader and OpenSKP's.
+- [ ] Not saved yet: the camera view (files open in Iso), scenes, styles and shadow settings, units, active section, edge tags, guides and section planes inside components; arcs and circles reopen as polyline curves, not radius-editable arcs.
+- [ ] Not yet: "Save changes?" prompt on New, Open and Exit.
+- [ ] Check in real SketchUp 2026 that saved files open correctly (during the trial).
+- [ ] VFF (2021+) writing: no reference implementation; needs own research against real SketchUp.
 
 ### M9: Windows and macOS
 - Windows: Vulkan or DX12 via wgpu, CUDA works the same.
