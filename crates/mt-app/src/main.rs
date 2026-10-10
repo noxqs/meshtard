@@ -2,15 +2,21 @@
 
 mod document;
 mod nav;
+mod selection;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
 use glam::DVec2;
-use mt_render::{Camera, Style, Viewport};
+use mt_kernel::bvh::Bvh;
+use mt_render::{Camera, FaceVertex, Segment, Style, Viewport};
 use mt_spec::{MenuItem, Shortcut, Spec};
 
-use document::Document;
+use document::{Document, Owner, Scene};
 use nav::Tool;
+use selection::{Mode, Rect, Selection};
+
+/// SketchUp's selection highlight color (draft: plain blue).
+const SELECTED: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// Touchpad scroll distance, in points, that counts as one wheel notch.
 const POINTS_PER_NOTCH: f32 = 40.0;
@@ -20,6 +26,9 @@ const IMPLEMENTED: &[&str] = &[
     "file.open",
     "file.exit",
     "tool.select",
+    "edit.select_all",
+    "edit.select_none",
+    "edit.delete",
     "camera.orbit",
     "camera.pan",
     "camera.zoom",
@@ -73,6 +82,12 @@ struct App {
     /// Shortcut for each implemented command, parsed once.
     shortcuts: Vec<(Shortcut, egui::Key, &'static str)>,
     document: Option<Document>,
+    /// Drawn geometry of the document and its pick index.
+    scene: Scene,
+    bvh: Bvh,
+    selection: Selection,
+    /// Where a selection box drag started, in viewport pixels.
+    box_start: Option<DVec2>,
     /// Error from the last command, shown in the status bar until the next one.
     message: Option<String>,
 }
@@ -95,17 +110,122 @@ impl App {
             shortcuts,
             spec,
             document: None,
+            scene: Scene::default(),
+            bvh: Bvh::default(),
+            selection: Selection::default(),
+            box_start: None,
             message: None,
         }
+    }
+
+    /// Rebuilds the drawn scene and pick index after the model changed.
+    fn rebuild(&mut self, device: &wgpu::Device) {
+        self.scene = self
+            .document
+            .as_ref()
+            .map(Document::scene)
+            .unwrap_or_default();
+        self.bvh = Bvh::build(self.scene.triangles.clone());
+        self.viewport
+            .set_faces(device, &self.scene.vertices, &self.scene.indices);
+        self.update_highlight(device);
+    }
+
+    /// Colors selected edges, dots selected faces and boxes selected components.
+    fn update_highlight(&mut self, device: &wgpu::Device) {
+        let mut edges = self.scene.edges.clone();
+        for (seg, owner) in edges.iter_mut().zip(&self.scene.edge_owner) {
+            if self.selection.contains(owner) {
+                seg.color = SELECTED;
+            }
+        }
+        let mut boxes: std::collections::HashMap<usize, (glam::DVec3, glam::DVec3)> =
+            Default::default();
+        let mut grow = |i: usize, p: glam::DVec3| {
+            let b = boxes.entry(i).or_insert((p, p));
+            b.0 = b.0.min(p);
+            b.1 = b.1.max(p);
+        };
+        let mut vertices: Vec<FaceVertex> = Vec::new();
+        for (t, owner) in self.scene.tri_owner.iter().enumerate() {
+            if !self.selection.contains(owner) {
+                continue;
+            }
+            match owner {
+                Owner::Face(_) => {
+                    for k in 0..3 {
+                        let i = self.scene.indices[3 * t + k] as usize;
+                        vertices.push(self.scene.vertices[i]);
+                    }
+                }
+                Owner::Instance(i) => self.scene.triangles[t].iter().for_each(|p| grow(*i, *p)),
+                Owner::Edge(_) => {}
+            }
+        }
+        for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
+            if let Owner::Instance(i) = owner
+                && self.selection.contains(owner)
+            {
+                for p in [seg.a, seg.b] {
+                    grow(*i, glam::Vec3::from(p).as_dvec3());
+                }
+            }
+        }
+        // Selected components and groups show their bounding box (world-aligned for now;
+        // SketchUp aligns it with the component's axes).
+        for (min, max) in boxes.values() {
+            let c = |x: bool, y: bool, z: bool| {
+                let p = glam::DVec3::new(
+                    if x { max.x } else { min.x },
+                    if y { max.y } else { min.y },
+                    if z { max.z } else { min.z },
+                );
+                p.as_vec3().into()
+            };
+            for (a, b) in [
+                ((0, 0, 0), (1, 0, 0)),
+                ((0, 1, 0), (1, 1, 0)),
+                ((0, 0, 1), (1, 0, 1)),
+                ((0, 1, 1), (1, 1, 1)),
+                ((0, 0, 0), (0, 1, 0)),
+                ((1, 0, 0), (1, 1, 0)),
+                ((0, 0, 1), (0, 1, 1)),
+                ((1, 0, 1), (1, 1, 1)),
+                ((0, 0, 0), (0, 0, 1)),
+                ((1, 0, 0), (1, 0, 1)),
+                ((0, 1, 0), (0, 1, 1)),
+                ((1, 1, 0), (1, 1, 1)),
+            ] {
+                let p = |(x, y, z): (i32, i32, i32)| c(x == 1, y == 1, z == 1);
+                edges.push(Segment::line(p(a), p(b), SELECTED, [1.0, 0.0]));
+            }
+        }
+        let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+        self.viewport
+            .set_selected_faces(device, &vertices, &indices);
+        self.viewport.set_edges(device, &edges);
+    }
+
+    fn select(&mut self, device: &wgpu::Device, mode: Mode, items: Vec<Owner>) {
+        self.selection.apply(mode, items);
+        self.update_highlight(device);
+    }
+
+    /// Every visible top-level entity.
+    fn all_entities(&self) -> Vec<Owner> {
+        let mut seen = std::collections::HashSet::new();
+        self.scene
+            .tri_owner
+            .iter()
+            .chain(&self.scene.edge_owner)
+            .copied()
+            .filter(|o| seen.insert(*o))
+            .collect()
     }
 
     fn open(&mut self, ctx: &egui::Context, device: &wgpu::Device, path: &std::path::Path) {
         match Document::open(path) {
             Ok(doc) => {
-                let scene = doc.scene();
-                self.viewport.set_edges(device, &scene.edges);
-                self.viewport
-                    .set_faces(device, &scene.vertices, &scene.indices);
                 if let Some(camera) = doc
                     .saved_camera()
                     .or_else(|| doc.extents_camera(self.camera.fov_deg))
@@ -114,6 +234,8 @@ impl App {
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 self.document = Some(doc);
+                self.selection.clear();
+                self.rebuild(device);
                 self.message = None;
             }
             Err(e) => self.message = Some(format!("Could not open {}: {e}", path.display())),
@@ -125,6 +247,24 @@ impl App {
             self.tool = tool;
         } else if id == "file.exit" {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if let Some(rs) = frame.wgpu_render_state()
+            && matches!(id, "edit.select_all" | "edit.select_none" | "edit.delete")
+        {
+            let device = rs.device.clone();
+            match id {
+                "edit.select_all" => {
+                    let all = self.all_entities();
+                    self.select(&device, Mode::Replace, all);
+                }
+                "edit.select_none" => self.select(&device, Mode::Replace, Vec::new()),
+                _ => {
+                    if let Some(doc) = &mut self.document {
+                        doc.delete(self.selection.items());
+                        self.selection.clear();
+                        self.rebuild(&device);
+                    }
+                }
+            }
         } else if id == "file.open" {
             let picked = rfd::FileDialog::new()
                 .add_filter("SketchUp Models", &["skp"])
@@ -203,6 +343,9 @@ impl App {
             },
         };
         nav::apply(self.tool, &mut self.camera, &input, viewport_px);
+        if self.tool == Tool::Select {
+            self.select_tool(ui, &response, rect, viewport_px, &render_state.device);
+        }
 
         self.viewport.render(
             &render_state.device,
@@ -237,6 +380,95 @@ impl App {
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
+        self.draw_selection_box(ui, &response, rect);
+    }
+
+    /// Clicks and box drags of the Select tool.
+    fn select_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        viewport_px: DVec2,
+        device: &wgpu::Device,
+    ) {
+        let ppp = ui.ctx().pixels_per_point();
+        let to_px = |p: egui::Pos2| {
+            DVec2::new(
+                f64::from((p.x - rect.min.x) * ppp),
+                f64::from((p.y - rect.min.y) * ppp),
+            )
+        };
+        let mods = ui.input(|i| i.modifiers);
+        let mode = Mode::from_modifiers(mods.command, mods.shift);
+
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            self.box_start = ui.input(|i| i.pointer.press_origin()).map(to_px);
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            && let (Some(start), Some(end)) = (
+                self.box_start.take(),
+                response.interact_pointer_pos().map(to_px),
+            )
+        {
+            // Left to right: window. Right to left: crossing.
+            let window = end.x >= start.x;
+            let items = selection::box_select(
+                &self.scene,
+                &self.camera,
+                viewport_px,
+                Rect::from_corners(start, end),
+                window,
+            );
+            self.select(device, mode, items);
+            return;
+        }
+        if response.clicked_by(egui::PointerButton::Primary)
+            && let Some(cursor) = response.interact_pointer_pos().map(to_px)
+        {
+            let clicks = if response.triple_clicked() {
+                3
+            } else if response.double_clicked() {
+                2
+            } else {
+                1
+            };
+            let hit = selection::pick(&self.scene, &self.bvh, &self.camera, cursor, viewport_px);
+            let items = match (hit, &self.document) {
+                (Some(h), Some(doc)) => selection::expand(&doc.model.root, h, clicks),
+                _ => Vec::new(),
+            };
+            self.select(device, mode, items);
+        }
+    }
+
+    /// The rubber band: solid for a window selection, dashed for crossing.
+    fn draw_selection_box(&self, ui: &egui::Ui, response: &egui::Response, rect: egui::Rect) {
+        let (Some(_), Some(start), Some(end)) = (
+            self.box_start,
+            ui.input(|i| i.pointer.press_origin()),
+            response
+                .hover_pos()
+                .or(ui.input(|i| i.pointer.latest_pos())),
+        ) else {
+            return;
+        };
+        let r = egui::Rect::from_two_pos(start, end).intersect(rect);
+        let stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+        if end.x >= start.x {
+            ui.painter()
+                .rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+        } else {
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            ui.painter()
+                .extend(egui::Shape::dashed_line(&corners, stroke, 4.0, 3.0));
+        }
     }
 }
 

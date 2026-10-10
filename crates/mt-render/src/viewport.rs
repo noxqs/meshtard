@@ -35,6 +35,11 @@ struct Globals {
     /// How far lines are moved towards the camera; see `pull_depth` in the shader. x: perspective
     /// radians per physical pixel, y: parallel NDC depth per physical pixel.
     line_depth: [f32; 4],
+    /// xyz: camera eye (perspective) or direction towards the camera (parallel); w: 1 for
+    /// perspective.
+    eye: [f32; 4],
+    /// x: profile edge width in logical points, y: 1 when profiles are drawn.
+    profile: [f32; 4],
 }
 
 /// One line segment, drawn as a screen-space quad.
@@ -46,6 +51,30 @@ pub struct Segment {
     pub color: [f32; 4],
     /// Width and dash length in logical points; dash 0 means solid.
     pub style: [f32; 2],
+    /// Front normals of the (first) two faces using the edge, for profile detection.
+    pub n1: [f32; 3],
+    pub n2: [f32; 3],
+    /// Profile rule: [`Segment::NO_PROFILE`], [`Segment::SILHOUETTE`] or [`Segment::BORDER`].
+    pub profile: f32,
+}
+
+impl Segment {
+    /// Never drawn as a profile (axes, guides, edges without faces).
+    pub const NO_PROFILE: f32 = 0.0;
+    /// A profile where one face turns towards the camera and the other away.
+    pub const SILHOUETTE: f32 = 1.0;
+    /// Always a profile: the edge borders a single face.
+    pub const BORDER: f32 = 2.0;
+
+    pub fn line(a: [f32; 3], b: [f32; 3], color: [f32; 4], style: [f32; 2]) -> Self {
+        Self {
+            a,
+            b,
+            color,
+            style,
+            ..Self::zeroed()
+        }
+    }
 }
 
 /// Scene-independent display settings, from the model's style.
@@ -57,6 +86,8 @@ pub struct Style {
     pub ground_from_below: bool,
     pub axes: Option<AxesStyle>,
     pub shading: ShadingStyle,
+    /// Profile edge width in logical points, or `None` when profiles are off.
+    pub profiles: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +145,9 @@ impl Style {
                 dotted_negative: spec.axes.dotted_negative,
                 width: spec.axes.width_px,
             }),
+            // Profile width 2 matches item 1007 of SketchUp's default style seen in OpenSKP's
+            // fixtures (unverified that 1007 is the profile width).
+            profiles: Some(2.0),
             shading: ShadingStyle {
                 ambient: spec.shading.ambient,
                 light: if spec.shading.light_from_camera {
@@ -134,19 +168,9 @@ fn axis_segments(axes: &AxesStyle) -> Vec<Segment> {
         dir[i] = AXIS_LENGTH;
         let neg = dir.map(|v| -v);
         let color = [color[0], color[1], color[2], 1.0];
-        out.push(Segment {
-            a: [0.0; 3],
-            b: dir,
-            color,
-            style: [axes.width, 0.0],
-        });
+        out.push(Segment::line([0.0; 3], dir, color, [axes.width, 0.0]));
         let dash = if axes.dotted_negative { AXIS_DASH } else { 0.0 };
-        out.push(Segment {
-            a: [0.0; 3],
-            b: neg,
-            color,
-            style: [axes.width, dash],
-        });
+        out.push(Segment::line([0.0; 3], neg, color, [axes.width, dash]));
     }
     out
 }
@@ -205,6 +229,8 @@ pub struct Viewport {
     faces_opaque: wgpu::RenderPipeline,
     faces_translucent: wgpu::RenderPipeline,
     faces: Option<FaceBuffers>,
+    selection: wgpu::RenderPipeline,
+    selected: Option<FaceBuffers>,
     axes: Option<wgpu::Buffer>,
     axes_count: u32,
     edges: Option<wgpu::Buffer>,
@@ -296,7 +322,8 @@ impl Viewport {
             array_stride: std::mem::size_of::<Segment>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![
-                0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2
+                0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2,
+            4 => Float32x3, 5 => Float32x3, 6 => Float32
             ],
         };
         let lines = pipeline(
@@ -328,6 +355,16 @@ impl Viewport {
             alpha,
         );
 
+        // Selected faces: a dot pattern over the face, at the face's own depth.
+        let selection = pipeline(
+            "selected faces",
+            "face_vs",
+            "select_fs",
+            &faces,
+            false,
+            alpha,
+        );
+
         let mut viewport = Self {
             globals,
             bind_group,
@@ -336,6 +373,8 @@ impl Viewport {
             faces_opaque,
             faces_translucent,
             faces: None,
+            selection,
+            selected: None,
             axes: None,
             axes_count: 0,
             edges: None,
@@ -363,6 +402,16 @@ impl Viewport {
     /// Triangles with any alpha below 1 are drawn translucent, after everything else.
     pub fn set_faces(&mut self, device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) {
         self.faces = FaceBuffers::new(device, vertices, indices);
+    }
+
+    /// Faces shown as selected (SketchUp's blue dot pattern); empty slices clear it.
+    pub fn set_selected_faces(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[FaceVertex],
+        indices: &[u32],
+    ) {
+        self.selected = FaceBuffers::new(device, vertices, indices);
     }
 
     pub fn set_style(&mut self, device: &wgpu::Device, style: Style) {
@@ -429,6 +478,19 @@ impl Viewport {
                 let depth_per_px = depth_per_unit * camera.units_per_px(viewport);
                 [0.0, depth_per_px as f32, 0.0, 0.0]
             },
+            eye: if camera.perspective {
+                let e = camera.eye.as_vec3();
+                [e.x, e.y, e.z, 1.0]
+            } else {
+                let d = -camera.forward().as_vec3();
+                [d.x, d.y, d.z, 0.0]
+            },
+            profile: [
+                style.profiles.unwrap_or(0.0),
+                f32::from(u8::from(style.profiles.is_some())),
+                0.0,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -472,6 +534,16 @@ impl Viewport {
                     pass.set_pipeline(&self.faces_opaque);
                     pass.draw_indexed(faces.opaque.clone(), 0, 0..1);
                 }
+            }
+            if let Some(sel) = self
+                .selected
+                .as_ref()
+                .filter(|f| !f.opaque.is_empty() || !f.translucent.is_empty())
+            {
+                pass.set_pipeline(&self.selection);
+                pass.set_vertex_buffer(0, sel.vertices.slice(..));
+                pass.set_index_buffer(sel.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..sel.translucent.end.max(sel.opaque.end), 0, 0..1);
             }
             if let Some(edges) = &self.edges {
                 pass.set_pipeline(&self.lines);

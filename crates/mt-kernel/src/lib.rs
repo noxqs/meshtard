@@ -4,6 +4,7 @@
 //! Units are inches, Z up, as in `.skp` files.
 
 pub mod arrangement;
+pub mod bvh;
 pub mod entities;
 pub mod geom;
 pub mod import;

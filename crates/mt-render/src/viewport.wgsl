@@ -18,6 +18,10 @@ struct Globals {
     light: vec4<f32>,
     // x: perspective radians per pixel, y: parallel NDC depth per pixel (one is 0).
     line_depth: vec4<f32>,
+    // xyz: camera eye (w = 1, perspective) or direction towards the camera (w = 0).
+    eye: vec4<f32>,
+    // x: profile width in logical points, y: 1 when profiles are drawn.
+    profile: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -98,6 +102,16 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     return vec4<f32>(color.rgb * shade, color.a);
 }
 
+// SketchUp marks selected faces with a grid of blue dots.
+@fragment
+fn select_fs(in: FaceOut) -> @location(0) vec4<f32> {
+    let p = vec2<u32>(in.pos.xy);
+    if (p.x % 3u != 0u || p.y % 3u != 0u) {
+        discard;
+    }
+    return vec4<f32>(0.0, 0.0, 1.0, 1.0);
+}
+
 // ---------------------------------------------------------------- lines
 
 struct Segment {
@@ -106,7 +120,26 @@ struct Segment {
     @location(2) color: vec4<f32>,
     // x: width in logical points, y: dash length in logical points (0 = solid).
     @location(3) style: vec2<f32>,
+    // Front normals of the two faces using the edge.
+    @location(4) n1: vec3<f32>,
+    @location(5) n2: vec3<f32>,
+    // 0: never a profile, 1: profile on the silhouette, 2: always a profile.
+    @location(6) profile: f32,
 };
+
+// Line width in logical points, widened to the profile width on profile edges.
+fn line_width(s: Segment) -> f32 {
+    if (g.profile.y < 0.5 || s.profile < 0.5) {
+        return s.style.x;
+    }
+    var is_profile = s.profile > 1.5;
+    if (!is_profile) {
+        let mid = (s.a + s.b) * 0.5;
+        let to_eye = select(g.eye.xyz, g.eye.xyz - mid, g.eye.w > 0.5);
+        is_profile = dot(s.n1, to_eye) * dot(s.n2, to_eye) <= 0.0;
+    }
+    return select(s.style.x, max(s.style.x, g.profile.x), is_profile);
+}
 
 struct LineOut {
     @builtin(position) pos: vec4<f32>,
@@ -180,7 +213,8 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     let side = sides[vi];
 
     // Half width plus one pixel of feather for antialiasing.
-    let half = s.style.x * ppp * 0.5 + 1.0;
+    let width = line_width(s);
+    let half = width * ppp * 0.5 + 1.0;
     let c = select(ca, cb, end > 0.5);
     let base = select(sa, sb, end > 0.5);
     let extend = select(-half, half, end > 0.5);
@@ -190,7 +224,7 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     out.color = s.color;
     // Framebuffer y runs down; everything above uses y up.
     out.start_dir = vec4<f32>(sa.x, size.y - sa.y, dir.x, -dir.y);
-    out.style = vec2<f32>(s.style.x * ppp, s.style.y * ppp);
+    out.style = vec2<f32>(width * ppp, s.style.y * ppp);
     return out;
 }
 

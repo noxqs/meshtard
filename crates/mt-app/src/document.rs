@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use glam::{DMat3, DMat4, DVec3};
-use mt_kernel::{DefinitionId, Entities, MaterialId, Model, import, tessellate};
+use mt_kernel::{DefinitionId, EdgeId, Entities, FaceId, MaterialId, Model, import, tessellate};
 use mt_render::{Camera, FaceVertex, Segment};
 
 /// Edge color and width of the default style. Draft; check against SketchUp 2026.
@@ -18,12 +18,25 @@ pub struct Document {
     saved_camera: Option<mt_skp::ViewCamera>,
 }
 
-/// Everything the viewport draws for the model.
+/// A top-level entity of the model root: what a click selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Owner {
+    Face(FaceId),
+    Edge(EdgeId),
+    /// Index into `model.root.instances`.
+    Instance(usize),
+}
+
+/// Everything the viewport draws for the model, with the owner of each piece.
 #[derive(Default)]
 pub struct Scene {
     pub edges: Vec<Segment>,
+    pub edge_owner: Vec<Owner>,
     pub vertices: Vec<FaceVertex>,
     pub indices: Vec<u32>,
+    /// World-space triangles for picking; triangle `i` is `indices[3 * i..3 * i + 3]`.
+    pub triangles: Vec<[DVec3; 3]>,
+    pub tri_owner: Vec<Owner>,
 }
 
 impl Document {
@@ -64,16 +77,13 @@ impl Document {
 
     /// Visible faces and edges in world space. Hidden entities, entities on hidden tags,
     /// and soft edges are left out.
+    /// Visible faces and edges in world space. Hidden entities, entities on hidden tags,
+    /// and soft edges are left out.
     pub fn scene(&self) -> Scene {
         let mut scene = Scene::default();
         let mut active = HashSet::new();
-        self.collect(
-            &self.model.root,
-            DMat4::IDENTITY,
-            None,
-            &mut active,
-            &mut scene,
-        );
+        let root = &self.model.root;
+        self.collect(root, DMat4::IDENTITY, None, None, &mut active, &mut scene);
         scene
     }
 
@@ -99,6 +109,7 @@ impl Document {
         ents: &Entities,
         xf: DMat4,
         inherited: Option<MaterialId>,
+        owner: Option<Owner>,
         active: &mut HashSet<DefinitionId>,
         out: &mut Scene,
     ) {
@@ -106,19 +117,36 @@ impl Document {
             let q = xf.transform_point3(p);
             [q.x as f32, q.y as f32, q.z as f32]
         };
-        for e in ents.edges.values() {
+        let normal_xf = DMat3::from_mat4(xf).inverse().transpose();
+        let world_normal = |f: FaceId| (normal_xf * ents.faces[f].normal).normalize_or_zero();
+        let f32x3 = |n: DVec3| [n.x as f32, n.y as f32, n.z as f32];
+
+        for (id, e) in &ents.edges {
             if e.attrs.hidden || e.attrs.soft || !self.layer_visible(e.attrs.layer) {
                 continue;
             }
-            out.edges.push(Segment {
-                a: world(ents.pos(e.start)),
-                b: world(ents.pos(e.end)),
-                color: EDGE_COLOR,
-                style: [EDGE_WIDTH, 0.0],
-            });
+            let mut seg = Segment::line(
+                world(ents.pos(e.start)),
+                world(ents.pos(e.end)),
+                EDGE_COLOR,
+                [EDGE_WIDTH, 0.0],
+            );
+            match e.faces[..] {
+                [] => {}
+                [f] => {
+                    seg.n1 = f32x3(world_normal(f));
+                    seg.profile = Segment::BORDER;
+                }
+                [f, g, ..] => {
+                    seg.n1 = f32x3(world_normal(f));
+                    seg.n2 = f32x3(world_normal(g));
+                    seg.profile = Segment::SILHOUETTE;
+                }
+            }
+            out.edges.push(seg);
+            out.edge_owner.push(owner.unwrap_or(Owner::Edge(id)));
         }
 
-        let normal_xf = DMat3::from_mat4(xf).inverse().transpose();
         for (f, face) in &ents.faces {
             if face.attrs.hidden || !self.layer_visible(face.attrs.layer) {
                 continue;
@@ -128,8 +156,7 @@ impl Document {
                 face.attrs.back_material.or(inherited),
                 self.model.back_color,
             );
-            let n = (normal_xf * face.normal).normalize_or_zero();
-            let normal = [n.x as f32, n.y as f32, n.z as f32];
+            let n = world_normal(f);
             for [a, b, c] in tessellate::triangulate(ents, f) {
                 let (a, b, c) = (
                     xf.transform_point3(a),
@@ -146,16 +173,18 @@ impl Document {
                 for p in tri {
                     out.indices.push(out.vertices.len() as u32);
                     out.vertices.push(FaceVertex {
-                        position: [p.x as f32, p.y as f32, p.z as f32],
-                        normal,
+                        position: f32x3(p),
+                        normal: f32x3(n),
                         front,
                         back,
                     });
                 }
+                out.triangles.push(tri);
+                out.tri_owner.push(owner.unwrap_or(Owner::Face(f)));
             }
         }
 
-        for i in &ents.instances {
+        for (index, i) in ents.instances.iter().enumerate() {
             if i.hidden || !self.layer_visible(i.layer) {
                 continue;
             }
@@ -166,10 +195,13 @@ impl Document {
             if !active.insert(i.definition) {
                 continue;
             }
+            let child_owner = owner.or(Some(Owner::Instance(index)));
+            let material = i.material.or(inherited);
             self.collect(
                 &def.entities,
                 xf * i.transform,
-                i.material.or(inherited),
+                material,
+                child_owner,
                 active,
                 out,
             );
@@ -177,8 +209,34 @@ impl Document {
         }
     }
 
-    /// Camera looking at the whole model from SketchUp's default direction, for files
-    /// without a saved view.
+    /// Deletes entities like SketchUp's Delete: edges are erased (their faces go with
+    /// them, coplanar neighbors merge), faces are removed leaving their edges, components
+    /// are removed.
+    pub fn delete(&mut self, items: &[Owner]) {
+        let root = &mut self.model.root;
+        let mut instances: Vec<usize> = Vec::new();
+        for item in items {
+            match *item {
+                Owner::Face(f) => {
+                    root.remove_face(f);
+                }
+                Owner::Edge(e) => {
+                    if root.edges.contains_key(e) {
+                        mt_kernel::erase_edge(root, e);
+                    }
+                }
+                Owner::Instance(i) => instances.push(i),
+            }
+        }
+        instances.sort_unstable();
+        instances.dedup();
+        for i in instances.into_iter().rev() {
+            if i < root.instances.len() {
+                root.instances.remove(i);
+            }
+        }
+    }
+
     pub fn extents_camera(&self, fov_deg: f64) -> Option<Camera> {
         let scene = self.scene();
         let points = scene

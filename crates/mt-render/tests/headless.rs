@@ -328,11 +328,13 @@ fn check_edges(camera: &Camera, name: &str) {
     let edges = cube_edges();
     let segments: Vec<Segment> = edges
         .iter()
-        .map(|(a, b, _)| Segment {
-            a: a.as_vec3().into(),
-            b: b.as_vec3().into(),
-            color: [0.0, 0.0, 0.0, 1.0],
-            style: [1.0, 0.0],
+        .map(|(a, b, _)| {
+            Segment::line(
+                a.as_vec3().into(),
+                b.as_vec3().into(),
+                [0.0, 0.0, 0.0, 1.0],
+                [1.0, 0.0],
+            )
         })
         .collect();
     viewport.set_edges(&device, &segments);
@@ -493,5 +495,72 @@ fn translucent_face_blends() {
     assert!(
         blue_over_sky[2] > blue_over_sky[0] + 30 && blue_over_sky[0] > 80,
         "blue blended over background, got {blue_over_sky:?}"
+    );
+}
+
+#[test]
+fn border_and_silhouette_edges_draw_as_profiles() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    // Looking straight down at two horizontal lines (no faces, sky/ground off).
+    let camera = Camera {
+        eye: DVec3::new(0.0, 0.0, 500.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let mut style = face_style();
+    style.axes = None;
+    let mut viewport = Viewport::new(&device, style);
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let plain = Segment::line([-100.0, 40.0, 0.0], [100.0, 40.0, 0.0], black, [1.0, 0.0]);
+    let mut border = Segment::line([-100.0, -40.0, 0.0], [100.0, -40.0, 0.0], black, [1.0, 0.0]);
+    border.n1 = [0.0, 0.0, 1.0];
+    border.profile = Segment::BORDER;
+    // A silhouette: one face towards the camera, one away.
+    let mut silhouette =
+        Segment::line([-60.0, -100.0, 0.0], [-60.0, 100.0, 0.0], black, [1.0, 0.0]);
+    silhouette.n1 = [0.0, 0.0, 1.0];
+    silhouette.n2 = [0.0, 0.0, -1.0];
+    silhouette.profile = Segment::SILHOUETTE;
+    // Two faces both towards the camera: not a profile.
+    let mut crease = Segment::line([60.0, -100.0, 0.0], [60.0, 100.0, 0.0], black, [1.0, 0.0]);
+    crease.n1 = [0.0, 0.0, 1.0];
+    crease.n2 = [0.0, 0.6, 0.8];
+    crease.profile = Segment::SILHOUETTE;
+    viewport.set_edges(&device, &[plain, border, silhouette, crease]);
+    let img = render(&device, &queue, &mut viewport, &camera, "profiles");
+
+    let column = |x: f64| {
+        camera
+            .project(DVec3::new(x, 0.0, 0.0), viewport_px())
+            .unwrap()
+            .x as u32
+    };
+    // The column at x = 0 crosses both horizontal lines: plain (top) and border (bottom).
+    let x0 = column(0.0);
+    let ys: Vec<u32> = (0..SIZE[1])
+        .filter(|&y| luma(img.get_pixel(x0, y)) < 100)
+        .collect();
+    let mid = SIZE[1] / 2;
+    let top = ys.iter().filter(|&&y| y < mid).count();
+    let bottom = ys.iter().filter(|&&y| y > mid).count();
+    assert!(
+        bottom > top,
+        "border profile ({bottom} px) thicker than plain edge ({top} px)"
+    );
+
+    let row = SIZE[1] / 2;
+    let width_at = |x: f64| {
+        let cx = column(x) as i64;
+        (cx - 6..=cx + 6)
+            .filter(|&x| luma(img.get_pixel(x as u32, row)) < 100)
+            .count()
+    };
+    assert!(
+        width_at(-60.0) > width_at(60.0),
+        "silhouette thicker than crease"
     );
 }
