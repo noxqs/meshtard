@@ -260,7 +260,11 @@ struct V {
     /// SketchUp 3: the texture image sits inline (bytes in `blob`), no store slot.
     inline_tex: bool,
     sense: bool,
+    /// Edge: slot of its CCurve / CArcCurve, 0 for none.
+    curve: u64,
     faces_camera: bool,
+    /// Instance: a `CGroup` rather than a `CComponentInstance`.
+    group: bool,
     shadows_face_sun: bool,
     colorized: bool,
     mat: i32,
@@ -310,7 +314,9 @@ impl Default for V {
             tex_dib: 0,
             inline_tex: false,
             sense: false,
+            curve: 0,
             faces_camera: false,
+            group: false,
             shadows_face_sun: false,
             colorized: false,
             mat: 0,
@@ -878,7 +884,10 @@ impl<'a> Archive<'a> {
                 self.draw(&mut v)?;
                 v.v1 = self.object(Some("CVertex"))?.slot;
                 v.v2 = self.object(Some("CVertex"))?.slot;
-                self.object(None)?;
+                let c = self.object(None)?;
+                if matches!(&*c.name, "CCurve" | "CArcCurve") {
+                    v.curve = c.slot;
+                }
             }
             "CCurve" => {
                 self.preamble()?;
@@ -1263,6 +1272,7 @@ impl<'a> Archive<'a> {
             "CComponentInstance" | "CGroup" => {
                 v.attrs = self.preamble()?;
                 v.k = "instance";
+                v.group = n == "CGroup";
                 self.draw(&mut v)?;
                 v.def = self.object(Some("CComponentDefinition"))?.slot;
                 v.xf = self.r.f64s(13)?;
@@ -1747,6 +1757,9 @@ fn add_edge(b: &mut GeometryBuilder, s: u64, e: &V, slots: &Slots) {
     if f != 0 {
         b.edge_flags.insert(id, f);
     }
+    if e.curve != 0 {
+        b.edge_curves.insert(id, e.curve as EntityId);
+    }
 }
 
 // SketchUp's Dynamic Components extension stores its data in an attribute
@@ -1788,6 +1801,11 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                     f.back_material_id = Some(EntityId::from(v.back_mat));
                 }
                 f.hidden = v.hidden != 0;
+                // Resolved to the layer name later (model.rs), as for instances.
+                // OpenSKP's reader leaves legacy face layers unresolved.
+                if v.layer != 0 {
+                    f.layer = v.layer.to_string();
+                }
                 for lp in &v.loops {
                     let mut co = Vec::new();
                     for u in &lp.uses {
@@ -1833,6 +1851,7 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                     ref_idx: Some(v.def as EntityId),
                     matrix: v.xf.clone(),
                     hidden: v.hidden != 0,
+                    is_group: v.group,
                     ..Default::default()
                 };
                 if v.mat != 0 {

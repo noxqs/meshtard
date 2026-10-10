@@ -283,7 +283,10 @@ impl Document {
             .path
             .file_name()
             .map_or_else(|| "Untitled".into(), |n| n.to_string_lossy().into_owned());
-        format!("{name} - meshtard")
+        // An asterisk marks unsaved changes (SketchUp's Windows title convention for
+        // this is unverified).
+        let star = if self.is_modified() { "*" } else { "" };
+        format!("{star}{name} - meshtard")
     }
 
     /// The view the model was saved with, which SketchUp reopens at.

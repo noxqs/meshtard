@@ -119,7 +119,11 @@ fn compare(path: &str, ours: &Value, theirs: &Value, r: &mut Report) {
             if numbers_equal(a.as_f64().unwrap(), b.as_f64().unwrap()) => {}
         (a, b) if a == b => {}
         (Value::Bool(_), Value::Null) if path.contains(".attribute_dictionaries.") => r.known += 1,
-        (Value::Null, Value::Number(_)) if path.contains(".faces.") && path.ends_with(".layer") => {
+        // Legacy face layers: OpenSKP leaves the layer's object id; we resolve it to
+        // the layer name (or nothing for Layer0).
+        (Value::Null | Value::String(_), Value::Number(_))
+            if path.contains(".faces.") && path.ends_with(".layer") =>
+        {
             r.known += 1
         }
         (Value::Array(a), Value::Array(_)) if path == ".dimensions" && a.is_empty() => r.known += 1,

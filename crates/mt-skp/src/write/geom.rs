@@ -202,8 +202,13 @@ fn degenerate() -> WriteError {
 
 /// The face plane `(nx, ny, nz, d)` with `n . p == d`; errors unless every
 /// point lies on it.
-pub(super) fn plane_from_polygon(points: &[Point3]) -> Result<[f64; 4], WriteError> {
-    let (plane, tol) = fit_plane(points).ok_or_else(degenerate)?;
+/// `tol` replaces the default relative tolerance when given.
+pub(super) fn plane_from_polygon(
+    points: &[Point3],
+    tol: Option<f64>,
+) -> Result<[f64; 4], WriteError> {
+    let (plane, default_tol) = fit_plane(points).ok_or_else(degenerate)?;
+    let tol = tol.unwrap_or(default_tol);
     for &p in points {
         let dist = plane_distance(plane, p);
         if dist.abs() > tol {
@@ -218,8 +223,9 @@ pub(super) fn plane_from_polygon(points: &[Point3]) -> Result<[f64; 4], WriteErr
 
 /// Whether the points are coplanar (same fit as [`plane_from_polygon`]);
 /// still an error for degenerate input.
-pub(super) fn is_coplanar(points: &[Point3]) -> Result<bool, WriteError> {
-    let (plane, tol) = fit_plane(points).ok_or_else(degenerate)?;
+pub(super) fn is_coplanar(points: &[Point3], tol: Option<f64>) -> Result<bool, WriteError> {
+    let (plane, default_tol) = fit_plane(points).ok_or_else(degenerate)?;
+    let tol = tol.unwrap_or(default_tol);
     Ok(points
         .iter()
         .all(|&p| plane_distance(plane, p).abs() <= tol))
@@ -318,11 +324,14 @@ mod tests {
             [1.0, 1.0, 0.0],
             [0.0, 1.0, 0.0],
         ];
-        assert_eq!(plane_from_polygon(&flat).unwrap(), [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(
+            plane_from_polygon(&flat, None).unwrap(),
+            [0.0, 0.0, 1.0, 0.0]
+        );
         let mut warped = flat;
         warped[2][2] = 0.5;
-        assert!(plane_from_polygon(&warped).is_err());
-        assert!(!is_coplanar(&warped).unwrap());
-        assert!(plane_from_polygon(&[[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]).is_err());
+        assert!(plane_from_polygon(&warped, None).is_err());
+        assert!(!is_coplanar(&warped, None).unwrap());
+        assert!(plane_from_polygon(&[[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], None).is_err());
     }
 }

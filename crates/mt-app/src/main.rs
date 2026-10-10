@@ -34,6 +34,10 @@ const GPU_MIN_TRIANGLES: usize = 100_000;
 
 const IMPLEMENTED: &[&str] = &[
     "file.open",
+    "file.new",
+    "file.save",
+    "file.save_as",
+    "file.save_copy_as",
     "file.exit",
     "tool.select",
     "tool.line",
@@ -150,6 +154,8 @@ struct App {
     draw: Option<Box<dyn tools::DrawTool>>,
     /// Thick lines where the active section cuts the model.
     cut_lines: Vec<Segment>,
+    /// Window title last sent (it changes when the model gets unsaved changes).
+    last_title: String,
     /// Tray state the model does not hold.
     active_tag: usize,
     current_material: Option<usize>,
@@ -199,6 +205,7 @@ impl App {
             modify: None,
             ctx_xf: glam::DMat4::IDENTITY,
             active_tag: 0,
+            last_title: String::new(),
             cut_lines: Vec::new(),
             current_material: None,
             current_component: None,
@@ -628,6 +635,19 @@ impl App {
                     }
                 }
             }
+        } else if id == "file.new" {
+            // SketchUp asks to save unsaved changes first (not implemented yet).
+            if let Some(rs) = frame.wgpu_render_state() {
+                let device = rs.device.clone();
+                let doc = Document::untitled();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
+                self.document = Some(doc);
+                self.selection.clear();
+                self.camera = Camera::from_spec(&self.spec.default_model.camera);
+                self.rebuild(&device);
+            }
+        } else if matches!(id, "file.save" | "file.save_as" | "file.save_copy_as") {
+            self.save(ctx, id);
         } else if id == "file.open" {
             let picked = rfd::FileDialog::new()
                 .add_filter("SketchUp Models", &["skp"])
@@ -635,6 +655,49 @@ impl App {
             if let (Some(path), Some(rs)) = (picked, frame.wgpu_render_state()) {
                 self.open(ctx, &rs.device, &path);
             }
+        }
+    }
+
+    /// File > Save, Save As, Save A Copy As. Files are written in the SketchUp 2017
+    /// format (the only one the writer produces); SketchUp 2026 opens them.
+    fn save(&mut self, ctx: &egui::Context, id: &str) {
+        let Some(doc) = self.document.as_mut() else {
+            return;
+        };
+        let path = if id == "file.save" && doc.has_file {
+            Some(doc.path.clone())
+        } else {
+            let name = doc.path.file_name().map_or_else(
+                || "Untitled.skp".into(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            rfd::FileDialog::new()
+                .add_filter("SketchUp Models", &["skp"])
+                .set_file_name(name)
+                .save_file()
+                .map(|p| {
+                    if p.extension().is_none() {
+                        p.with_extension("skp")
+                    } else {
+                        p
+                    }
+                })
+        };
+        let Some(path) = path else {
+            return;
+        };
+        let result = mt_kernel::export::to_skp(&doc.model)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => {
+                if id != "file.save_copy_as" {
+                    doc.mark_saved(&path);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
+                }
+                self.message = Some(format!("Saved {} (SketchUp 2017 format).", path.display()));
+            }
+            Err(e) => self.message = Some(format!("Could not save {}: {e}", path.display())),
         }
     }
 
@@ -1339,6 +1402,13 @@ impl eframe::App for App {
             return;
         };
         shell.capture_typing(ui.ctx());
+        if let Some(doc) = &self.document
+            && doc.title() != self.last_title
+        {
+            self.last_title = doc.title();
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(self.last_title.clone()));
+        }
         self.handle_shortcuts(ui.ctx(), frame, shell.is_typing());
 
         let info = self.entity_info();

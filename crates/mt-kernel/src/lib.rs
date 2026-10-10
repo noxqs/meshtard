@@ -6,6 +6,7 @@
 pub mod arrangement;
 pub mod bvh;
 pub mod entities;
+pub mod export;
 pub mod follow_me;
 pub mod geom;
 pub mod group;

@@ -63,10 +63,14 @@ fn definition(d: &Definition) -> Value {
         .edges
         .values()
         .map(|e| {
-            let v = json!({
+            let mut v = json!({
                 "id": e.id, "v1_id": e.v1_id, "v2_id": e.v2_id,
                 "soft": e.soft, "smooth": e.smooth, "hidden": e.hidden,
             });
+            // Only legacy files carry curve ids so far; absent means "not read".
+            if let Some(c) = e.curve_id {
+                v["curve_id"] = json!(c);
+            }
             (e.id.to_string(), v)
         })
         .collect();

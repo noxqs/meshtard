@@ -69,6 +69,9 @@ pub struct Edge {
     pub soft: bool,
     pub smooth: bool,
     pub hidden: bool,
+    /// The curve (arc, circle, polyline) this edge is a segment of. Legacy files only
+    /// so far.
+    pub curve_id: Option<EntityId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +176,8 @@ pub struct Instance {
     pub hidden: bool,
     /// Persistent id (VFF only).
     pub id: Option<EntityId>,
+    /// A group instance (legacy `CGroup`; VFF not read yet).
+    pub is_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -355,6 +360,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
                 soft: flags & 8 != 0,
                 smooth: flags & 16 != 0,
                 hidden: flags & 1 != 0,
+                curve_id: b.edge_curves.get(&id).copied(),
             };
             (id, e)
         })
@@ -393,6 +399,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
             material_id: i.material_id,
             hidden: i.hidden,
             id: i.id,
+            is_group: i.is_group,
         })
         .collect();
     Definition {

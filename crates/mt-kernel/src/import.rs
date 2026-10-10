@@ -89,6 +89,19 @@ pub fn from_skp(src: &skp::Model) -> Model {
         });
         maps.definitions.insert(id, key);
     }
+    // Definitions placed by a group instance are groups.
+    let group_refs = src
+        .definitions
+        .values()
+        .chain(std::iter::once(&src.root))
+        .flat_map(|d| &d.instances)
+        .filter(|i| i.is_group)
+        .filter_map(|i| i.ref_idx);
+    for r in group_refs {
+        if let Some(k) = maps.definitions.get(&r) {
+            model.definitions[*k].is_group = true;
+        }
+    }
     for (&id, d) in &src.definitions {
         let ents = entities(d, &maps);
         model.definitions[maps.definitions[&id]].entities = ents;
@@ -138,6 +151,8 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
         vertices.insert(id, ents.add_vertex(DVec3::new(v.x, v.y, v.z)));
     }
     let mut edges: HashMap<i64, EdgeId> = HashMap::new();
+    // One kernel curve per file curve (arc parameters are not read yet: polyline curves).
+    let mut curves: HashMap<i64, crate::entities::CurveId> = HashMap::new();
     for (&id, e) in &d.edges {
         let (Some(&a), Some(&b)) = (vertices.get(&e.v1_id), vertices.get(&e.v2_id)) else {
             continue;
@@ -150,7 +165,11 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             smooth: e.smooth,
             hidden: e.hidden,
             layer: None,
-            curve: None,
+            curve: e.curve_id.map(|c| {
+                *curves
+                    .entry(c)
+                    .or_insert_with(|| ents.curves.insert(crate::entities::Curve { arc: None }))
+            }),
         };
         edges.insert(id, ents.add_raw_edge(a, b, attrs));
     }

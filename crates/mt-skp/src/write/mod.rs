@@ -695,6 +695,10 @@ pub struct SkpBuilder {
     geometry_writer: Option<ArchiveWriter>,
     body: Body,
     root_items: usize,
+    /// Absolute coplanarity tolerance for faces; `None` is OpenSKP's
+    /// `max(span, 1) * 1e-6`.
+    plane_tolerance: Option<f64>,
+    allow_empty_root: bool,
     font_slot: Option<u32>,
 }
 
@@ -735,6 +739,8 @@ impl SkpBuilder {
             geometry_writer: None,
             body: Body::default(),
             root_items: 0,
+            plane_tolerance: None,
+            allow_empty_root: false,
             font_slot: None,
         }
     }
@@ -1150,7 +1156,7 @@ impl SkpBuilder {
         body: &mut Body,
         a: &FaceArgs<'_>,
     ) -> Result<(), WriteError> {
-        let plane = geom::plane_from_polygon(a.points)?;
+        let plane = geom::plane_from_polygon(a.points, self.plane_tolerance)?;
         let normal = [plane[0], plane[1], plane[2]];
         let front_matrix = a
             .front_uv
@@ -1220,7 +1226,7 @@ impl SkpBuilder {
         if !f.holes.is_empty()
             || !f.auto_triangulate
             || f.outer.len() == 3
-            || geom::is_coplanar(&f.outer)?
+            || geom::is_coplanar(&f.outer, self.plane_tolerance)?
         {
             return self.write_face(s, body, &args);
         }
@@ -1345,6 +1351,26 @@ impl SkpBuilder {
         Ok(())
     }
 
+    fn edge_op(
+        &mut self,
+        s: Section,
+        body: &mut Body,
+        a: Point3,
+        b: Point3,
+        flags: EdgeFlags,
+    ) -> Result<(), WriteError> {
+        check_points(&[a, b])?;
+        if a == b {
+            return Err(invalid("an edge needs two different points"));
+        }
+        if s == Section::Root {
+            self.ensure_geometry_writer()?;
+        }
+        self.writer(s)
+            .edges(&[a, b], body, false, flags, CurveKind::None);
+        Ok(())
+    }
+
     fn instance_op(
         &mut self,
         s: Section,
@@ -1441,9 +1467,33 @@ impl SkpBuilder {
         Ok(())
     }
 
+    /// A root-level plain edge (no curve; not part of OpenSKP's API). Faces
+    /// added later reuse it where their points match exactly, so writing edges
+    /// first sets each edge's flags individually.
+    pub fn add_edge(&mut self, a: Point3, b: Point3, flags: EdgeFlags) -> Result<(), WriteError> {
+        self.with_root(|s, body| s.edge_op(Section::Root, body, a, b, flags))?;
+        self.root_items += 1;
+        Ok(())
+    }
+
     /// Root-level polyline curve.
     pub fn add_polyline(&mut self, polyline: &Polyline) -> Result<(), WriteError> {
         self.with_root(|s, b| s.polyline_op(Section::Root, b, polyline))?;
+        self.root_items += 1;
+        Ok(())
+    }
+
+    /// Places an already finished definition as a group at the root (several
+    /// groups may share one definition, as SketchUp's group copies do until
+    /// edited). Not part of OpenSKP's API, which declares root groups inline.
+    pub fn add_group_instance(
+        &mut self,
+        def: &DefinitionId,
+        placement: &Placement,
+    ) -> Result<(), WriteError> {
+        self.with_root(|s, b| {
+            s.instance_op(Section::Root, b, InstanceKind::Group, def, placement)
+        })?;
         self.root_items += 1;
         Ok(())
     }
@@ -1611,6 +1661,24 @@ impl SkpBuilder {
         Ok(())
     }
 
+    /// Write a file with nothing at the root (after [`begin_root`](Self::begin_root)).
+    pub fn set_allow_empty_root(&mut self, allow: bool) {
+        self.allow_empty_root = allow;
+    }
+
+    /// A valid empty document: the bundled scaffold as is (the writer needs at
+    /// least one entity to splice in).
+    pub fn empty_document() -> Vec<u8> {
+        SCAFFOLD.to_vec()
+    }
+
+    /// Accept faces whose points are up to `tol` (inches) off their fitted
+    /// plane, instead of OpenSKP's tight relative tolerance. Faces from real
+    /// SketchUp models are often a few hundred-thousandths of an inch off.
+    pub fn set_plane_tolerance(&mut self, tol: f64) {
+        self.plane_tolerance = Some(tol);
+    }
+
     /// The finished file. Places any pending groups first.
     pub fn to_bytes(&mut self) -> Result<Vec<u8>, WriteError> {
         if !self.pending_groups.is_empty() {
@@ -1619,7 +1687,10 @@ impl SkpBuilder {
         let Some(geometry) = &self.geometry_writer else {
             return Err(invalid("no geometry added"));
         };
-        if self.root_items == 0 {
+        // OpenSKP also refuses an empty root; with `allow_empty_root` a file of
+        // only materials, layers or definitions is written (unverified in
+        // SketchUp; both readers accept it).
+        if self.root_items == 0 && !self.allow_empty_root {
             return Err(invalid("no geometry added"));
         }
         let material_shift = self.material_shift();
@@ -1728,6 +1799,12 @@ impl DefinitionBuilder<'_> {
     pub fn add_polyline(&mut self, polyline: &Polyline) -> Result<(), WriteError> {
         self.skp
             .polyline_op(Section::Definition, &mut self.body, polyline)
+    }
+
+    /// A plain edge (see [`SkpBuilder::add_edge`]).
+    pub fn add_edge(&mut self, a: Point3, b: Point3, flags: EdgeFlags) -> Result<(), WriteError> {
+        self.skp
+            .edge_op(Section::Definition, &mut self.body, a, b, flags)
     }
 
     /// Nests an instance of an already finished definition.

@@ -72,6 +72,8 @@ pub struct RawInstance {
     pub properties: BTreeMap<String, String>,
     pub attribute_dicts: AttrDicts,
     pub hidden: bool,
+    /// A group instance (legacy files only so far).
+    pub is_group: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +83,8 @@ pub struct GeometryBuilder {
     pub edges: BTreeMap<EntityId, (Option<EntityId>, Option<EntityId>)>,
     /// Display flag byte: +1 hidden, +8 soft, +16 smooth.
     pub edge_flags: BTreeMap<EntityId, i32>,
+    /// Edge id to the id of the curve (arc, circle, polyline) it belongs to.
+    pub edge_curves: BTreeMap<EntityId, EntityId>,
     pub faces: BTreeMap<EntityId, RawFace>,
     pub instances: Vec<RawInstance>,
     pub section_planes: Vec<SectionPlane>,
