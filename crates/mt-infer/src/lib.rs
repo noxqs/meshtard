@@ -1256,7 +1256,7 @@ mod tests {
         // Away from the axes (the green axis runs near the lower right corner).
         let i = infer(&mut e, &g, &b, at(DVec3::new(160.0, -60.0, 0.0)), None);
         assert_eq!(i.kind, Kind::Free);
-        assert!(i.point.z.abs() < 1e-6);        // The green axis, which also reaches behind the camera, is still inferred.
+        assert!(i.point.z.abs() < 1e-6); // The green axis, which also reaches behind the camera, is still inferred.
         let i = infer(&mut e, &g, &b, at(DVec3::new(0.0, 200.0, 0.0)), None);
         assert_eq!(i.kind, Kind::OnAxis(Axis::Green));
     }

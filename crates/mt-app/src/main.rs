@@ -316,7 +316,9 @@ impl App {
             let mut arcs: std::collections::BTreeMap<_, (mt_kernel::Arc, Vec<usize>)> =
                 std::collections::BTreeMap::new();
             for (i, owner) in self.scene.edge_owner.iter().enumerate() {
-                let Some(Owner::Edge(e)) = owner else { continue };
+                let Some(Owner::Edge(e)) = owner else {
+                    continue;
+                };
                 let Some(c) = ents.edges.get(*e).and_then(|e| e.attrs.curve) else {
                     continue;
                 };
@@ -1040,9 +1042,9 @@ impl App {
                 camera: &self.camera,
                 viewport: viewport_px,
             };
-            let inf =
-                self.engine
-                    .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now);
+            let inf = self
+                .engine
+                .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now);
             // The tool's shape hints (Square, Half Circle...), in its own space.
             draw.hint(&to_local(&inf, ctx_xf))
                 .map_or(inf, |h| to_world(&h, ctx_xf))

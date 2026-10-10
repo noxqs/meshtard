@@ -1135,20 +1135,56 @@ mod tests {
         let mut pp = PushPull::default();
         let p = DVec3::new(5.0, 5.0, 0.0);
         let n = ents.faces[f].normal;
-        let mut ctx = Ctx { ents: &mut ents, picked: Some(Owner::Face(f)), selection: &[], ctrl: false, eye: DVec3::ZERO };
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: Some(Owner::Face(f)),
+            selection: &[],
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
         pp.click(&mut ctx, &inf(p));
         assert!(pp.typed(&mut ctx, Some(&inf(p + n)), "4", LengthUnit::Inch));
         // A separate square, double-clicked: pulled by the same 4".
-        let q = [DVec3::new(20.0, 0.0, 0.0), DVec3::new(30.0, 0.0, 0.0), DVec3::new(30.0, 10.0, 0.0), DVec3::new(20.0, 10.0, 0.0)];
+        let q = [
+            DVec3::new(20.0, 0.0, 0.0),
+            DVec3::new(30.0, 0.0, 0.0),
+            DVec3::new(30.0, 10.0, 0.0),
+            DVec3::new(20.0, 10.0, 0.0),
+        ];
         for i in 0..4 {
             mt_kernel::add_line(&mut ents, q[i], q[(i + 1) % 4]);
         }
-        let g = ents.faces.keys().find(|&k| ents.faces[k].outer.coedges.len() == 4 && ents.loop_points(&ents.faces[k].outer).iter().all(|p| p.x >= 20.0)).unwrap();
+        let g = ents
+            .faces
+            .keys()
+            .find(|&k| {
+                ents.faces[k].outer.coedges.len() == 4
+                    && ents
+                        .loop_points(&ents.faces[k].outer)
+                        .iter()
+                        .all(|p| p.x >= 20.0)
+            })
+            .unwrap();
         let before = ents.faces.len();
-        let mut ctx = Ctx { ents: &mut ents, picked: Some(Owner::Face(g)), selection: &[], ctrl: false, eye: DVec3::ZERO };
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: Some(Owner::Face(g)),
+            selection: &[],
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
         assert!(pp.double_click(&mut ctx, &inf(DVec3::new(25.0, 5.0, 0.0))));
-        assert_eq!(ents.faces.len(), before + 5, "a free-standing face keeps its base: four sides and a top");
-        let top = ents.vertices.values().filter(|v| v.pos.x >= 20.0).map(|v| v.pos.z.abs()).fold(0.0, f64::max);
+        assert_eq!(
+            ents.faces.len(),
+            before + 5,
+            "a free-standing face keeps its base: four sides and a top"
+        );
+        let top = ents
+            .vertices
+            .values()
+            .filter(|v| v.pos.x >= 20.0)
+            .map(|v| v.pos.z.abs())
+            .fold(0.0, f64::max);
         assert!((top - 4.0).abs() < 1e-9);
 
         let mut mv = Transform::new(Kind::Move);

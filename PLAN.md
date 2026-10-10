@@ -137,7 +137,8 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Directions from the start point: red/green/blue axes, parallel and perpendicular to the reference edge, "from point" tracking; arrow-key locks (right red, left green, up blue, down parallel) and Shift lock.
 - [x] Typed lengths in the Measurements box (mm, cm, m, ", ', feet and inches; model units by default).
 - [x] Line tool (brought forward from M5 to exercise inference): chained segments, ends when a face closes, Esc cancels.
-- [ ] Not yet: center and intersection inferences, the hover delay SketchUp uses before acquiring points, inference on component geometry while editing inside it.
+- [x] Center and intersection inferences, 1 s hover delay before acquiring points, square / golden section / half circle / tangent hints.
+- [ ] Not yet: inference on component geometry while editing inside it.
 
 ### M5: Drawing tools
 - [x] Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arc (center), 2 Point Arc, 3 Point Arc, Pie, Eraser.
@@ -150,7 +151,9 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Undo/Redo (snapshot per edit, 100 steps).
 - [x] Push/Pull (Ctrl keeps the start face; pushing through cuts a hole), Move and Ctrl copy with `5x` / `/5` arrays, Rotate (+copy, typed angle), Scale (simplified, three points or typed `s` / `x,y,z`), Offset (typed distance, arcs stay arcs), Follow Me (select path, click profile), Intersect Faces with Model / with Selection.
 - [x] Tape Measure: parallel guide from an edge, guide point otherwise; guides imported from `.skp`, used by inference; Edit > Delete Guides.
-- [ ] Not yet: Protractor, Dimensions, Text; Scale grips; Move/Rotate showing the moved geometry live (now an outline); Offset trimming partial collapses; Push/Pull double-click repeat; Ctrl toggling copy mid-operation.
+- [x] Protractor (angle or slope guides), Dimensions (linear, radius, diameter), Text (leader and screen text), saved to .skp.
+- [x] Push/Pull double-click repeats the last distance; Ctrl toggles copy / new faces.
+- [ ] Not yet: Scale grips; Move/Rotate showing the moved geometry live (now an outline); Offset trimming partial collapses; Push/Pull double-click repeat; Ctrl toggling copy mid-operation.
 - [ ] CUDA: intersection and solid tools (mt-cuda in progress on the Linux machine).
 
 ### M7: Scene structure
@@ -161,14 +164,15 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Face styles (Wireframe, Hidden Line, Shaded, Shaded With Textures, Monochrome) and X-ray.
 - [x] Components panel: In Model list with instance counts, place instances, edit name and description, Purge Unused.
 - [x] Large models build their pick index on the GPU (`--features cuda`, from 20k triangles; threshold being measured).
-- [ ] Left for later: textures (Shaded With Textures equals Shaded), section fill, scene transitions, component axes dialog and gluing, tag folders and dashes, Statistics tab.
+- [x] Textures: imported with their UV mapping (checked against OpenSKP), drawn in Shaded With Textures, saved back.
+- [ ] Left for later: section fill, scene transitions, component axes dialog and gluing, tag folders and dashes, Statistics tab.
 
 ### M8: `.skp` writing
 - [x] Writer: Rust port of OpenSKP's legacy v17 (SketchUp 2017) writer, byte-identical to OpenSKP on 17 models; extended with plain edges (per-edge soft/smooth/hidden), root group instances (shared group definitions), a plane tolerance for real models and empty-root files.
 - [x] File > New, Save (Ctrl+S), Save As, Save A Copy As; unsaved changes marked in the title.
 - [x] Every corpus model saves and reopens with identical counts in both our reader and OpenSKP's.
 - [ ] Not saved yet: the camera view (files open in Iso), scenes, styles and shadow settings, units, active section, edge tags, guides and section planes inside components; arcs and circles reopen as polyline curves, not radius-editable arcs.
-- [ ] Not yet: "Save changes?" prompt on New, Open and Exit.
+- [x] "Save changes?" prompt on New, Open, dropped files and closing.
 - [ ] Check in real SketchUp 2026 that saved files open correctly (during the trial).
 - [ ] VFF (2021+) writing: no reference implementation; needs own research against real SketchUp.
 
