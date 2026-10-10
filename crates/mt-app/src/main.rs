@@ -739,7 +739,8 @@ impl App {
                     let plain = !s.ctrl && !s.alt;
                     !(typing && plain)
                         && i.key_pressed(*key)
-                        && m.ctrl == s.ctrl
+                        // "Ctrl" in the keymap is Cmd on macOS (egui's `command`).
+                        && m.command == s.ctrl
                         && m.shift == s.shift
                         && m.alt == s.alt
                 })

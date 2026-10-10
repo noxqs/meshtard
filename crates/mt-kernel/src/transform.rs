@@ -341,7 +341,9 @@ fn fold(rec: &FaceRecord, fit: &Plane, out: &mut Vec<Desired>, folds: &mut Vec<(
     let idx = earcutr::earcut(&flat, &starts, 2).unwrap_or_default();
     // Triangles with their oriented plane.
     let tris: Vec<([usize; 3], Plane)> = idx
-        .as_chunks::<3>().0.iter()
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter_map(|t| {
             let (a, b, c) = (pts[t[0]], pts[t[1]], pts[t[2]]);
             let n = (b - a).cross(c - a);
