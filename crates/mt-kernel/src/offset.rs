@@ -286,7 +286,7 @@ fn offset_loop(
     let dirs: Vec<DVec2> = (0..n)
         .map(|k| (pts[(k + 1) % n] - pts[k]).normalize_or_zero())
         .collect();
-    if dirs.iter().any(|d| *d == DVec2::ZERO) {
+    if dirs.contains(&DVec2::ZERO) {
         return None;
     }
     // The face is on the left of every loop edge (outer loop counter-clockwise, holes

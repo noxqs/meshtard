@@ -6,8 +6,8 @@ use glam::DVec3;
 
 use crate::TOL;
 use crate::arrangement::interior_point;
-use crate::entities::{EdgeId, Entities, FaceId, VertexId};
-use crate::geom::{Plane, point_in_polygon, point_segment};
+use crate::entities::{CurveId, EdgeId, Entities, FaceId, VertexId};
+use crate::geom::{Plane, point_in_polygon, point_segment, signed_area2};
 use crate::ops::{add_line, erase_edge};
 
 /// Joints sharper than this keep hard edges; gentler ones are softened and smoothed.
@@ -26,7 +26,8 @@ const SMOOTH_ANGLE: f64 = 30.0;
 ///
 /// Each profile point moves along a path segment's direction until it meets the miter
 /// plane of the next joint (the plane bisecting the two segments), so side faces are
-/// planar. An open path ends with a cap perpendicular to its last segment. Returns
+/// planar. An open path ends with a cap perpendicular to its last segment. The result's
+/// faces (profile included) are turned to face outward, consistently. Returns
 /// nothing and changes nothing when the path is not a connected chain, doubles back
 /// on itself, or runs parallel to the profile's plane at its start.
 ///
@@ -88,10 +89,13 @@ pub fn follow_me(ents: &mut Entities, profile: FaceId, path: &[EdgeId]) -> Vec<F
                 .collect()
         })
         .collect();
-    let profile_edges: Vec<EdgeId> = face
+    let mut profile_curves: Vec<CurveId> = face
         .loops()
-        .flat_map(|l| l.coedges.iter().map(|c| c.edge))
+        .flat_map(|l| &l.coedges)
+        .filter_map(|c| ents.edges[c.edge].attrs.curve)
         .collect();
+    profile_curves.sort();
+    profile_curves.dedup();
 
     // Sections: the profile carried from plane to plane along the segments.
     let project = |pts: &[Vec<DVec3>], d: DVec3, plane: &Plane| -> Vec<Vec<DVec3>> {
@@ -173,53 +177,79 @@ pub fn follow_me(ents: &mut Entities, profile: FaceId, path: &[EdgeId]) -> Vec<F
         }
     }
 
-    // Faces auto-face made inside the solid: across each internal joint, and inside the
-    // holes of the end cap.
+    // Auto-face also fills loops that are not part of the sweep (across each joint, in
+    // the end cap's holes, rings of edges swept from one profile vertex): keep only new
+    // faces inside a side quad or the end cap.
+    let mut wanted: Vec<(Plane, Vec<Vec<DVec3>>)> = Vec::new();
+    for i in 0..n_seg {
+        for (l0, l1) in sections[i].iter().zip(&sections[i + 1]) {
+            let m = l0.len();
+            for k in 0..m {
+                let quad = vec![l0[k], l0[(k + 1) % m], l1[(k + 1) % m], l1[k]];
+                if let Some(plane) = Plane::from_polygon(&quad) {
+                    wanted.push((plane, vec![quad]));
+                }
+            }
+        }
+    }
+    if !closed {
+        wanted.push((planes[n_seg], sections[n_seg].clone()));
+    }
     let new_faces: Vec<FaceId> = ents
         .faces
         .keys()
         .filter(|f| !faces_before.contains(f))
         .collect();
     for f in new_faces {
-        let plane = ents.face_plane(f);
-        let internal = (0..=n_seg).any(|i| {
-            let is_joint = if closed {
-                i < n_seg
-            } else {
-                i > 0 && i < n_seg
-            };
-            is_joint && plane.coincides(&planes[i])
-        });
-        let in_cap_hole = !closed
-            && plane.coincides(&planes[n_seg])
-            && !inside_section(&planes[n_seg], &sections[n_seg], face_sample(ents, f));
-        if internal || in_cap_hole {
+        let sample = face_sample(ents, f);
+        let keep = wanted
+            .iter()
+            .any(|(plane, region)| plane.contains(sample) && inside_section(plane, region, sample));
+        if !keep {
             ents.remove_face(f);
         }
     }
-    if closed && ents.faces.contains_key(profile) {
+    // A closed sweep uses the profile up: its face goes, and so do its edges unless the
+    // sweep runs along them (erasing merges the side faces they divide).
+    if closed {
         ents.remove_face(profile);
-        for e in profile_edges {
-            if ents.edges.get(e).is_some_and(|x| x.faces.is_empty()) {
-                let curve = ents.edges[e].attrs.curve;
-                erase_edge(ents, e);
-                if let Some(c) = curve
-                    && ents.curve_edges(c).is_empty()
-                {
-                    ents.curves.remove(c);
+        let mut sweep: Vec<(DVec3, DVec3)> = Vec::new();
+        for i in 0..n_seg {
+            for (l0, l1) in sections[i].iter().zip(&sections[i + 1]) {
+                for k in 0..l0.len() {
+                    sweep.push((l0[k], l0[(k + 1) % l0.len()]));
+                    sweep.push((l0[k], l1[k]));
                 }
+            }
+        }
+        let outline: Vec<(DVec3, DVec3)> = loops
+            .iter()
+            .flat_map(|l| (0..l.len()).map(move |k| (l[k], l[(k + 1) % l.len()])))
+            .collect();
+        let leftover: Vec<EdgeId> = ents
+            .edges
+            .iter()
+            .filter(|(_, e)| {
+                let (p, q) = (ents.pos(e.start), ents.pos(e.end));
+                on_any(p, q, &outline) && !on_any(p, q, &sweep)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for e in leftover {
+            erase_edge(ents, e);
+        }
+        for c in profile_curves {
+            if ents.curve_edges(c).is_empty() {
+                ents.curves.remove(c);
             }
         }
     }
 
-    for (a, b) in soft {
+    for seg in soft {
         let ids: Vec<EdgeId> = ents
             .edges
             .iter()
-            .filter(|(_, e)| {
-                point_segment(ents.pos(e.start), a, b).0 <= TOL
-                    && point_segment(ents.pos(e.end), a, b).0 <= TOL
-            })
+            .filter(|(_, e)| on_any(ents.pos(e.start), ents.pos(e.end), &[seg]))
             .map(|(id, _)| id)
             .collect();
         for id in ids {
@@ -229,10 +259,84 @@ pub fn follow_me(ents: &mut Entities, profile: FaceId, path: &[EdgeId]) -> Vec<F
         }
     }
 
-    ents.faces
+    let new: Vec<FaceId> = ents
+        .faces
         .keys()
         .filter(|f| !faces_before.contains(f))
-        .collect()
+        .collect();
+    let mut solid = new.clone();
+    if ents.faces.contains_key(profile) {
+        solid.insert(0, profile);
+    }
+    orient_outward(ents, &solid);
+    new
+}
+
+/// Orients `faces` consistently (a shared edge runs opposite ways in its two faces),
+/// starting from the first face, then turns them all over if they face inward
+/// (negative enclosed volume).
+fn orient_outward(ents: &mut Entities, faces: &[FaceId]) {
+    let set: HashSet<FaceId> = faces.iter().copied().collect();
+    let mut done: HashSet<FaceId> = HashSet::new();
+    let use_of = |ents: &Entities, f: FaceId, e: EdgeId| {
+        ents.faces[f]
+            .loops()
+            .flat_map(|l| &l.coedges)
+            .find(|c| c.edge == e)
+            .map(|c| c.reversed)
+    };
+    for &seed in faces {
+        if !done.insert(seed) {
+            continue;
+        }
+        let mut stack = vec![seed];
+        while let Some(f) = stack.pop() {
+            let edges: Vec<EdgeId> = ents.faces[f]
+                .loops()
+                .flat_map(|l| l.coedges.iter().map(|c| c.edge))
+                .collect();
+            for e in edges {
+                let [a, b] = ents.edges[e].faces[..] else {
+                    continue; // free or non-manifold edge
+                };
+                let g = if a == f { b } else { a };
+                if !set.contains(&g) || done.contains(&g) {
+                    continue;
+                }
+                if use_of(ents, f, e) == use_of(ents, g, e) {
+                    flip_face(ents, g);
+                }
+                done.insert(g);
+                stack.push(g);
+            }
+        }
+    }
+    let volume: f64 = faces
+        .iter()
+        .map(|&f| {
+            let plane = ents.face_plane(f);
+            let (outer, holes) = ents.face_polygons(f, &plane);
+            let area = signed_area2(&outer) + holes.iter().map(|h| signed_area2(h)).sum::<f64>();
+            area * plane.d
+        })
+        .sum();
+    if volume < 0.0 {
+        for &f in faces {
+            flip_face(ents, f);
+        }
+    }
+}
+
+/// Turns a face over: loops reversed, normal negated.
+fn flip_face(ents: &mut Entities, f: FaceId) {
+    let face = &mut ents.faces[f];
+    face.normal = -face.normal;
+    for l in face.loops_mut() {
+        l.coedges.reverse();
+        for c in &mut l.coedges {
+            c.reversed = !c.reversed;
+        }
+    }
 }
 
 /// Ordered points of a path given as connected edges, and whether it is closed.
@@ -312,4 +416,11 @@ fn inside_section(plane: &Plane, section: &[Vec<DVec3>], p: DVec3) -> bool {
     let q = plane.project(p);
     point_in_polygon(q, &proj(&section[0]))
         && !section[1..].iter().any(|h| point_in_polygon(q, &proj(h)))
+}
+
+/// Whether the segment `p-q` lies on one of `segments`.
+fn on_any(p: DVec3, q: DVec3, segments: &[(DVec3, DVec3)]) -> bool {
+    segments
+        .iter()
+        .any(|&(a, b)| point_segment(p, a, b).0 <= TOL && point_segment(q, a, b).0 <= TOL)
 }

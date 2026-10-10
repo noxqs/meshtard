@@ -147,8 +147,11 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] Not yet: square/golden-section and tangent/half-circle inferences, rectangle orientation on tilted faces as SketchUp does it, Eraser drag preview highlighting in SketchUp's style, undo.
 
 ### M6: Modeling tools
-- Push/Pull, Move/Copy (arrays), Rotate, Scale, Offset, Follow Me, Tape Measure, Protractor, Dimensions, Text, Intersect Faces.
-- CUDA: intersection and solid tools.
+- [x] Undo/Redo (snapshot per edit, 100 steps).
+- [x] Push/Pull (Ctrl keeps the start face; pushing through cuts a hole), Move and Ctrl copy with `5x` / `/5` arrays, Rotate (+copy, typed angle), Scale (simplified, three points or typed `s` / `x,y,z`), Offset (typed distance, arcs stay arcs), Follow Me (select path, click profile), Intersect Faces with Model / with Selection.
+- [x] Tape Measure: parallel guide from an edge, guide point otherwise; guides imported from `.skp`, used by inference; Edit > Delete Guides.
+- [ ] Not yet: Protractor, Dimensions, Text; Scale grips; Move/Rotate showing the moved geometry live (now an outline); Offset trimming partial collapses; Push/Pull double-click repeat; Ctrl toggling copy mid-operation.
+- [ ] CUDA: intersection and solid tools (mt-cuda in progress on the Linux machine).
 
 ### M7: Scene structure
 - Groups and components (edit in place, make unique), Outliner, Tags, Materials, Styles, Scenes, section planes, shadows.

@@ -50,3 +50,12 @@
 | Draw | Typed values per tool (`w,h`, radius, `24s`, bulge, angle) | unverified | |
 | Eraser | Whole curve erased from one segment; Shift hide, Ctrl soften | unverified | |
 | Select | One click on a curve segment selects the curve | unverified | |
+| Edit | Undo/Redo | unverified | snapshot per edit, limit 100 (SketchUp's limit not checked) |
+| Tape Measure | Parallel guide from edge, guide point from point | unverified | guide lines drawn dashed gray, infinite |
+| Push/Pull | Extrude, Ctrl new faces, cut through | unverified | |
+| Move | Stretch connected geometry, Ctrl copy, `5x` and `/5` arrays | unverified | preview is an outline; SketchUp moves the geometry live |
+| Rotate | Center, start, end; typed angle; Ctrl copy | unverified | protractor plane from the three points, not SketchUp's protractor orientation |
+| Scale | Three points or typed factor | differs | SketchUp uses bounding-box grips |
+| Offset | Inward/outward, arcs stay arcs | differs | partial collapse cancels the whole offset; SketchUp trims |
+| Follow Me | Select path, click profile; soft joints under 30° | unverified | |
+| Intersect Faces | With Model, With Selection | unverified | With Context missing |
