@@ -1,4 +1,4 @@
-//! SketchUp `.skp` reader.
+//! SketchUp `.skp` reader, and a legacy-format (v17) writer in [`write`].
 //!
 //! A Rust port of the reader in [OpenSKP](https://github.com/iamahsanmehmood/openskp)
 //! (MIT, Copyright (c) 2024-2026 Ahsan Mehmood). Both container formats are supported:
@@ -18,10 +18,12 @@ mod pages;
 mod raw;
 mod tlv;
 mod vff;
+pub mod write;
 mod xml;
 
 pub use model::*;
 pub use raw::CoEdge;
+pub use write::{DefinitionBuilder, SkpBuilder, WriteError};
 
 use std::path::Path;
 
