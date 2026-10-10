@@ -19,9 +19,16 @@ pub struct Document {
     /// Unit for typed and displayed lengths.
     pub units: mt_infer::units::LengthUnit,
     /// The model and edit context before each edit, most recent last (Edit > Undo).
-    undo: Vec<(Model, Vec<usize>)>,
+    undo: Vec<(Model, Vec<usize>, u64)>,
     /// Undone states, most recent last (Edit > Redo).
-    redo: Vec<(Model, Vec<usize>)>,
+    redo: Vec<(Model, Vec<usize>, u64)>,
+    /// Id of the current model state, and of the last saved one (unsaved changes when
+    /// they differ).
+    state: u64,
+    saved_state: u64,
+    next_state: u64,
+    /// The document has a file of its own (File > Save writes there without asking).
+    pub has_file: bool,
     /// The group or component open for editing: instance indices from the root down
     /// (empty: editing the model root).
     pub context: Vec<usize>,
@@ -103,6 +110,10 @@ impl Document {
             undo: Vec::new(),
             redo: Vec::new(),
             context: Vec::new(),
+            state: 0,
+            saved_state: 0,
+            next_state: 1,
+            has_file: true,
         })
     }
 
@@ -116,7 +127,23 @@ impl Document {
             undo: Vec::new(),
             redo: Vec::new(),
             context: Vec::new(),
+            state: 0,
+            saved_state: 0,
+            next_state: 1,
+            has_file: false,
         }
+    }
+
+    /// Whether the model changed since it was opened or last saved.
+    pub fn is_modified(&self) -> bool {
+        self.state != self.saved_state
+    }
+
+    /// Records that the current state was saved to `path`.
+    pub fn mark_saved(&mut self, path: &Path) {
+        self.path = path.to_owned();
+        self.has_file = true;
+        self.saved_state = self.state;
     }
 
     /// Definitions along a context path; `None` if the path is no longer valid.
@@ -189,7 +216,7 @@ impl Document {
     /// Like `edit`, with the rest of the model too. The active context's entities are
     /// taken out of the model while `f` runs (the model holds an empty one there).
     pub fn edit_model(&mut self, f: impl FnOnce(&mut Model, &mut Entities) -> bool) -> bool {
-        let before = (self.model.clone(), self.context.clone());
+        let before = (self.model.clone(), self.context.clone(), self.state);
         let def =
             Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied());
         let mut ents = match def {
@@ -208,6 +235,8 @@ impl Document {
                 self.undo.remove(0);
             }
             self.redo.clear();
+            self.state = self.next_state;
+            self.next_state += 1;
             self.fix_context();
         }
         changed
@@ -222,12 +251,13 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some((model, context)) = self.undo.pop() else {
+        let Some((model, context, state)) = self.undo.pop() else {
             return false;
         };
         let now = (
             std::mem::replace(&mut self.model, model),
             std::mem::replace(&mut self.context, context),
+            std::mem::replace(&mut self.state, state),
         );
         self.redo.push(now);
         self.fix_context();
@@ -235,12 +265,13 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some((model, context)) = self.redo.pop() else {
+        let Some((model, context, state)) = self.redo.pop() else {
             return false;
         };
         let now = (
             std::mem::replace(&mut self.model, model),
             std::mem::replace(&mut self.context, context),
+            std::mem::replace(&mut self.state, state),
         );
         self.undo.push(now);
         self.fix_context();
