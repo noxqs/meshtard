@@ -166,7 +166,7 @@ fn entity_info(
 }
 
 /// Small flat "x" button.
-fn close_button(
+pub(crate) fn close_button(
     ui: &mut egui::Ui,
     rect: Rect,
     id: impl std::hash::Hash + std::fmt::Debug,

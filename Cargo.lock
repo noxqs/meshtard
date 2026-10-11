@@ -1502,6 +1502,7 @@ dependencies = [
  "mt-ui",
  "muda",
  "rfd",
+ "toml",
  "winresource",
 ]
 
@@ -1574,6 +1575,8 @@ dependencies = [
  "eframe",
  "egui",
  "mt-spec",
+ "serde",
+ "toml",
 ]
 
 [[package]]

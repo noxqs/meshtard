@@ -78,6 +78,25 @@
 //! filtering), [`OutlinerNode::label`], [`time_label`], [`date_label`],
 //! [`instances_label`], [`component_edit`].
 //!
+//! # Toolbars
+//!
+//! Toolbars from `spec/toolbars.toml` start where the spec docks them. Dragging a
+//! docked toolbar's grip (the dotted strip at its start) moves it: an outline shows
+//! where it would land; dropped over or just beyond a dock's rows, or near a bare
+//! window edge (over the menu bar counts as top, over the status bar as bottom), it
+//! docks there, joining a row or starting a new one; elsewhere it becomes a floating
+//! window with a title bar (drag it to move or dock it again, double-click it to dock
+//! it where it was, its close button hides it). Left and right docks stand toolbars
+//! upright in `columns` buttons per line; top and bottom docks lay them flat. The
+//! viewport gets what the docks leave. View > Toolbars... (`view.toolbars`) and a
+//! right-click on a grip or title bar list the toolbars with check boxes.
+//!
+//! The app can save and restore the arrangement: [`Shell::toolbar_layout`] (a
+//! serde-serializable [`ToolbarLayout`]) and [`Shell::set_toolbar_layout`];
+//! [`Event::ToolbarLayoutChanged`] tells when the user changed it. Also
+//! [`Shell::toolbars`], [`Shell::set_toolbar_visible`], [`Shell::reset_toolbar_layout`].
+//! The pure layout logic is in [`dock`].
+//!
 //! # Measurements box
 //!
 //! As in SketchUp, typing while the viewport has focus goes into the Measurements box:
@@ -94,6 +113,7 @@
 //! [`Shell::show`] applies `spec/ui_theme.toml` to the context on its first call
 //! (see [`apply_theme`]); call it yourself earlier if other windows should use it.
 
+pub mod dock;
 pub mod icons;
 mod menu;
 mod panels;
@@ -107,6 +127,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use mt_spec::Spec;
 
+pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use theme::apply as apply_theme;
 pub use tray_data::{
     ComponentRow, FaceStyle, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow, SelectMode,
@@ -222,6 +243,21 @@ pub enum Event {
     StyleChanged(StyleSettings),
     /// Shadows: any setting changed; the complete new settings.
     ShadowsChanged(ShadowSettings),
+
+    /// Toolbars: the user docked, floated, moved, closed or showed a toolbar. Save
+    /// [`Shell::toolbar_layout`] if the app keeps the layout between runs.
+    ToolbarLayoutChanged,
+}
+
+/// A toolbar as listed by [`Shell::toolbars`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolbarInfo {
+    /// Toolbar id from `spec/toolbars.toml`.
+    pub id: String,
+    /// Title shown in View > Toolbars.
+    pub name: String,
+    pub visible: bool,
+    pub floating: bool,
 }
 
 /// Height of the scene tab strip above the viewport.
@@ -252,6 +288,19 @@ pub struct Shell {
     /// What the tray panels and scene tabs show, from [`Shell::set_tray_data`].
     data: TrayData,
     tray_ui: panels::TrayUi,
+    /// Where the toolbars are now, and the spec's default workspace.
+    toolbar_layout: ToolbarLayout,
+    toolbar_defaults: ToolbarLayout,
+    /// Toolbar ids and names in spec order.
+    toolbar_names: Vec<(String, String)>,
+    /// Docked toolbar lines as drawn this frame, and the window between menu bar and
+    /// status bar: where drops dock.
+    dock_lines: Vec<dock::DockLine>,
+    dock_area: egui::Rect,
+    toolbar_drag: Option<toolbar::ToolbarDrag>,
+    /// Where floating toolbars were docked before, for double-click on the title.
+    last_dock: HashMap<String, ToolbarPosition>,
+    toolbars_dialog_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +313,7 @@ struct PanelState {
 
 impl Shell {
     pub fn new(spec: &Spec) -> Self {
+        let toolbar_defaults = ToolbarLayout::from_spec(&spec.toolbars.toolbar);
         Self {
             native_menu: false,
             theme: theme::Theme32::from_spec(&spec.ui_theme),
@@ -289,6 +339,19 @@ impl Shell {
             pending: Vec::new(),
             data: TrayData::default(),
             tray_ui: panels::TrayUi::default(),
+            toolbar_layout: toolbar_defaults.clone(),
+            toolbar_defaults,
+            toolbar_names: spec
+                .toolbars
+                .toolbar
+                .iter()
+                .map(|t| (t.id.clone(), t.name.clone()))
+                .collect(),
+            dock_lines: Vec::new(),
+            dock_area: egui::Rect::NOTHING,
+            toolbar_drag: None,
+            last_dock: HashMap::new(),
+            toolbars_dialog_open: false,
         }
     }
 
@@ -320,9 +383,11 @@ impl Shell {
                 .show(ui, |ui| self.menu_bar(ui, frame));
         }
 
-        self.top_toolbars(ui, frame);
+        let below_menu = ui.available_rect_before_wrap();
+        self.dock_lines.clear();
+        self.docked_toolbars(ui, frame, DockEdge::Top);
 
-        egui::Panel::bottom("mt_ui_status_bar")
+        let status = egui::Panel::bottom("mt_ui_status_bar")
             .frame(
                 egui::Frame::NONE
                     .fill(t.status_bar)
@@ -332,8 +397,16 @@ impl Shell {
             .exact_size(t.sizes.status_bar_height)
             .show_separator_line(false)
             .show(ui, |ui| self.status_bar(ui, frame));
+        self.dock_area = egui::Rect::from_min_max(
+            below_menu.min,
+            egui::pos2(below_menu.max.x, status.response.rect.top()),
+        );
 
-        self.left_toolbars(ui, frame);
+        // Toolbars dock outside the tray, the status bar outside the toolbars.
+        // Unverified for SketchUp 2026.
+        self.docked_toolbars(ui, frame, DockEdge::Bottom);
+        self.docked_toolbars(ui, frame, DockEdge::Left);
+        self.docked_toolbars(ui, frame, DockEdge::Right);
 
         if self.tray_visible {
             egui::Panel::right("mt_ui_tray")
@@ -356,6 +429,10 @@ impl Shell {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, viewport);
+
+        self.floating_toolbars(ui.ctx(), frame);
+        self.toolbars_dialog(ui.ctx());
+        self.toolbar_drag(ui.ctx(), frame);
 
         std::mem::take(&mut self.pending)
     }
@@ -519,11 +596,71 @@ impl Shell {
             .any(|p| p.id == id && p.shown && p.expanded)
     }
 
+    /// Where the toolbars are: docked rows and floating positions, and which are
+    /// shown. Save it (it is serde-serializable) and restore it with
+    /// [`Shell::set_toolbar_layout`]; [`Event::ToolbarLayoutChanged`] tells when it
+    /// changed. (eframe's persistence feature is off in this workspace, so the shell
+    /// doesn't store it itself.)
+    pub fn toolbar_layout(&self) -> &ToolbarLayout {
+        &self.toolbar_layout
+    }
+
+    /// Restores a layout from [`Shell::toolbar_layout`]. Toolbars it doesn't mention
+    /// keep their default place; ids no longer in the spec are ignored. Floating
+    /// positions outside the window are pulled inside when drawn.
+    pub fn set_toolbar_layout(&mut self, layout: ToolbarLayout) {
+        self.toolbar_layout = ToolbarLayout::merged(&self.toolbar_defaults, &layout);
+        self.toolbar_drag = None;
+    }
+
+    /// Puts every toolbar back in its default place (`spec/toolbars.toml`).
+    pub fn reset_toolbar_layout(&mut self) {
+        self.toolbar_layout = self.toolbar_defaults.clone();
+        self.toolbar_drag = None;
+    }
+
+    /// All toolbars in spec order, with whether they are shown and floating; what
+    /// View > Toolbars lists.
+    pub fn toolbars(&self) -> Vec<ToolbarInfo> {
+        self.toolbar_names
+            .iter()
+            .map(|(id, name)| {
+                let place = self.toolbar_layout.get(id);
+                ToolbarInfo {
+                    id: id.clone(),
+                    name: name.clone(),
+                    visible: place.is_some_and(|p| p.visible),
+                    floating: place
+                        .is_some_and(|p| matches!(p.position, ToolbarPosition::Floating { .. })),
+                }
+            })
+            .collect()
+    }
+
+    /// Shows or hides toolbar `id` in its last place. Returns false if there is no
+    /// such toolbar.
+    pub fn set_toolbar_visible(&mut self, id: &str, visible: bool) -> bool {
+        self.toolbar_layout.set_visible(id, visible)
+    }
+
+    /// True while the user drags a toolbar (the viewport should ignore the mouse).
+    pub fn is_dragging_toolbar(&self) -> bool {
+        self.toolbar_drag.is_some()
+    }
+
+    /// Opens the View > Toolbars... dialog (the shell does this itself for the
+    /// `view.toolbars` command).
+    pub fn open_toolbars_dialog(&mut self) {
+        self.toolbars_dialog_open = true;
+    }
+
     /// Records a command chosen in the menu bar or a toolbar, and handles the ones
     /// that only change the shell (tray panels).
     fn command(&mut self, id: &str) {
         if id == "window.tray_show" {
             self.tray_visible = !self.tray_visible;
+        } else if id == "view.toolbars" {
+            self.toolbars_dialog_open = true;
         } else {
             self.open_panel(id);
         }
@@ -675,6 +812,99 @@ mod tests {
             out.textures_delta.clear();
         }
         assert!(events.is_empty(), "no events without user input");
+    }
+
+    /// Drags the Large Tool Set by its grip into the viewport (it floats), then by its
+    /// title bar to the bottom edge (it docks there).
+    #[test]
+    fn drag_toolbar_floats_and_docks() {
+        let spec = Spec::builtin().unwrap();
+        let mut s = Shell::new(&spec);
+        let info = EntityInfo::no_selection();
+        let frame = Frame {
+            spec: &spec,
+            active_tool: "tool.select",
+            status: "",
+            measurements_label: "Measurements",
+            measurements_value: "",
+            is_enabled: &|_| true,
+            is_checked: &|_| false,
+            entity_info: &info,
+        };
+        let ctx = egui::Context::default();
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut run = |s: &mut Shell, input: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                events: input,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                events.borrow_mut().extend(s.show(ui, &frame, |_| {}));
+            });
+            out.textures_delta.clear();
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let drag = |run: &mut dyn FnMut(&mut Shell, Vec<egui::Event>),
+                    s: &mut Shell,
+                    from: egui::Pos2,
+                    to: egui::Pos2| {
+            run(s, vec![egui::Event::PointerMoved(from)]);
+            run(s, vec![button(from, true)]);
+            for i in 1..=5 {
+                let p = from + (to - from) * (i as f32 / 5.0);
+                run(s, vec![egui::Event::PointerMoved(p)]);
+            }
+            run(s, vec![button(to, false)]);
+            run(s, vec![]);
+        };
+        run(&mut s, vec![]);
+        let lts = s
+            .dock_lines
+            .iter()
+            .flat_map(|l| &l.items)
+            .find(|(id, _)| id == "large_tool_set")
+            .map(|(_, r)| *r)
+            .expect("docked left");
+        let grip = egui::pos2(lts.center().x, lts.top() + 5.0);
+        drag(&mut run, &mut s, grip, egui::pos2(600.0, 300.0));
+        let pos = match s.toolbar_layout().get("large_tool_set").unwrap().position {
+            ToolbarPosition::Floating { x, y } => egui::pos2(x, y),
+            p => panic!("not floating: {p:?}"),
+        };
+        assert!(events.borrow().contains(&Event::ToolbarLayoutChanged));
+        assert!(s.toolbars()[1].floating);
+
+        drag(
+            &mut run,
+            &mut s,
+            pos + egui::vec2(20.0, 8.0),
+            egui::pos2(500.0, 790.0),
+        );
+        assert_eq!(
+            s.toolbar_layout().get("large_tool_set").unwrap().position,
+            ToolbarPosition::Docked {
+                edge: DockEdge::Bottom,
+                row: 0,
+                index: 0
+            }
+        );
+        // Restore the default layout through the public API.
+        let saved = s.toolbar_layout().clone();
+        s.reset_toolbar_layout();
+        assert_eq!(s.toolbar_layout(), &s.toolbar_defaults);
+        s.set_toolbar_layout(saved.clone());
+        assert_eq!(s.toolbar_layout(), &saved);
+        assert!(s.set_toolbar_visible("getting_started", false));
+        assert!(!s.toolbars()[0].visible);
     }
 
     #[test]

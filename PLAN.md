@@ -131,7 +131,8 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Selection: click, Ctrl/Shift/Ctrl+Shift, window vs crossing, double/triple click, highlight; Select All, Select None, Delete.
 - [x] CPU BVH for picking.
 - [ ] CUDA triangulation and BVH build: to be done on the user's Linux machine with an NVIDIA GPU (Remote Control session).
-- [ ] Not yet: dockable toolbars; Environments and Instructor panels.
+- [x] Dockable toolbars: drag by the grip to any edge or float; View > Toolbars... and right-click show or hide them; the layout is saved between runs.
+- [ ] Not yet: Environments and Instructor panels.
 
 ### M4: Inference engine
 - [x] `mt-infer`: endpoint, midpoint, origin, on edge, on axis, on face.

@@ -10,6 +10,7 @@ mod modify;
 mod nav;
 mod overlay;
 mod selection;
+mod settings;
 mod splash;
 mod tools;
 mod tray;
@@ -238,6 +239,9 @@ impl App {
                 let mut shell = mt_ui::Shell::new(&spec);
                 #[cfg(target_os = "macos")]
                 shell.set_native_menu(true);
+                if let Some(layout) = settings::load_toolbar_layout() {
+                    shell.set_toolbar_layout(layout);
+                }
                 shell
             }),
             camera: Camera::from_spec(&spec.default_model.camera),
@@ -1914,6 +1918,11 @@ impl eframe::App for App {
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
+                mt_ui::Event::ToolbarLayoutChanged => {
+                    if let Some(shell) = &self.shell {
+                        settings::save_toolbar_layout(shell.toolbar_layout());
+                    }
+                }
                 mt_ui::Event::Measurements(text) => {
                     if let (Some(draw), Some(doc)) = (self.draw.as_mut(), self.document.as_mut())
                         && let local = self.inference.map(|i| to_local(&i, self.ctx_xf))
