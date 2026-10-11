@@ -10,13 +10,14 @@ use mt_spec::DefaultModel;
 use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, look_at_rh, orthographic_rh};
+use crate::effects::{AmbientOcclusion, AoPass, Watermark, Watermarks};
 use crate::mesh::{FaceBuffers, FaceVertex};
 use crate::section::SectionCut;
 use crate::texture::{TextureSource, Textures};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const SAMPLES: u32 = 4;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(crate) const SAMPLES: u32 = 4;
 /// Axis half-length in inches. SketchUp's axes reach far past any normal model.
 const AXIS_LENGTH: f32 = 1.0e6;
 /// Dash length of the negative axis halves, in logical points.
@@ -75,6 +76,13 @@ struct Globals {
     depth_range: [f32; 4],
     /// rgb: fog color, w: 1 to fade towards the background (sky, ground) instead.
     fog_color: [f32; 4],
+    /// x: endpoint length in logical points (0 = off), y: 1 for jitter, z: 1 when
+    /// transparency is off, w: ground opacity.
+    extra: [f32; 4],
+    /// x: sky gradient exponent (horizon blend).
+    extra2: [f32; 4],
+    /// Selected faces' dot color.
+    select_color: [f32; 4],
 }
 
 /// Back edge dash length in logical points (SketchUp's dash pattern is unverified).
@@ -186,6 +194,35 @@ pub struct Style {
     /// points (see [`extend_segment`]).
     pub extension: Option<f32>,
     pub fog: Option<Fog>,
+    /// Edge Settings > Endpoints: model edge ends drawn wider over this many logical
+    /// points.
+    pub endpoints: Option<f32>,
+    /// Edge Settings > Jitter: model edges drawn as two slightly offset strokes.
+    pub jitter: bool,
+    /// Face Settings > transparency.
+    pub transparency: Transparency,
+    /// Face Settings > Ambient Occlusion.
+    pub ambient_occlusion: Option<AmbientOcclusion>,
+    /// Ground opacity (1 - the Background panel's transparency). The ground is drawn
+    /// as the plane z = 0 after the opaque faces, so it hides what is below it unless
+    /// translucent.
+    pub ground_opacity: f32,
+    /// Sky gradient: the sky is `mix(horizon, zenith, elevation^horizon_blend)`.
+    pub horizon_blend: f32,
+    /// Watermarks, bottom first.
+    pub watermarks: Vec<Watermark>,
+    /// Selected faces' dot color (sRGB).
+    pub selection_color: [f32; 3],
+}
+
+/// Face Settings > transparency: off (translucent materials drawn opaque), Faster
+/// (translucent faces in model order) or Nicer (sorted back to front every frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transparency {
+    Off,
+    Faster,
+    #[default]
+    Nicer,
 }
 
 /// View > Fog: faces and model edges fade linearly towards the fog color from `start`
@@ -297,6 +334,14 @@ impl Style {
             depth_cue: None,
             extension: None,
             fog: None,
+            endpoints: None,
+            jitter: false,
+            transparency: Transparency::Nicer,
+            ambient_occlusion: None,
+            ground_opacity: 1.0,
+            horizon_blend: 0.5,
+            watermarks: Vec::new(),
+            selection_color: [0.0, 0.0, 1.0],
             shading: ShadingStyle {
                 ambient: spec.shading.ambient,
                 light: if spec.shading.light_from_camera {
@@ -456,7 +501,13 @@ impl Targets {
         };
         let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
         let msaa = texture("viewport msaa", COLOR_FORMAT, SAMPLES, attach);
-        let depth = texture("viewport depth", DEPTH_FORMAT, SAMPLES, attach);
+        // Ambient occlusion reads the depth.
+        let depth = texture(
+            "viewport depth",
+            DEPTH_FORMAT,
+            SAMPLES,
+            attach | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
         let resolve = texture(
             "viewport color",
             COLOR_FORMAT,
@@ -477,6 +528,11 @@ pub struct Viewport {
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     background: wgpu::RenderPipeline,
+    /// The ground plane, with and without depth writes (opaque / translucent).
+    ground_opaque: wgpu::RenderPipeline,
+    ground_blend: wgpu::RenderPipeline,
+    ao: AoPass,
+    watermarks: Watermarks,
     lines: wgpu::RenderPipeline,
     /// Lines the section plane does not clip (axes).
     overlay_lines: wgpu::RenderPipeline,
@@ -642,6 +698,15 @@ impl Viewport {
 
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         let background = pipeline("background", "bg_vs", "bg_fs", &[], false, alpha);
+        let ground_opaque = pipeline("ground", "bg_vs", "ground_fs", &[], true, alpha);
+        let ground_blend = pipeline(
+            "translucent ground",
+            "bg_vs",
+            "ground_fs",
+            &[],
+            false,
+            alpha,
+        );
         let segment_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Segment>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -761,6 +826,10 @@ impl Viewport {
             globals,
             bind_group,
             background,
+            ground_opaque,
+            ground_blend,
+            ao: AoPass::new(device),
+            watermarks: Watermarks::new(device),
             lines,
             overlay_lines,
             back_lines,
@@ -915,6 +984,7 @@ impl Viewport {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+        self.watermarks.set(&style.watermarks);
         self.style = style;
     }
 
@@ -962,7 +1032,11 @@ impl Viewport {
             );
         }
         self.textures.upload(device, queue);
-        if let Some(faces) = &mut self.faces {
+        if let Some(faces) = self
+            .faces
+            .as_mut()
+            .filter(|_| self.style.transparency == Transparency::Nicer || self.xray)
+        {
             let eye = camera.eye.as_vec3();
             let forward = camera.forward().as_vec3();
             faces.sort_translucent(queue, eye, forward, camera.perspective);
@@ -1110,6 +1184,14 @@ impl Viewport {
                 Some(c) => rgb_w(c, false),
                 None => rgb_w([0.0; 3], true),
             },
+            extra: [
+                style.endpoints.unwrap_or(0.0).max(0.0),
+                f32::from(u8::from(style.jitter)),
+                f32::from(u8::from(style.transparency == Transparency::Off)),
+                style.ground_opacity.clamp(0.0, 1.0),
+            ],
+            extra2: [style.horizon_blend, 0.0, 0.0, 0.0],
+            select_color: rgb_w(style.selection_color, true),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1136,26 +1218,79 @@ impl Viewport {
             pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..faces.translucent.end, 0, 0..1);
         }
+        // Ambient occlusion splits the frame: the opaque faces first (keeping color
+        // and depth), the occlusion pass reading their depth, then the rest.
+        let ao = style
+            .ambient_occlusion
+            .filter(|_| !wireframe && !xray && self.faces.is_some());
+        self.watermarks
+            .prepare(device, queue, size, pixels_per_point);
+        let split = ao.is_some();
+        let store = if split {
+            wgpu::StoreOp::Store
+        } else {
+            wgpu::StoreOp::Discard
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &targets.msaa,
                     depth_slice: None,
-                    resolve_target: Some(&targets.resolve_view),
+                    resolve_target: (!split).then_some(&targets.resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(if self.transparent {
                             wgpu::Color::TRANSPARENT
                         } else {
                             wgpu::Color::WHITE
                         }),
-                        store: wgpu::StoreOp::Discard,
+                        store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &targets.depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
+                        store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.draw_opaque(&mut pass, wireframe, xray);
+            if !split {
+                self.draw_rest(&mut pass, wireframe, xray);
+            }
+        }
+        if let Some(ao) = ao {
+            self.ao.record(
+                device,
+                queue,
+                &mut encoder,
+                &targets.msaa,
+                &targets.depth,
+                view_proj,
+                size,
+                pixels_per_point,
+                &ao,
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport after occlusion"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &targets.msaa,
+                    depth_slice: None,
+                    resolve_target: Some(&targets.resolve_view),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: None,
@@ -1164,97 +1299,143 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_bind_group(1, &self.shadow_map.bind_group, &[]);
-            pass.set_bind_group(2, &self.textures.bind_group, &[]);
-            if !self.transparent {
-                pass.set_pipeline(&self.background);
-                pass.draw(0..3, 0..1);
+            self.draw_rest(&mut pass, wireframe, xray);
+        }
+        queue.submit([encoder.finish()]);
+        &self.targets.as_ref().expect("targets just created").resolve
+    }
+
+    fn set_main_bind_groups(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.shadow_map.bind_group, &[]);
+        pass.set_bind_group(2, &self.textures.bind_group, &[]);
+    }
+
+    /// Background, background watermarks and opaque faces (with the section fill and
+    /// the live preview's opaque faces).
+    fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>, wireframe: bool, xray: bool) {
+        self.set_main_bind_groups(pass);
+        if !self.transparent {
+            pass.set_pipeline(&self.background);
+            pass.draw(0..3, 0..1);
+            self.watermarks.draw(pass, false);
+            self.set_main_bind_groups(pass);
+        }
+        // Order: opaque faces, then edges and axes, which are pulled towards the
+        // camera so lines on a face win the depth test and lines behind it fail.
+        // Translucent faces last (without depth write) so they blend over
+        // everything behind them, including the edges they cover; edges on their
+        // own boundary are in front of them thanks to the same pull. In X-ray all
+        // faces are drawn as translucent; in wireframe none are. With transparency
+        // off translucent faces are drawn with the opaque ones (the shader makes them
+        // opaque).
+        let opaque_range = |f: &FaceBuffers| {
+            if self.style.transparency == Transparency::Off {
+                f.opaque.start..f.translucent.end.max(f.opaque.end)
+            } else {
+                f.opaque.clone()
             }
-            // Order: opaque faces, then edges and axes, which are pulled towards the
-            // camera so lines on a face win the depth test and lines behind it fail.
-            // Translucent faces last (without depth write) so they blend over
-            // everything behind them, including the edges they cover; edges on their
-            // own boundary are in front of them thanks to the same pull. In X-ray all
-            // faces are drawn as translucent; in wireframe none are.
-            let faces = self.faces.as_ref().filter(|_| !wireframe);
-            if let Some(faces) = faces.filter(|_| !xray) {
+        };
+        let faces = self.faces.as_ref().filter(|_| !wireframe);
+        if let Some(faces) = faces.filter(|_| !xray) {
+            let range = opaque_range(faces);
+            if !range.is_empty() {
                 pass.set_vertex_buffer(0, faces.vertices.slice(..));
                 pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
-                if !faces.opaque.is_empty() {
-                    pass.set_pipeline(&self.faces_opaque);
-                    pass.draw_indexed(faces.opaque.clone(), 0, 0..1);
-                }
+                pass.set_pipeline(&self.faces_opaque);
+                pass.draw_indexed(range, 0, 0..1);
             }
-            if let Some(fill) = self.fill.as_ref().filter(|_| !wireframe) {
-                pass.set_pipeline(&self.fill_pipeline);
-                pass.set_vertex_buffer(0, fill.vertices.slice(..));
-                pass.set_index_buffer(fill.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(fill.opaque.clone(), 0, 0..1);
-            }
-            if let Some(p) = self
-                .preview
-                .as_ref()
-                .filter(|p| !wireframe && !xray && !p.opaque.is_empty())
-            {
+        }
+        if let Some(fill) = self.fill.as_ref().filter(|_| !wireframe) {
+            pass.set_pipeline(&self.fill_pipeline);
+            pass.set_vertex_buffer(0, fill.vertices.slice(..));
+            pass.set_index_buffer(fill.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(fill.opaque.clone(), 0, 0..1);
+        }
+        if let Some(p) = self.preview.as_ref().filter(|_| !wireframe && !xray) {
+            let range = opaque_range(p);
+            if !range.is_empty() {
                 pass.set_pipeline(&self.faces_opaque);
                 pass.set_vertex_buffer(0, p.vertices.slice(..));
                 pass.set_index_buffer(p.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(p.opaque.clone(), 0, 0..1);
-            }
-            if let Some(sel) = self
-                .selected
-                .as_ref()
-                .filter(|f| !wireframe && (!f.opaque.is_empty() || !f.translucent.is_empty()))
-            {
-                pass.set_pipeline(&self.selection);
-                pass.set_vertex_buffer(0, sel.vertices.slice(..));
-                pass.set_index_buffer(sel.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..sel.translucent.end.max(sel.opaque.end), 0, 0..1);
-            }
-            if let Some(edges) = &self.edges {
-                pass.set_pipeline(&self.lines);
-                pass.set_vertex_buffer(0, edges.slice(..));
-                pass.draw(0..6, 0..self.edges_count);
-            }
-            if let Some(edges) = self
-                .edges
-                .as_ref()
-                .filter(|_| style.back_edges && !wireframe && !xray)
-            {
-                pass.set_pipeline(&self.back_lines);
-                pass.set_vertex_buffer(0, edges.slice(..));
-                pass.draw(0..6, 0..self.edges_count);
-            }
-            if let Some(axes) = &self.axes {
-                pass.set_pipeline(&self.overlay_lines);
-                pass.set_vertex_buffer(0, axes.slice(..));
-                pass.draw(0..6, 0..self.axes_count);
-            }
-            // X-ray: opaque triangles unsorted first, then the sorted translucent ones.
-            let range = |f: &FaceBuffers| {
-                if xray {
-                    f.opaque.start..f.translucent.end
-                } else {
-                    f.translucent.clone()
-                }
-            };
-            if let Some(faces) = faces.filter(|f| !range(f).is_empty()) {
-                pass.set_pipeline(&self.faces_translucent);
-                pass.set_vertex_buffer(0, faces.vertices.slice(..));
-                pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(range(faces), 0, 0..1);
-            }
-            let preview = self.preview.as_ref().filter(|_| !wireframe);
-            if let Some(p) = preview.filter(|p| !range(p).is_empty()) {
-                pass.set_pipeline(&self.faces_translucent);
-                pass.set_vertex_buffer(0, p.vertices.slice(..));
-                pass.set_index_buffer(p.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(range(p), 0, 0..1);
+                pass.draw_indexed(range, 0, 0..1);
             }
         }
-        queue.submit([encoder.finish()]);
-        &targets.resolve
+    }
+
+    /// The ground, selected faces, edges, axes, translucent faces and overlay
+    /// watermarks.
+    fn draw_rest(&self, pass: &mut wgpu::RenderPass<'_>, wireframe: bool, xray: bool) {
+        let style = &self.style;
+        self.set_main_bind_groups(pass);
+        if !self.transparent && style.ground.is_some() {
+            pass.set_pipeline(if style.ground_opacity >= 0.999 {
+                &self.ground_opaque
+            } else {
+                &self.ground_blend
+            });
+            pass.draw(0..3, 0..1);
+        }
+        if let Some(sel) = self
+            .selected
+            .as_ref()
+            .filter(|f| !wireframe && (!f.opaque.is_empty() || !f.translucent.is_empty()))
+        {
+            pass.set_pipeline(&self.selection);
+            pass.set_vertex_buffer(0, sel.vertices.slice(..));
+            pass.set_index_buffer(sel.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..sel.translucent.end.max(sel.opaque.end), 0, 0..1);
+        }
+        if let Some(edges) = &self.edges {
+            pass.set_pipeline(&self.lines);
+            pass.set_vertex_buffer(0, edges.slice(..));
+            // Jitter draws a second stroke of each model edge (vertices 6..12).
+            let vertices = if style.jitter { 12 } else { 6 };
+            pass.draw(0..vertices, 0..self.edges_count);
+        }
+        if let Some(edges) = self
+            .edges
+            .as_ref()
+            .filter(|_| style.back_edges && !wireframe && !xray)
+        {
+            pass.set_pipeline(&self.back_lines);
+            pass.set_vertex_buffer(0, edges.slice(..));
+            pass.draw(0..6, 0..self.edges_count);
+        }
+        if let Some(axes) = &self.axes {
+            pass.set_pipeline(&self.overlay_lines);
+            pass.set_vertex_buffer(0, axes.slice(..));
+            pass.draw(0..6, 0..self.axes_count);
+        }
+        // X-ray: opaque triangles unsorted first, then the sorted translucent ones.
+        // Transparency off: none here (drawn with the opaque faces).
+        let off = style.transparency == Transparency::Off;
+        let range = |f: &FaceBuffers| {
+            if xray {
+                f.opaque.start..f.translucent.end
+            } else if off {
+                0..0
+            } else {
+                f.translucent.clone()
+            }
+        };
+        let faces = self.faces.as_ref().filter(|_| !wireframe);
+        if let Some(faces) = faces.filter(|f| !range(f).is_empty()) {
+            pass.set_pipeline(&self.faces_translucent);
+            pass.set_vertex_buffer(0, faces.vertices.slice(..));
+            pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(range(faces), 0, 0..1);
+        }
+        let preview = self.preview.as_ref().filter(|_| !wireframe);
+        if let Some(p) = preview.filter(|p| !range(p).is_empty()) {
+            pass.set_pipeline(&self.faces_translucent);
+            pass.set_vertex_buffer(0, p.vertices.slice(..));
+            pass.set_index_buffer(p.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(range(p), 0, 0..1);
+        }
+        if !self.transparent {
+            self.watermarks.draw(pass, true);
+        }
     }
 
     pub fn color_view(&self) -> Option<&wgpu::TextureView> {

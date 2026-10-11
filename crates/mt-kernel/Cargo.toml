@@ -9,6 +9,7 @@ license.workspace = true
 glam.workspace = true
 slotmap = "1"
 earcutr = "0.5"
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
 mt-skp.workspace = true
 
 [dev-dependencies]

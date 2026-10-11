@@ -137,6 +137,7 @@ impl App {
             },
             x_ray: m.style.xray,
         };
+        (data.style_extras, data.watermarks) = crate::style_view::tray_extras(m);
         let fog = &m.style.fog;
         let percent = |x: f32| (x * 100.0).round().clamp(0.0, 100.0) as u8;
         data.fog = mt_ui::FogSettings {
@@ -180,6 +181,10 @@ impl App {
             Event::MaterialTexture { index, action } => {
                 return self.material_texture(index, action);
             }
+            e @ (Event::StyleExtrasChanged(_)
+            | Event::WatermarkAdd
+            | Event::WatermarkRemove(_)
+            | Event::WatermarkChanged(..)) => return self.style_extras_event(e),
             e => e,
         };
         let Some(doc) = self.document.as_mut() else {

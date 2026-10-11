@@ -47,16 +47,25 @@ pub(crate) enum Format3d {
     Obj,
     Stl,
     Dae,
+    Glb,
+    Gltf,
 }
 
 impl Format3d {
-    const ALL: [Self; 3] = [Self::Dae, Self::Obj, Self::Stl];
+    const ALL: [Self; 5] = [Self::Dae, Self::Glb, Self::Gltf, Self::Obj, Self::Stl];
+
+    /// Formats that keep the model's units and hierarchy (no units choice).
+    fn fixed_units(self) -> bool {
+        matches!(self, Self::Dae | Self::Glb | Self::Gltf)
+    }
 
     fn label(self) -> &'static str {
         match self {
             Self::Obj => "OBJ File (*.obj)",
             Self::Stl => "STL File (*.stl)",
             Self::Dae => "COLLADA File (*.dae)",
+            Self::Glb => "glTF Binary (*.glb)",
+            Self::Gltf => "glTF File (*.gltf)",
         }
     }
 
@@ -65,6 +74,8 @@ impl Format3d {
             Self::Obj => "obj",
             Self::Stl => "stl",
             Self::Dae => "dae",
+            Self::Glb => "glb",
+            Self::Gltf => "gltf",
         }
     }
 }
@@ -203,6 +214,16 @@ pub(crate) fn export_3d(
                 .map(|(n, d)| (n.clone(), &d[..]))
                 .collect();
             write_files(path, files.dae.as_bytes(), &others)
+        }
+        Format3d::Glb | Format3d::Gltf => {
+            let bytes = mt_kernel::gltf_io::to_gltf(
+                model,
+                &mt_kernel::gltf_io::GltfOptions {
+                    binary: opts.format == Format3d::Glb,
+                    two_sided: opts.two_sided,
+                },
+            );
+            write_files(path, &bytes, &[])
         }
     }
 }
@@ -391,7 +412,7 @@ impl App {
                                 }
                             });
                         ui.end_row();
-                        if d.format != Format3d::Dae {
+                        if !d.format.fixed_units() {
                             ui.label("Units:");
                             let label = |u: Option<Units>| match u {
                                 None => format!("Model Units ({})", model_units.name()),
@@ -416,7 +437,11 @@ impl App {
                     ui.checkbox(&mut d.y_up, "Swap YZ coordinates (Y is up)");
                 }
                 ui.add_space(8.0);
-                ui.weak("Hidden geometry is not exported; groups and components are flattened.");
+                ui.weak(if d.format.fixed_units() && d.format != Format3d::Dae {
+                    "Hidden geometry is not exported; groups and components are kept as nodes (meters, Y up)."
+                } else {
+                    "Hidden geometry is not exported; groups and components are flattened."
+                });
                 crate::presentation::ok_cancel(ui, "Export...")
             });
         let done = crate::presentation::answer(r);

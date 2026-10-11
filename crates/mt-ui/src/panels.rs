@@ -88,6 +88,8 @@ enum StylesPage {
     #[default]
     Edge,
     Face,
+    Background,
+    Watermark,
     Modeling,
 }
 
@@ -818,7 +820,8 @@ impl Shell {
     }
 
     /// Styles panel, Edit tab: Edge Settings (Edges, Profiles + width), Face
-    /// Settings (face style, X-ray) and Modeling Settings (Section Cut Width).
+    /// Settings (face style, X-ray) and Modeling Settings (Section Cut Width), plus
+    /// the rows of `style_panel` (and its Background and Watermark pages).
     /// Unverified: SketchUp shows these pages behind icon buttons and the face
     /// styles as icon buttons; text is used here.
     pub(crate) fn styles_edit(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
@@ -830,6 +833,8 @@ impl Shell {
             for (page, label) in [
                 (StylesPage::Edge, "Edge"),
                 (StylesPage::Face, "Face"),
+                (StylesPage::Background, "Background"),
+                (StylesPage::Watermark, "Watermark"),
                 (StylesPage::Modeling, "Modeling"),
             ] {
                 if tab_button(ui, &t, label, self.tray_ui.styles_page == page).clicked() {
@@ -853,6 +858,7 @@ impl Shell {
                     });
                 }
             }
+            StylesPage::Background | StylesPage::Watermark => {}
             StylesPage::Face => {
                 ui.label(RichText::new("Face Settings").strong());
                 ui.label("Style");
@@ -876,6 +882,15 @@ impl Shell {
         if data.style != before {
             self.pending.push(Event::StyleChanged(data.style));
         }
+        use crate::style_panel::ExtrasPage;
+        let page = match self.tray_ui.styles_page {
+            StylesPage::Edge => ExtrasPage::Edge,
+            StylesPage::Face => ExtrasPage::Face,
+            StylesPage::Background => ExtrasPage::Background,
+            StylesPage::Watermark => ExtrasPage::Watermark,
+            StylesPage::Modeling => ExtrasPage::Modeling,
+        };
+        self.style_extras_ui(ui, data, page);
     }
 
     /// Shadows panel: show/hide, Time and Date sliders, Light and Dark sliders and

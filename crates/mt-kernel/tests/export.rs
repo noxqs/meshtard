@@ -591,6 +591,63 @@ fn style_settings_round_trip() {
     }
 }
 
+/// The Styles panel extras with documented style items (edge color, endpoints,
+/// jitter, transparency, background, modeling colors, ambient occlusion) survive
+/// save and reopen; ambient occlusion color and watermarks are model-only.
+#[test]
+fn style_extras_round_trip() {
+    use mt_kernel::style_extras::*;
+    let mut m = Model::default();
+    square(&mut m.root, DVec3::ZERO, 10.0);
+    let s = &mut m.style;
+    s.edge_look = EdgeLook {
+        color_mode: EdgeColorMode::ByAxis,
+        color: [10, 20, 30],
+        endpoints: true,
+        endpoint_length: 11.0,
+        jitter: true,
+    };
+    s.face_look = FaceLook {
+        transparency_off: true,
+        quality: TransparencyQuality::Faster,
+    };
+    s.background = Background {
+        color: [1, 2, 3],
+        sky: false,
+        sky_color: [4, 5, 6],
+        horizon_color: [7, 8, 9],
+        horizon_blend: 0.5,
+        ground: false,
+        ground_color: [10, 11, 12],
+        ground_transparency: 0.25,
+        ground_from_below: true,
+    };
+    s.modeling_colors = ModelingColors {
+        selected: [200, 1, 1],
+        locked: [1, 200, 1],
+        guides: [1, 1, 200],
+        section_active: [9, 9, 9],
+        section_inactive: [8, 8, 8],
+        section_cut: [7, 7, 7],
+    };
+    s.ambient_occlusion = AmbientOcclusion {
+        enabled: true,
+        intensity: 0.75,
+        distance: 6.0,
+        ..Default::default()
+    };
+    let back = round_trip(&m).style;
+    assert_eq!(back.edge_look, m.style.edge_look);
+    assert_eq!(back.face_look, m.style.face_look);
+    assert_eq!(back.background, m.style.background);
+    assert_eq!(back.modeling_colors, m.style.modeling_colors);
+    assert_eq!(back.ambient_occlusion, m.style.ambient_occlusion);
+    for mode in EdgeColorMode::ALL {
+        m.style.edge_look.color_mode = mode;
+        assert_eq!(round_trip(&m).style.edge_look.color_mode, mode);
+    }
+}
+
 /// Units and snapping (the file's `UnitsOptions`) survive save and reopen.
 #[test]
 fn units_options_round_trip() {

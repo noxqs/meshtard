@@ -48,6 +48,7 @@ mod soften;
 mod solid_tools;
 mod splash;
 mod spring;
+mod style_view;
 mod templates;
 mod text3d;
 mod texture_position;
@@ -592,8 +593,9 @@ impl App {
             let width = doc.model.style.section_cut_width;
             let f = |q: DVec3| q.as_vec3().to_array();
             self.geometry.section_lines = mt_render::section_lines(&self.scene.triangles, p, n);
+            let cut_color = style_view::rgba(doc.model.style.modeling_colors.section_cut);
             self.cut_lines = (self.geometry.section_lines.iter().copied())
-                .map(|[a, b]| Segment::line(f(a), f(b), [0.0, 0.0, 0.0, 1.0], [width, 0.0]))
+                .map(|[a, b]| Segment::line(f(a), f(b), cut_color, [width, 0.0]))
                 .collect();
         }
         self.viewport.set_section(cut);
@@ -644,6 +646,7 @@ impl App {
             if !st.axes {
                 style.axes = None;
             }
+            style_view::apply_render(&doc.model, &mut style);
             model_axes::apply(&doc.model, &mut style, &mut self.engine);
             self.viewport.set_style(device, style);
         }
@@ -716,17 +719,26 @@ impl App {
                 .as_vec3()
                 .into()
         };
+        // Styles > Modeling colors.
+        let (sel_color, lock_color) = self.document.as_ref().map_or((SELECTED, LOCKED), |d| {
+            let mc = &d.model.style.modeling_colors;
+            (style_view::rgba(mc.selected), style_view::rgba(mc.locked))
+        });
         let mut edges = Vec::with_capacity(self.scene.edges.len());
         let mut copies = Vec::new();
         // Locked groups and components are highlighted red instead of blue.
         let highlight = |o: &Option<Owner>| match (o, &self.document) {
-            (Some(o), Some(doc)) if doc.is_locked(*o) => LOCKED,
-            _ => SELECTED,
+            (Some(o), Some(doc)) if doc.is_locked(*o) => lock_color,
+            _ => sel_color,
         };
         for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
             let mut seg = *seg;
             let selected = owner.is_some_and(|o| self.selection.contains(&o));
-            let color = if selected { highlight(owner) } else { SELECTED };
+            let color = if selected {
+                highlight(owner)
+            } else {
+                sel_color
+            };
             match moved(owner) {
                 Some((xf, copy)) => {
                     let mut c = seg;
@@ -778,7 +790,7 @@ impl App {
                     xf = m * xf;
                 }
                 let b = selection::OrientedBox::from_aabb(*min, *max).transformed(xf);
-                let color = if inst.locked { LOCKED } else { SELECTED };
+                let color = if inst.locked { lock_color } else { sel_color };
                 for [a, c] in b.edges() {
                     let f = |p: DVec3| p.as_vec3().to_array();
                     edges.push(Segment::line(f(a), f(c), color, [1.0, 0.0]));

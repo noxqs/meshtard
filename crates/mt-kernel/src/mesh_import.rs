@@ -10,10 +10,14 @@
 //! - OBJ groups, objects, smoothing groups, normals and texture coordinates are
 //!   ignored; MTL diffuse colors and opacity become materials (texture maps are not
 //!   read).
+//! - Polygons with texture coordinates whose material has a texture (glTF, see
+//!   [`crate::gltf_io`]) get a face texture position fitted to them
+//!   ([`uv_from_corners`]); merging keeps faces with different positions apart.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 
 use crate::TOL;
 use crate::entities::{CoEdge, EdgeAttrs, Entities, FaceAttrs, FaceId, Loop, MaterialId, VertexId};
@@ -33,6 +37,9 @@ pub struct Polygon {
     pub vertices: Vec<usize>,
     /// Index into `materials`.
     pub material: Option<usize>,
+    /// Texture coordinates per vertex (repeats, v up), empty when the file has none.
+    /// Used when the material has a texture.
+    pub uvs: Vec<DVec2>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +48,19 @@ pub struct MeshMaterial {
     /// sRGB.
     pub color: [u8; 3],
     pub opacity: f64,
+    /// A texture image (glTF base color textures; OBJ maps are not read).
+    pub texture: Option<MeshTexture>,
+}
+
+/// A mesh material's texture image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeshTexture {
+    pub filename: String,
+    /// Image file bytes (PNG or JPEG).
+    pub data: Arc<[u8]>,
+    /// Tile size in inches given to the model material (faces get their own
+    /// mapping from the file's texture coordinates).
+    pub size: [f64; 2],
 }
 
 /// Reads MTL materials (`newmtl`, `Kd`, `d`, `Tr`).
@@ -55,6 +75,7 @@ pub fn parse_mtl(text: &str) -> Vec<MeshMaterial> {
                 name: it.collect::<Vec<_>>().join(" "),
                 color: [255, 255, 255],
                 opacity: 1.0,
+                texture: None,
             }),
             "Kd" if nums.len() >= 3 => {
                 if let Some(m) = out.last_mut() {
@@ -114,6 +135,7 @@ pub fn parse_obj(text: &str, mtl: impl Fn(&str) -> Option<String>) -> Result<Mes
                 mesh.polygons.push(Polygon {
                     vertices,
                     material: current,
+                    uvs: Vec::new(),
                 });
             }
             "mtllib" => {
@@ -136,6 +158,7 @@ pub fn parse_obj(text: &str, mtl: impl Fn(&str) -> Option<String>) -> Result<Mes
                             name,
                             color: [255, 255, 255],
                             opacity: 1.0,
+                            texture: None,
                         });
                         mesh.materials.len() - 1
                     }
@@ -168,6 +191,7 @@ pub fn parse_stl(bytes: &[u8]) -> Result<Mesh, String> {
             mesh.polygons.push(Polygon {
                 vertices: vec![first, first + 1, first + 2],
                 material: None,
+                uvs: Vec::new(),
             });
         }
         return Ok(mesh);
@@ -192,6 +216,7 @@ pub fn parse_stl(bytes: &[u8]) -> Result<Mesh, String> {
                 mesh.polygons.push(Polygon {
                     vertices: std::mem::take(&mut facet),
                     material: None,
+                    uvs: Vec::new(),
                 });
             }
             _ => {}
@@ -215,13 +240,17 @@ pub struct MeshOptions {
 pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) -> Entities {
     let mut ents = Entities::new();
     let mut welded: HashMap<[i64; 3], VertexId> = HashMap::new();
-    let mut vertex = |ents: &mut Entities, i: usize| -> VertexId {
+    let place = |i: usize| -> DVec3 {
         let p = mesh.positions[i];
         let p = if opts.y_up {
             DVec3::new(p.x, -p.z, p.y)
         } else {
             p
-        } * opts.inches_per_unit;
+        };
+        p * opts.inches_per_unit
+    };
+    let mut vertex = |ents: &mut Entities, i: usize| -> VertexId {
+        let p = place(i);
         let key = (p / TOL).round().as_i64vec3().to_array();
         *welded.entry(key).or_insert_with(|| ents.add_vertex(p))
     };
@@ -246,14 +275,39 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
         if distinct.len() != vs.len() || vs.len() < 3 {
             continue;
         }
+        // Texture coordinates, when the polygon has them and its material a texture.
+        let tile = poly
+            .material
+            .and_then(|m| mesh.materials.get(m))
+            .and_then(|m| m.texture.as_ref())
+            .map(|t| t.size);
+        let uvs = (poly.uvs.len() == poly.vertices.len()).then_some(&poly.uvs);
+        let corners: Vec<(DVec3, DVec2)> = match uvs {
+            Some(uvs) => poly
+                .vertices
+                .iter()
+                .zip(uvs)
+                .map(|(&i, &t)| (place(i), t))
+                .collect(),
+            None => Vec::new(),
+        };
+        let map = |ents: &mut Entities, face: Option<FaceId>| {
+            if let (Some(f), Some(tile)) = (face, tile)
+                && let Some(m) = uv_from_corners(ents.faces[f].normal, &corners, tile)
+            {
+                ents.faces[f].attrs.uv = crate::FaceUv::boxed(Some(m), None);
+            }
+        };
         if points.iter().all(|&p| plane.contains(p)) {
-            add_face(&mut ents, &vs, plane.normal, material, &mut seen);
+            let f = add_face(&mut ents, &vs, plane.normal, material, &mut seen);
+            map(&mut ents, f);
         } else {
             for k in 1..vs.len() - 1 {
                 let tri = [vs[0], vs[k], vs[k + 1]];
                 let pts = tri.map(|v| ents.pos(v));
                 if let Some(p) = Plane::from_polygon(&pts) {
-                    add_face(&mut ents, &tri, p.normal, material, &mut seen);
+                    let f = add_face(&mut ents, &tri, p.normal, material, &mut seen);
+                    map(&mut ents, f);
                 }
             }
         }
@@ -272,17 +326,17 @@ fn add_face(
     normal: DVec3,
     material: Option<MaterialId>,
     seen: &mut HashSet<Vec<VertexId>>,
-) {
+) -> Option<FaceId> {
     // Area check in the plane (collinear points pass Newell with a tiny normal).
     let plane = Plane::new(normal, ents.pos(vs[0]));
     let poly: Vec<_> = vs.iter().map(|&v| plane.project(ents.pos(v))).collect();
     if signed_area2(&poly).abs() < TOL * TOL {
-        return;
+        return None;
     }
     let mut key = vs.to_vec();
     key.sort();
     if !seen.insert(key) {
-        return;
+        return None;
     }
     let coedges = (0..vs.len())
         .map(|k| {
@@ -296,7 +350,7 @@ fn add_face(
             }
         })
         .collect();
-    ents.add_raw_face(
+    Some(ents.add_raw_face(
         Loop { coedges },
         Vec::new(),
         normal,
@@ -304,7 +358,73 @@ fn add_face(
             material,
             ..Default::default()
         },
-    );
+    ))
+}
+
+/// The texture-to-plane matrix of a face with unit normal `normal` that puts the
+/// texture points `t` (repeats) of `corners` on their positions, for a texture of tile
+/// size `tile` (inches): an affine map through the first three corners that are not
+/// collinear. `None` when there are none or the texture points are degenerate.
+pub fn uv_from_corners(
+    normal: DVec3,
+    corners: &[(DVec3, DVec2)],
+    tile: [f64; 2],
+) -> Option<[f64; 9]> {
+    let (xr, yr) = mt_skp::uv::face_uv_basis(normal.to_array());
+    let (xr, yr) = (DVec3::from_array(xr), DVec3::from_array(yr));
+    let size = |s: f64| if s > 1e-9 { s } else { 1.0 };
+    let tile = DVec2::new(size(tile[0]), size(tile[1]));
+    let plane = |p: DVec3| DVec2::new(p.dot(xr), p.dot(yr));
+    let (p0, t0) = *corners.first()?;
+    for i in 1..corners.len() {
+        for j in i + 1..corners.len() {
+            let (dp1, dp2) = (
+                plane(corners[i].0) - plane(p0),
+                plane(corners[j].0) - plane(p0),
+            );
+            if dp1.perp_dot(dp2).abs() < 1e-9 * dp1.length_squared().max(1e-12) {
+                continue;
+            }
+            // Texture units (repeats times tile) to plane: [dP] = [dT] * A.
+            let (dt1, dt2) = ((corners[i].1 - t0) * tile, (corners[j].1 - t0) * tile);
+            let det = dt1.perp_dot(dt2);
+            if det.abs() < 1e-12 * tile.x * tile.y {
+                return None;
+            }
+            // inverse of [[dt1.x dt1.y] [dt2.x dt2.y]]
+            let inv = [dt2.y / det, -dt1.y / det, -dt2.x / det, dt1.x / det];
+            let r0 = DVec2::new(
+                inv[0] * dp1.x + inv[1] * dp2.x,
+                inv[0] * dp1.y + inv[1] * dp2.y,
+            );
+            let r1 = DVec2::new(
+                inv[2] * dp1.x + inv[3] * dp2.x,
+                inv[2] * dp1.y + inv[3] * dp2.y,
+            );
+            let t0u = t0 * tile;
+            let off = plane(p0) - (r0 * t0u.x + r1 * t0u.y);
+            let m = [r0.x, r0.y, 0.0, r1.x, r1.y, 0.0, off.x, off.y, 1.0];
+            return m.iter().all(|x| x.is_finite()).then_some(m);
+        }
+    }
+    None
+}
+
+/// Whether two faces' texture positions are the same (within rounding).
+fn same_uv(a: &Option<Box<crate::FaceUv>>, b: &Option<Box<crate::FaceUv>>) -> bool {
+    let close = |x: &Option<[f64; 9]>, y: &Option<[f64; 9]>| match (x, y) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x
+            .iter()
+            .zip(y)
+            .all(|(a, b)| (a - b).abs() <= 1e-6 * (1.0 + a.abs().max(b.abs()))),
+        _ => false,
+    };
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => close(&a.front, &b.front) && close(&a.back, &b.back),
+        _ => false,
+    }
 }
 
 /// Joins each connected region of coplanar faces with the same material into one face.
@@ -317,6 +437,7 @@ fn merge_coplanar(ents: &mut Entities) {
         }
         let plane = ents.face_plane(seed);
         let material = ents.faces[seed].attrs.material;
+        let uv = ents.faces[seed].attrs.uv.clone();
         // Flood across edges shared by exactly two faces of the region.
         let mut region = vec![seed];
         let mut members: HashSet<FaceId> = HashSet::from([seed]);
@@ -339,6 +460,7 @@ fn merge_coplanar(ents: &mut Entities) {
                 }
                 let gf = &ents.faces[g];
                 let same = gf.attrs.material == material
+                    && same_uv(&gf.attrs.uv, &uv)
                     && gf.normal.dot(plane.normal) > 1.0 - 1e-6
                     && ents
                         .loop_points(&gf.outer)
