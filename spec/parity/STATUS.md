@@ -108,6 +108,7 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Section | Section cut lines and View > Section Planes / Section Cuts | unverified | arrows drawn on the kept side |
 | Section | Section fill | unverified | any closed loop filled; dark gray fill color a guess |
 | Edit | Undo/Redo | unverified | snapshot per edit, limit 100; covers model and edit context; shadow toggles not recorded |
+| Edit | Cut, Copy, Paste, Paste In Place | unverified | internal clipboard (selected edges, faces with their edges, components by definition, dimensions, leader texts; world coordinates); the system clipboard only gets a placeholder text. Paste: ghost follows the cursor held at the bounding box minimum corner (SketchUp grab point unverified), click places and merges like drawing, Esc cancels, then back to Select (unverified); pasted entities selected; Cut is one undo step. Component instances are dropped from the clipboard when another model is opened |
 | File | Open `.skp` (2013-2026, VFF and legacy) | unverified | geometry, components, tags, materials, textures, scenes, styles, guides, dimensions; VFF texts and edge tags not read |
 | File | Opens at the saved view | unverified | |
 | File | Command-line path and dropped `.skp` open | unverified | |

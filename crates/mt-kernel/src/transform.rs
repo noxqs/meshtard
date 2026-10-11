@@ -95,56 +95,80 @@ pub fn copy_geometry(
     faces: &[FaceId],
     xf: DMat4,
 ) -> (Vec<EdgeId>, Vec<FaceId>) {
+    let gathered = gather(ents, edges, faces, xf);
+    insert_gathered(ents, gathered)
+}
+
+/// [`copy_geometry`] from another collection: copies edges and faces of `src` into
+/// `dst` transformed by `xf`, merging with `dst`'s geometry like drawing does (Paste).
+/// Returns the new edges and faces of `dst`.
+pub fn copy_geometry_from(
+    dst: &mut Entities,
+    src: &Entities,
+    edges: &[EdgeId],
+    faces: &[FaceId],
+    xf: DMat4,
+) -> (Vec<EdgeId>, Vec<FaceId>) {
+    let gathered = gather(src, edges, faces, xf);
+    insert_gathered(dst, gathered)
+}
+
+/// Transformed edges, faces and curves to copy, read from their collection.
+struct Gathered {
+    /// Arcs of the copied curves, by source curve id (`None`: free-form or no longer
+    /// an arc after the transform).
+    curves: Vec<(CurveId, Option<Arc>)>,
+    /// Segments with their attributes (curve ids still of the source).
+    segments: Vec<(DVec3, DVec3, EdgeAttrs)>,
+    records: Vec<FaceRecord>,
+}
+
+fn gather(src: &Entities, edges: &[EdgeId], faces: &[FaceId], xf: DMat4) -> Gathered {
     let faces: Vec<FaceId> = faces
         .iter()
         .copied()
-        .filter(|&f| ents.faces.contains_key(f))
+        .filter(|&f| src.faces.contains_key(f))
         .collect();
     let mut all_edges: Vec<EdgeId> = Vec::new();
     let mut seen = HashSet::new();
     for e in edges
         .iter()
         .copied()
-        .chain(faces.iter().flat_map(|&f| face_edges(ents, f)))
+        .chain(faces.iter().flat_map(|&f| face_edges(src, f)))
     {
-        if ents.edges.contains_key(e) && seen.insert(e) {
+        if src.edges.contains_key(e) && seen.insert(e) {
             all_edges.push(e);
         }
     }
-
-    // New curves for copied curves.
-    let mut curve_map: HashMap<CurveId, CurveId> = HashMap::new();
+    let mut curves: Vec<(CurveId, Option<Arc>)> = Vec::new();
     for &e in &all_edges {
-        if let Some(c) = ents.edges[e].attrs.curve
-            && !curve_map.contains_key(&c)
-            && let Some(curve) = ents.curves.get(c)
+        if let Some(c) = src.edges[e].attrs.curve
+            && !curves.iter().any(|(x, _)| *x == c)
+            && let Some(curve) = src.curves.get(c)
         {
-            let arc = curve.arc.and_then(|a| transform_arc(&a, &xf));
-            curve_map.insert(c, ents.curves.insert(Curve { arc }));
+            curves.push((c, curve.arc.and_then(|a| transform_arc(&a, &xf))));
         }
     }
-    let segments: Vec<(DVec3, DVec3, EdgeAttrs)> = all_edges
+    let segments = all_edges
         .iter()
         .map(|&e| {
-            let edge = &ents.edges[e];
-            let mut attrs = edge.attrs.clone();
-            attrs.curve = attrs.curve.and_then(|c| curve_map.get(&c).copied());
+            let edge = &src.edges[e];
             (
-                xf.transform_point3(ents.pos(edge.start)),
-                xf.transform_point3(ents.pos(edge.end)),
-                attrs,
+                xf.transform_point3(src.pos(edge.start)),
+                xf.transform_point3(src.pos(edge.end)),
+                edge.attrs.clone(),
             )
         })
         .collect();
-    let records: Vec<FaceRecord> = faces
+    let records = faces
         .iter()
         .map(|&f| {
-            let face = &ents.faces[f];
+            let face = &src.faces[f];
             FaceRecord {
                 loops: face
                     .loops()
                     .map(|l| {
-                        let mut pts: Vec<DVec3> = ents
+                        let mut pts: Vec<DVec3> = src
                             .loop_points(l)
                             .into_iter()
                             .map(|p| xf.transform_point3(p))
@@ -159,6 +183,25 @@ pub fn copy_geometry(
             }
         })
         .collect();
+    Gathered {
+        curves,
+        segments,
+        records,
+    }
+}
+
+fn insert_gathered(ents: &mut Entities, g: Gathered) -> (Vec<EdgeId>, Vec<FaceId>) {
+    // New curves for copied curves.
+    let curve_map: HashMap<CurveId, CurveId> = g
+        .curves
+        .into_iter()
+        .map(|(c, arc)| (c, ents.curves.insert(Curve { arc })))
+        .collect();
+    let mut segments = g.segments;
+    for (_, _, attrs) in &mut segments {
+        attrs.curve = attrs.curve.and_then(|c| curve_map.get(&c).copied());
+    }
+    let records = g.records;
 
     let mut created = Vec::new();
     for (a, b, attrs) in &segments {

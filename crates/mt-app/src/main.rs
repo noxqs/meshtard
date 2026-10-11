@@ -94,6 +94,10 @@ const IMPLEMENTED: &[&str] = &[
     "edit.select_all",
     "edit.select_none",
     "edit.delete",
+    "edit.cut",
+    "edit.copy",
+    "edit.paste",
+    "edit.paste_in_place",
     "camera.orbit",
     "camera.pan",
     "camera.zoom",
@@ -227,6 +231,13 @@ struct App {
     shift_lock: bool,
     /// Error from the last command, shown in the status bar until the next one.
     message: Option<String>,
+    /// Edit > Copy / Cut: a copy of the selection in world coordinates (internal; the
+    /// system clipboard only gets a short text so Ctrl+V reaches the app).
+    clipboard: Option<mt_kernel::Entities>,
+    /// The clipboard drawn while Paste places it (world coordinates), and the
+    /// transform it is drawn with.
+    ghost: Option<Scene>,
+    ghost_xf: Option<glam::DMat4>,
 }
 
 impl App {
@@ -309,6 +320,9 @@ impl App {
             erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
+            clipboard: None,
+            ghost: None,
+            ghost_xf: None,
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -454,6 +468,7 @@ impl App {
             None => Default::default(),
         };
         self.live = None;
+        self.ghost_xf = None;
         self.viewport.set_preview_faces(device, &[], &[]);
         self.update_highlight(device);
     }
@@ -571,6 +586,13 @@ impl App {
         let indices: Vec<u32> = (0..vertices.len() as u32).collect();
         self.viewport
             .set_selected_faces(device, &vertices, &indices);
+        if let (Some(ghost), Some(xf)) = (&self.ghost, self.ghost_xf) {
+            edges.extend(ghost.edges.iter().map(|s| {
+                let mut s = *s;
+                (s.a, s.b) = (tp(xf, s.a), tp(xf, s.b));
+                s
+            }));
+        }
         edges.extend(self.scene.guides.iter().copied());
         edges.extend(self.cut_lines.iter().copied());
         self.viewport.set_edges(device, &edges);
@@ -581,6 +603,7 @@ impl App {
     /// targets are transformed per change; the rest of the model is re-sent once when
     /// the operation starts and ends (no rebuild).
     fn update_live(&mut self, device: &wgpu::Device) {
+        self.update_ghost(device);
         let want = match (&self.modify, &self.inference, self.tool) {
             (Some(m), Some(inf), Tool::Modify(_)) => m
                 .live(&to_local(inf, self.ctx_xf))
@@ -641,6 +664,41 @@ impl App {
         self.update_highlight(device);
     }
 
+    /// Draws the clipboard where Paste would place it (faces as preview faces, edges
+    /// with the model's), re-sent only when the cursor moves it.
+    fn update_ghost(&mut self, device: &wgpu::Device) {
+        let want = match (&self.modify, &self.inference, self.tool, &self.ghost) {
+            (Some(m), Some(inf), Tool::Modify(_), Some(_)) => m
+                .ghost(&to_local(inf, self.ctx_xf))
+                .map(|xf| self.ctx_xf * xf),
+            _ => None,
+        };
+        if want == self.ghost_xf {
+            return;
+        }
+        self.ghost_xf = want;
+        match (&self.ghost, want) {
+            (Some(ghost), Some(w)) => {
+                let n = glam::DMat3::from_mat4(w).inverse().transpose();
+                let f = |p: [f32; 3]| glam::Vec3::from(p).as_dvec3();
+                let vertices: Vec<FaceVertex> = ghost
+                    .indices
+                    .iter()
+                    .map(|&i| {
+                        let mut v = ghost.vertices[i as usize];
+                        v.position = w.transform_point3(f(v.position)).as_vec3().into();
+                        v.normal = (n * f(v.normal)).normalize_or_zero().as_vec3().into();
+                        v
+                    })
+                    .collect();
+                let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+                self.viewport.set_preview_faces(device, &vertices, &indices);
+            }
+            _ => self.viewport.set_preview_faces(device, &[], &[]),
+        }
+        self.update_highlight(device);
+    }
+
     fn select(&mut self, device: &wgpu::Device, mode: Mode, items: Vec<Owner>) {
         self.selection.apply(mode, items);
         self.update_highlight(device);
@@ -688,6 +746,7 @@ impl App {
                 self.camera_history.clear();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 self.document = Some(doc);
+                self.clipboard_changed_document();
                 self.selection.clear();
                 self.rebuild(device);
                 log::info!(
@@ -730,6 +789,14 @@ impl App {
         } else if self.camera_command(id) {
         } else if id == "file.exit" {
             self.request(ctx, frame, confirm::Pending::Exit);
+        } else if let Some(rs) = frame.wgpu_render_state()
+            && matches!(
+                id,
+                "edit.cut" | "edit.copy" | "edit.paste" | "edit.paste_in_place"
+            )
+        {
+            let device = rs.device.clone();
+            self.clipboard_command(ctx, &device, id);
         } else if let Some(rs) = frame.wgpu_render_state()
             && matches!(
                 id,
@@ -902,6 +969,106 @@ impl App {
         }
     }
 
+    /// Edit > Cut, Copy, Paste and Paste In Place.
+    ///
+    /// Copy keeps the selection; Cut copies, then deletes like Delete (one undo step).
+    /// Paste starts placing the clipboard with the cursor ([`modify::Paste`]); Paste In
+    /// Place inserts it at the coordinates it was copied from, in the open context. The
+    /// pasted entities become the selection.
+    fn clipboard_command(&mut self, ctx: &egui::Context, device: &wgpu::Device, id: &str) {
+        let Some(doc) = &mut self.document else {
+            return;
+        };
+        match id {
+            "edit.cut" | "edit.copy" => {
+                let items = self.selection.items().to_vec();
+                let sel = kernel_selection(&items);
+                let pick = |f: fn(&Owner) -> Option<usize>| items.iter().filter_map(f).collect();
+                let dims: Vec<usize> = pick(|o| match o {
+                    Owner::Dimension(i) => Some(*i),
+                    _ => None,
+                });
+                let texts: Vec<usize> = pick(|o| match o {
+                    Owner::Text(i) => Some(*i),
+                    _ => None,
+                });
+                let clip =
+                    mt_kernel::clipboard::copy(doc.active(), &sel, &dims, &texts, self.ctx_xf);
+                if mt_kernel::clipboard::is_empty(&clip) {
+                    return;
+                }
+                // egui turns Ctrl+V into a paste event only when the system clipboard
+                // holds text: leave a note there.
+                ctx.copy_text("meshtard entities".into());
+                self.clipboard = Some(clip);
+                if id == "edit.cut" {
+                    doc.delete(&items);
+                    self.selection.clear();
+                    self.rebuild(device);
+                }
+            }
+            _ => {
+                let Some(mut clip) = self.clipboard.clone() else {
+                    return;
+                };
+                // Instances of definitions that are gone or would contain themselves
+                // are left out.
+                clip.instances.retain(|i| {
+                    doc.model.definitions.contains_key(i.definition)
+                        && !doc.in_context_path(i.definition)
+                });
+                if mt_kernel::clipboard::is_empty(&clip) {
+                    self.message = Some("Nothing to paste here.".into());
+                    return;
+                }
+                if let Some(d) = self.draw.as_mut() {
+                    d.cancel();
+                }
+                if id == "edit.paste_in_place" {
+                    let to_local = self.ctx_xf.inverse();
+                    let mut pasted = None;
+                    if doc.edit(|ents| {
+                        pasted = Some(mt_kernel::clipboard::paste(ents, &clip, to_local, |_| true));
+                        true
+                    }) {
+                        let owners = pasted.map(|p| modify::pasted_owners(&p));
+                        self.selection.clear();
+                        self.selection
+                            .apply(Mode::Replace, owners.unwrap_or_default());
+                        self.rebuild(device);
+                    }
+                    return;
+                }
+                let Some((grab, _)) =
+                    mt_kernel::clipboard::clip_bounds(&clip, &doc.model.definitions)
+                else {
+                    return;
+                };
+                self.ghost = Some(doc.ghost_scene(&clip));
+                self.ghost_xf = None;
+                self.tool = Tool::Modify("edit.paste");
+                self.draw = None;
+                self.modify = Some(Box::new(modify::Paste::new(clip, grab, self.ctx_xf)));
+                self.erase_drag.clear();
+                self.engine.unlock();
+                self.inference = None;
+                self.selection.clear();
+                self.update_highlight(device);
+            }
+        }
+    }
+
+    /// The clipboard's instances name definitions of the model they were copied
+    /// from: another document cannot use them (loose geometry and annotations stay).
+    fn clipboard_changed_document(&mut self) {
+        if let Some(c) = &mut self.clipboard {
+            c.instances.clear();
+            if mt_kernel::clipboard::is_empty(c) {
+                self.clipboard = None;
+            }
+        }
+    }
+
     /// File > New without asking (see `confirm`).
     fn new_document(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         {
@@ -910,6 +1077,7 @@ impl App {
                 let doc = Document::untitled();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 self.document = Some(doc);
+                self.clipboard_changed_document();
                 self.selection.clear();
                 self.camera = Camera::from_spec(&self.spec.default_model.camera);
                 self.transition = None;
@@ -990,6 +1158,20 @@ impl App {
                         && m.alt == s.alt
                 })
                 .map(|(_, _, id)| *id)
+                .chain(
+                    // egui turns Ctrl+X, Ctrl+C and Ctrl+V into clipboard events instead
+                    // of key presses (Ctrl+V only while the system clipboard holds
+                    // text). On macOS the native menu owns these shortcuts.
+                    i.events
+                        .iter()
+                        .filter(|_| !cfg!(target_os = "macos"))
+                        .filter_map(|e| match e {
+                            egui::Event::Cut => Some("edit.cut"),
+                            egui::Event::Copy => Some("edit.copy"),
+                            egui::Event::Paste(_) => Some("edit.paste"),
+                            _ => None,
+                        }),
+                )
                 .collect()
         });
         for id in pressed {
@@ -1292,6 +1474,14 @@ impl App {
         // faces; holding it is no longer needed.
         let ctrl_down = ctrl && !self.ctrl_was_down;
         self.ctrl_was_down = ctrl;
+        if self.modify.as_ref().is_some_and(|m| m.finished()) {
+            self.modify = None;
+            self.ghost = None;
+            self.tool = Tool::Select;
+            self.engine.unlock();
+            self.inference = None;
+            return;
+        }
         let Some(tool) = self.modify.as_mut() else {
             return;
         };
@@ -1310,6 +1500,9 @@ impl App {
         if escape {
             tool.cancel();
             self.engine.unlock();
+            if tool.finished() {
+                ui.ctx().request_repaint();
+            }
         }
         if let Some(dir) = tool.constraint() {
             self.engine.lock_direction(
@@ -1393,7 +1586,11 @@ impl App {
         }
         if changed {
             self.engine.unlock();
-            if tool.keeps_selection() {
+            if let Some(items) = tool.take_selection() {
+                ui.ctx().request_repaint();
+                self.selection.clear();
+                self.selection.apply(Mode::Replace, items);
+            } else if tool.keeps_selection() {
                 let ents = doc.active();
                 self.selection.retain(|o| selection::exists(ents, o));
             } else {
@@ -1909,6 +2106,8 @@ impl eframe::App for App {
         let style = self.document.as_ref().map(|d| d.model.style.clone());
         let can_undo = self.document.as_ref().is_some_and(Document::can_undo);
         let can_redo = self.document.as_ref().is_some_and(Document::can_redo);
+        let has_selection = !self.selection.items().is_empty();
+        let can_paste = self.clipboard.is_some();
         let can_go_back = self.camera_history.can_go_back();
         let can_go_forward = self.camera_history.can_go_forward();
         let camera = self.camera.clone();
@@ -1922,6 +2121,8 @@ impl eframe::App for App {
             is_enabled: &|id| match id {
                 "edit.undo" => can_undo,
                 "edit.redo" => can_redo,
+                "edit.cut" | "edit.copy" => has_selection,
+                "edit.paste" | "edit.paste_in_place" => can_paste,
                 "camera.previous" => can_go_back,
                 "camera.next" => can_go_forward,
                 _ => IMPLEMENTED.contains(&id),

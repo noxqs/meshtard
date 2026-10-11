@@ -6,6 +6,7 @@
 pub mod annotation;
 pub mod arrangement;
 pub mod bvh;
+pub mod clipboard;
 pub mod entities;
 pub mod export;
 pub mod follow_me;
@@ -34,7 +35,7 @@ pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};
 pub use push_pull::push_pull;
 pub use texture::{FaceUv, Texture};
-pub use transform::{copy_geometry, transform_vertices, vertices_of};
+pub use transform::{copy_geometry, copy_geometry_from, transform_vertices, vertices_of};
 pub use validate::{Checks, validate};
 
 /// Distance below which two points are the same, in inches. SketchUp's internal tolerance

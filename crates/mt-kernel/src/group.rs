@@ -129,7 +129,8 @@ impl Selection {
     }
 }
 
-fn bounds(
+/// Bounding box of a selection of `ents` (instances by their definitions' vertices).
+pub fn bounds(
     ents: &Entities,
     sel: &Selection,
     defs: &SlotMap<DefinitionId, Definition>,
