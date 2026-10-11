@@ -119,3 +119,25 @@ fn nested_rectangles_make_holes() {
     assert!(validate(&e, Checks::ALL).is_empty());
     assert_eq!(e.faces.values().map(|f| f.holes.len()).sum::<usize>(), 2);
 }
+
+/// Two faces joined by a bridge edge, then a rectangle around them: the hole loop runs
+/// along the bridge twice, and ear clipping of such a loop can put a triangle over a
+/// block. The sample point of the big face must still be inside it (it was not, for
+/// some loop start vertices: the big face then counted as overlapping a block, and
+/// drawing it rebuilt the block's face).
+#[test]
+fn bridged_blocks_inside_a_rectangle() {
+    let mut e = Entities::new();
+    for (a, b) in [
+        ([4, 5], [7, 3]),
+        ([1, 6], [3, 3]),
+        ([4, 3], [1, 3]),
+        ([0, 7], [8, 0]),
+    ] {
+        apply(&mut e, &Op::Rect(a, b, 0));
+        let errs = validate(&e, Checks::ALL);
+        assert!(errs.is_empty(), "{errs:#?}");
+    }
+    assert_eq!(e.faces.len(), 3);
+    assert_eq!(e.faces.values().map(|f| f.holes.len()).sum::<usize>(), 1);
+}

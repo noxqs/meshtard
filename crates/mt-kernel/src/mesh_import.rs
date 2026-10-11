@@ -11,7 +11,7 @@
 //!   ignored; MTL diffuse colors and opacity become materials (texture maps are not
 //!   read).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec3;
 
@@ -214,7 +214,7 @@ pub struct MeshOptions {
 /// to model materials.
 pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) -> Entities {
     let mut ents = Entities::new();
-    let mut welded: HashMap<[i64; 3], VertexId> = HashMap::new();
+    let mut welded: BTreeMap<[i64; 3], VertexId> = BTreeMap::new();
     let mut vertex = |ents: &mut Entities, i: usize| -> VertexId {
         let p = mesh.positions[i];
         let p = if opts.y_up {
@@ -225,7 +225,7 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
         let key = (p / TOL).round().as_i64vec3().to_array();
         *welded.entry(key).or_insert_with(|| ents.add_vertex(p))
     };
-    let mut seen: HashSet<Vec<VertexId>> = HashSet::new();
+    let mut seen: BTreeSet<Vec<VertexId>> = BTreeSet::new();
     for poly in &mesh.polygons {
         let mut vs: Vec<VertexId> = Vec::with_capacity(poly.vertices.len());
         for &i in &poly.vertices {
@@ -242,7 +242,7 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
         let Some(plane) = Plane::from_polygon(&points) else {
             continue;
         };
-        let distinct: HashSet<VertexId> = vs.iter().copied().collect();
+        let distinct: BTreeSet<VertexId> = vs.iter().copied().collect();
         if distinct.len() != vs.len() || vs.len() < 3 {
             continue;
         }
@@ -271,7 +271,7 @@ fn add_face(
     vs: &[VertexId],
     normal: DVec3,
     material: Option<MaterialId>,
-    seen: &mut HashSet<Vec<VertexId>>,
+    seen: &mut BTreeSet<Vec<VertexId>>,
 ) {
     // Area check in the plane (collinear points pass Newell with a tiny normal).
     let plane = Plane::new(normal, ents.pos(vs[0]));
@@ -310,7 +310,7 @@ fn add_face(
 /// Joins each connected region of coplanar faces with the same material into one face.
 fn merge_coplanar(ents: &mut Entities) {
     let faces: Vec<FaceId> = ents.faces.keys().collect();
-    let mut done: HashSet<FaceId> = HashSet::new();
+    let mut done: BTreeSet<FaceId> = BTreeSet::new();
     for seed in faces {
         if done.contains(&seed) || !ents.faces.contains_key(seed) {
             continue;
@@ -319,7 +319,7 @@ fn merge_coplanar(ents: &mut Entities) {
         let material = ents.faces[seed].attrs.material;
         // Flood across edges shared by exactly two faces of the region.
         let mut region = vec![seed];
-        let mut members: HashSet<FaceId> = HashSet::from([seed]);
+        let mut members: BTreeSet<FaceId> = BTreeSet::from([seed]);
         let mut k = 0;
         while k < region.len() {
             let f = region[k];
@@ -358,13 +358,13 @@ fn merge_coplanar(ents: &mut Entities) {
 }
 
 /// Replaces the faces of `region` by one face bounded by the region's boundary.
-fn merge_region(ents: &mut Entities, region: &[FaceId], members: &HashSet<FaceId>, plane: Plane) {
+fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceId>, plane: Plane) {
     let interior = |ents: &Entities, e| {
         let faces = &ents.edges[e].faces;
         faces.len() == 2 && faces.iter().all(|f| members.contains(f))
     };
     // Boundary coedges in loop direction, by start vertex.
-    let mut next: HashMap<VertexId, Vec<CoEdge>> = HashMap::new();
+    let mut next: BTreeMap<VertexId, Vec<CoEdge>> = BTreeMap::new();
     let mut count = 0;
     for &f in region {
         for c in &ents.faces[f].outer.coedges {
@@ -411,7 +411,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &HashSet<FaceId
     };
     let normal = ents.faces[region[0]].normal;
     let attrs = ents.faces[region[0]].attrs.clone();
-    let mut interior_edges: HashSet<_> = HashSet::new();
+    let mut interior_edges: BTreeSet<_> = BTreeSet::new();
     for &f in region {
         for c in &ents.faces[f].outer.coedges {
             if interior(ents, c.edge) {

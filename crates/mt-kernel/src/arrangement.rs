@@ -5,7 +5,7 @@
 //! creates faces for the cells it wants. Edges never cross (sticky geometry splits them),
 //! so the edges form a planar graph and its cells come from a half-edge walk.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use glam::{DVec2, DVec3};
 
@@ -37,7 +37,7 @@ pub fn edges_in_plane(ents: &Entities, plane: &Plane) -> Vec<EdgeId> {
 
 /// Drops edges with a free end, repeatedly: they cannot bound a region.
 fn two_core(ents: &Entities, edges: &[EdgeId]) -> Vec<EdgeId> {
-    let mut degree: HashMap<VertexId, usize> = HashMap::new();
+    let mut degree: BTreeMap<VertexId, usize> = BTreeMap::new();
     for &e in edges {
         *degree.entry(ents.edges[e].start).or_default() += 1;
         *degree.entry(ents.edges[e].end).or_default() += 1;
@@ -69,7 +69,7 @@ fn two_core(ents: &Entities, edges: &[EdgeId]) -> Vec<EdgeId> {
         .collect()
 }
 
-fn find(parent: &mut HashMap<VertexId, VertexId>, v: VertexId) -> VertexId {
+fn find(parent: &mut BTreeMap<VertexId, VertexId>, v: VertexId) -> VertexId {
     let p = parent[&v];
     if p == v {
         return v;
@@ -88,7 +88,7 @@ pub fn cells(ents: &Entities, plane: &Plane, edges: &[EdgeId]) -> Vec<Cell> {
     let pt = |v: VertexId| plane.project(ents.pos(v));
 
     // Outgoing half-edges per vertex, sorted counter-clockwise by direction.
-    let mut outgoing: HashMap<VertexId, Vec<CoEdge>> = HashMap::new();
+    let mut outgoing: BTreeMap<VertexId, Vec<CoEdge>> = BTreeMap::new();
     for &e in &edges {
         let edge = &ents.edges[e];
         outgoing.entry(edge.start).or_default().push(CoEdge {
@@ -126,7 +126,7 @@ pub fn cells(ents: &Entities, plane: &Plane, edges: &[EdgeId]) -> Vec<Cell> {
             .expect("twin is outgoing at b");
         list[(i + list.len() - 1) % list.len()]
     };
-    let mut visited: HashMap<CoEdge, bool> = HashMap::new();
+    let mut visited: BTreeMap<CoEdge, bool> = BTreeMap::new();
     let mut cycles: Vec<(Vec<CoEdge>, Vec<DVec2>, f64)> = Vec::new();
     for list in outgoing.values() {
         for &start in list {
@@ -150,13 +150,13 @@ pub fn cells(ents: &Entities, plane: &Plane, edges: &[EdgeId]) -> Vec<Cell> {
     }
 
     // Connected components, to attach each component's outline as a hole.
-    let mut parent: HashMap<VertexId, VertexId> = outgoing.keys().map(|v| (*v, *v)).collect();
+    let mut parent: BTreeMap<VertexId, VertexId> = outgoing.keys().map(|v| (*v, *v)).collect();
     for &e in &edges {
         let (a, b) = (ents.edges[e].start, ents.edges[e].end);
         let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
         parent.insert(ra, rb);
     }
-    let component = |parent: &mut HashMap<VertexId, VertexId>, c: &[CoEdge]| {
+    let component = |parent: &mut BTreeMap<VertexId, VertexId>, c: &[CoEdge]| {
         find(parent, ents.coedge_ends(c[0]).0)
     };
 
@@ -196,7 +196,11 @@ pub fn cells(ents: &Entities, plane: &Plane, edges: &[EdgeId]) -> Vec<Cell> {
         .collect()
 }
 
-/// Centroid of the largest triangle of a triangulation: inside the region.
+/// Centroid of the largest triangle of a triangulation that is inside the region.
+///
+/// Ear clipping can return triangles outside the region when a loop touches itself (a
+/// hole around two blocks joined by a bridge edge runs along the bridge twice), so each
+/// centroid is checked against the loops, largest triangle first.
 pub fn interior_point(outer: &[DVec2], holes: &[&Vec<DVec2>]) -> DVec2 {
     let mut flat: Vec<f64> = outer.iter().flat_map(|p| [p.x, p.y]).collect();
     let mut starts = Vec::new();
@@ -206,12 +210,32 @@ pub fn interior_point(outer: &[DVec2], holes: &[&Vec<DVec2>]) -> DVec2 {
     }
     let at = |i: usize| DVec2::new(flat[2 * i], flat[2 * i + 1]);
     let tris = earcutr::earcut(&flat, &starts, 2).unwrap_or_default();
-    tris.as_chunks::<3>()
+    let mut tris: Vec<(DVec2, DVec2, DVec2)> = tris
+        .as_chunks::<3>()
         .0
         .iter()
         .map(|t| (at(t[0]), at(t[1]), at(t[2])))
-        .max_by(|a, b| tri_area(*a).total_cmp(&tri_area(*b)))
-        .map_or(outer[0], |(a, b, c)| (a + b + c) / 3.0)
+        .collect();
+    let centroid = |(a, b, c): (DVec2, DVec2, DVec2)| (a + b + c) / 3.0;
+    let largest = |tris: &[(DVec2, DVec2, DVec2)]| {
+        tris.iter()
+            .copied()
+            .max_by(|a, b| tri_area(*a).total_cmp(&tri_area(*b)))
+    };
+    let Some(best) = largest(&tris) else {
+        return outer[0];
+    };
+    let inside =
+        |q: DVec2| point_in_polygon(q, outer) && !holes.iter().any(|h| point_in_polygon(q, h));
+    if inside(centroid(best)) {
+        return centroid(best);
+    }
+    // Rare: try the others, largest first (ties keep the triangulation's order).
+    tris.sort_by(|a, b| tri_area(*b).total_cmp(&tri_area(*a)));
+    tris.iter()
+        .map(|t| centroid(*t))
+        .find(|q| inside(*q))
+        .unwrap_or(centroid(best))
 }
 
 fn tri_area((a, b, c): (DVec2, DVec2, DVec2)) -> f64 {

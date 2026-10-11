@@ -8,7 +8,7 @@
 //!   sticky-geometry path (`ops::insert_line`), so welding, splitting and merging come
 //!   from the same code as drawing. Faces that became non-planar are folded.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DMat4, DVec2, DVec3};
 
@@ -23,7 +23,7 @@ use crate::spatial::Aabb;
 
 /// Vertices used by the given edges and faces (all loops), without duplicates.
 pub fn vertices_of(ents: &Entities, edges: &[EdgeId], faces: &[FaceId]) -> Vec<VertexId> {
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     let mut push = |v: VertexId| {
         if seen.insert(v) {
@@ -48,7 +48,7 @@ pub fn vertices_of(ents: &Entities, edges: &[EdgeId], faces: &[FaceId]) -> Vec<V
 /// then welds each moved vertex onto any other vertex within TOL (merging duplicate
 /// edges and rewiring face loops), and folds faces that became non-planar.
 pub fn transform_vertices(ents: &mut Entities, vertices: &[VertexId], xf: DMat4) {
-    let moves: HashMap<VertexId, DVec3> = vertices
+    let moves: BTreeMap<VertexId, DVec3> = vertices
         .iter()
         .filter_map(|&v| Some((v, xf.transform_point3(ents.vertices.get(v)?.pos))))
         .collect();
@@ -130,7 +130,7 @@ fn gather(src: &Entities, edges: &[EdgeId], faces: &[FaceId], xf: DMat4) -> Gath
         .filter(|&f| src.faces.contains_key(f))
         .collect();
     let mut all_edges: Vec<EdgeId> = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
     for e in edges
         .iter()
         .copied()
@@ -192,7 +192,7 @@ fn gather(src: &Entities, edges: &[EdgeId], faces: &[FaceId], xf: DMat4) -> Gath
 
 fn insert_gathered(ents: &mut Entities, g: Gathered) -> (Vec<EdgeId>, Vec<FaceId>) {
     // New curves for copied curves.
-    let curve_map: HashMap<CurveId, CurveId> = g
+    let curve_map: BTreeMap<CurveId, CurveId> = g
         .curves
         .into_iter()
         .map(|(c, arc)| {
@@ -385,7 +385,7 @@ fn fold(rec: &FaceRecord, fit: &Plane, out: &mut Vec<Desired>, folds: &mut Vec<(
         flat.extend([q.x, q.y]);
     }
     let mut starts = Vec::new();
-    let mut boundary: HashSet<(usize, usize)> = HashSet::new();
+    let mut boundary: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut at = 0;
     for (i, l) in rec.loops.iter().enumerate() {
         if i > 0 {
@@ -413,7 +413,7 @@ fn fold(rec: &FaceRecord, fit: &Plane, out: &mut Vec<Desired>, folds: &mut Vec<(
             Some(([t[0], t[1], t[2]], Plane::new(n, a)))
         })
         .collect();
-    let mut by_side: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut by_side: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     for (i, (t, _)) in tris.iter().enumerate() {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -560,8 +560,8 @@ fn transform_arc(a: &Arc, xf: &DMat4) -> Option<Arc> {
 }
 
 /// Curves touched by the move keep their arc only if all of their vertices move.
-fn update_arcs(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, xf: DMat4) {
-    let touched: HashSet<CurveId> = moves
+fn update_arcs(ents: &mut Entities, moves: &BTreeMap<VertexId, DVec3>, xf: DMat4) {
+    let touched: BTreeSet<CurveId> = moves
         .keys()
         .flat_map(|v| ents.vertices[*v].edges.iter())
         .filter_map(|e| ents.edges[*e].attrs.curve)
@@ -584,7 +584,7 @@ fn update_arcs(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, xf: DMat4)
 
 /// Moves the vertices if the result needs no topology change; otherwise leaves the
 /// entities untouched and returns false.
-fn try_in_place(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId]) -> bool {
+fn try_in_place(ents: &mut Entities, moves: &BTreeMap<VertexId, DVec3>, flip: &[FaceId]) -> bool {
     let old: Vec<(VertexId, DVec3)> = moves.keys().map(|&v| (v, ents.pos(v))).collect();
     for &f in flip {
         flip_face(ents, f);
@@ -619,7 +619,7 @@ fn try_in_place(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[F
 
 fn in_place_ok(
     ents: &mut Entities,
-    moves: &HashMap<VertexId, DVec3>,
+    moves: &BTreeMap<VertexId, DVec3>,
     edges: &[EdgeId],
     faces: &[FaceId],
 ) -> bool {
@@ -741,7 +741,7 @@ fn in_place_ok(
 /// Takes out every edge and face touching the moved vertices and inserts them again at
 /// the new positions through the sticky-geometry path.
 /// Returns the box of the rebuilt geometry.
-fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId]) -> Aabb {
+fn rebuild(ents: &mut Entities, moves: &BTreeMap<VertexId, DVec3>, flip: &[FaceId]) -> Aabb {
     let pos = |ents: &Entities, v: VertexId| moves.get(&v).copied().unwrap_or(ents.pos(v));
     let mut edges: Vec<EdgeId> = moves
         .keys()
@@ -809,7 +809,7 @@ fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId
     let desired = desired_faces(ents, &records);
     fill(ents, &desired, false);
 
-    let live: HashSet<CurveId> = ents.edges.values().filter_map(|e| e.attrs.curve).collect();
+    let live: BTreeSet<CurveId> = ents.edges.values().filter_map(|e| e.attrs.curve).collect();
     ents.curves.retain(|c, _| live.contains(&c));
     Aabb::of(
         segments.iter().flat_map(|(a, b, _)| [*a, *b]).chain(

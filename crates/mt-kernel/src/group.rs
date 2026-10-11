@@ -9,7 +9,7 @@
 //! - Explode merges the contents with the surrounding geometry at shared vertices and
 //!   overlapping edges (vertex welding); edges crossing mid-span are not split.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use glam::{DMat3, DMat4, DVec3};
 use slotmap::SlotMap;
@@ -30,9 +30,9 @@ pub fn copy_raw(
 ) -> Vec<VertexId> {
     let mirror = DMat3::from_mat4(xf).determinant() < 0.0;
     let normal_xf = DMat3::from_mat4(xf).inverse().transpose();
-    let mut vmap: HashMap<VertexId, VertexId> = HashMap::new();
-    let mut emap: HashMap<EdgeId, EdgeId> = HashMap::new();
-    let mut cmap: HashMap<CurveId, CurveId> = HashMap::new();
+    let mut vmap: BTreeMap<VertexId, VertexId> = BTreeMap::new();
+    let mut emap: BTreeMap<EdgeId, EdgeId> = BTreeMap::new();
+    let mut cmap: BTreeMap<CurveId, CurveId> = BTreeMap::new();
     let all_edges: Vec<EdgeId> = edges
         .iter()
         .copied()
