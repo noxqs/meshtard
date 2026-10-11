@@ -9,7 +9,9 @@ use mt_kernel::mesh_import::MeshOptions;
 
 use super::{Asset, Source};
 
-pub(crate) const EXTENSIONS: [&str; 5] = ["skp", "glb", "gltf", "obj", "stl"];
+pub(crate) const EXTENSIONS: [&str; 9] = [
+    "skp", "glb", "gltf", "obj", "stl", "fbx", "ply", "3mf", "3ds",
+];
 /// Most files listed from all folders, and how deep subfolders are looked into.
 const MAX_FILES: usize = 5000;
 const MAX_DEPTH: usize = 6;
@@ -85,19 +87,17 @@ pub(crate) fn load_model(path: &Path) -> Result<mt_kernel::Model, String> {
             Ok(mt_kernel::import::from_skp(&src))
         }
         "glb" | "gltf" => crate::import::read_gltf(path, true),
-        e @ ("obj" | "stl") => {
-            let stl = e == "stl";
-            let units = if stl {
-                mt_kernel::mesh_export::Units::Millimeters
-            } else {
-                mt_kernel::mesh_export::Units::Meters
-            };
+        e => {
+            let kind = mt_kernel::formats::Kind::from_extension(e)
+                .ok_or_else(|| format!("Unsupported file {}.", path.display()))?;
+            // Units and axes as the import dialog defaults them for this format.
+            let (units, y_up) = kind.default_hints();
             let opts = MeshOptions {
                 inches_per_unit: 1.0 / units.per_inch(),
-                y_up: !stl,
+                y_up,
                 merge_coplanar: true,
             };
-            let (materials, ents) = crate::import::read_mesh(path, stl, &opts, 0)?;
+            let (materials, ents) = crate::import::read_mesh(path, kind, &opts, 0, true)?;
             if ents.faces.is_empty() {
                 return Err(format!("No faces in {}.", path.display()));
             }
@@ -115,7 +115,6 @@ pub(crate) fn load_model(path: &Path) -> Result<mt_kernel::Model, String> {
                 ..Default::default()
             })
         }
-        _ => Err(format!("Cannot import {}.", path.display())),
     }
 }
 
