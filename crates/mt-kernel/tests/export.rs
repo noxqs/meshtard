@@ -237,6 +237,9 @@ fn curves_components_groups_guides_sections() {
     assert!(group.is_some(), "group with a nested component instance");
     assert_eq!(r.root.guides.len(), 2);
     assert_eq!(r.root.section_planes.len(), 1);
+    let s = &r.root.section_planes[0];
+    assert!((s.point.z - 5.0).abs() < 1e-9, "{:?}", s.point);
+    assert!((s.normal - DVec3::Z).length() < 1e-9);
     let _ = box_def;
 }
 
@@ -499,4 +502,213 @@ fn dimension_offset_sign_round_trips() {
             d.offset
         );
     }
+}
+
+/// A section plane reopens in its plane, drawn around the model rather than at the
+/// origin's foot on the plane (the file keeps only the plane).
+#[test]
+fn section_plane_reopens_around_the_model() {
+    let mut m = Model::default();
+    square(&mut m.root, DVec3::new(100.0, 200.0, 0.0), 10.0);
+    for (point, normal) in [
+        (DVec3::new(105.0, 0.0, 0.0), DVec3::X),
+        (DVec3::new(0.0, 0.0, 3.0), DVec3::new(0.0, 0.6, 0.8)),
+    ] {
+        m.root.section_planes.push(mt_kernel::SectionPlane {
+            point,
+            normal,
+            name: String::new(),
+            hidden: false,
+        });
+    }
+    let r = round_trip(&m);
+    assert_eq!(r.root.section_planes.len(), 2);
+    let center = DVec3::new(105.0, 205.0, 0.0);
+    for (a, b) in m.root.section_planes.iter().zip(&r.root.section_planes) {
+        assert!((a.normal - b.normal).length() < 1e-9);
+        // Same plane: the reopened point lies on the original plane.
+        assert!(
+            (b.point - a.point).dot(a.normal).abs() < 1e-9,
+            "{:?}",
+            b.point
+        );
+        // Drawn where the model is: the model center projected onto the plane.
+        let expected = center - a.normal * (center - a.point).dot(a.normal);
+        assert!((b.point - expected).length() < 1e-9, "{:?}", b.point);
+    }
+}
+
+/// Every style setting with a known style item survives save and reopen, with and
+/// without geometry; the defaults come back as they were.
+#[test]
+fn style_settings_round_trip() {
+    use mt_kernel::model::{FaceStyle, StyleSettings};
+    for with_geometry in [false, true] {
+        let mut m = Model::default();
+        if with_geometry {
+            square(&mut m.root, DVec3::ZERO, 10.0);
+        }
+        assert_eq!(round_trip(&m).style, StyleSettings::default());
+        m.style = StyleSettings {
+            edges: false,
+            profiles: false,
+            profile_width: 5.0,
+            section_cut_width: 7.0,
+            face_style: FaceStyle::HiddenLine,
+            xray: true,
+            section_planes: false,
+            section_cuts: false,
+            section_fill: false,
+            section_fill_color: [12, 34, 56],
+            axes: false,
+            guides: false,
+            hidden_geometry: true,
+            back_edges: true,
+            depth_cue: true,
+            depth_cue_width: 6.0,
+            extension: true,
+            extension_length: 9.0,
+            ..StyleSettings::default()
+        };
+        assert_eq!(round_trip(&m).style, m.style, "geometry: {with_geometry}");
+        // The section display bits are independent.
+        m.style.section_planes = true;
+        assert_eq!(round_trip(&m).style, m.style);
+    }
+    for face_style in [
+        FaceStyle::Wireframe,
+        FaceStyle::HiddenLine,
+        FaceStyle::Shaded,
+        FaceStyle::ShadedWithTextures,
+    ] {
+        let mut m = Model::default();
+        m.style.face_style = face_style;
+        assert_eq!(round_trip(&m).style.face_style, face_style);
+    }
+}
+
+/// Units and snapping (the file's `UnitsOptions`) survive save and reopen.
+#[test]
+fn units_options_round_trip() {
+    use mt_skp::OptionValue::{Bool, Double, Int};
+    for with_geometry in [false, true] {
+        let mut m = Model::default();
+        if with_geometry {
+            square(&mut m.root, DVec3::ZERO, 10.0);
+        }
+        let options = [
+            ("UnitsOptions", "LengthUnit", Int(2)),
+            ("UnitsOptions", "LengthFormat", Int(0)),
+            ("UnitsOptions", "LengthPrecision", Int(1)),
+            ("UnitsOptions", "LengthSnapEnabled", Bool(false)),
+            ("UnitsOptions", "LengthSnapLength", Double(0.5)),
+            ("UnitsOptions", "AnglePrecision", Int(2)),
+            ("UnitsOptions", "AngleSnapEnabled", Bool(false)),
+            ("UnitsOptions", "SnapAngle", Double(7.5)),
+        ];
+        let bytes = export::to_skp_with(&m, &options).unwrap();
+        let src = mt_skp::parse(&bytes).unwrap();
+        for (section, key, value) in options {
+            assert_eq!(src.named_options[section][key], value, "{key}");
+        }
+        // Without options the template's stay (Architectural inches, 1/16").
+        let src = mt_skp::parse(&export::to_skp(&m).unwrap()).unwrap();
+        assert_eq!(src.named_options["UnitsOptions"]["LengthFormat"], Int(1));
+    }
+    // A type mismatch is refused rather than written.
+    let m = Model::default();
+    assert!(export::to_skp_with(&m, &[("UnitsOptions", "LengthUnit", Bool(true))]).is_err());
+}
+
+/// A 2 x 1 PNG.
+const PNG: [u8; 70] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x7b, 0x40, 0xe8,
+    0xdd, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x38, 0x21, 0x07, 0x04,
+    0x27, 0x00, 0x07, 0x23, 0x02, 0x09, 0xe4, 0x58, 0x88, 0x39, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// Image entities reopen as image entities (`CImage`), at the root and inside a
+/// group, alongside tags and components.
+#[test]
+fn images_round_trip() {
+    use mt_kernel::model::Definition;
+    let mut m = Model::default();
+    m.layers.push(Layer {
+        name: "Photos".into(),
+        color: [1, 2, 3],
+        visible: true,
+    });
+    m.materials.push(Material {
+        name: "photo.png".into(),
+        color: [200, 30, 30],
+        opacity: 1.0,
+        texture: Some(mt_kernel::texture::Texture {
+            filename: "photo.png".into(),
+            data: PNG.as_slice().into(),
+            width: 20.0,
+            height: 10.0,
+            colorize: false,
+        }),
+    });
+    let mut picture = Entities::new();
+    square(&mut picture, DVec3::ZERO, 20.0);
+    for f in picture.faces.values_mut() {
+        f.attrs.material = Some(0);
+        f.attrs.back_material = Some(0);
+    }
+    let image = m.definitions.insert(Definition {
+        name: "photo.png".into(),
+        entities: picture,
+        is_image: true,
+        ..Default::default()
+    });
+    let place = |x: f64, layer| mt_kernel::Instance {
+        definition: image,
+        transform: DMat4::from_translation(DVec3::X * x),
+        name: String::new(),
+        hidden: false,
+        locked: false,
+        layer,
+        material: None,
+    };
+    m.root.instances.push(place(0.0, Some(1)));
+    let mut group = Entities::new();
+    square(&mut group, DVec3::Y * 50.0, 5.0);
+    group.instances.push(place(30.0, None));
+    let g = m.definitions.insert(Definition {
+        name: "Group#1".into(),
+        entities: group,
+        is_group: true,
+        ..Default::default()
+    });
+    m.root.instances.push(mt_kernel::Instance {
+        definition: g,
+        ..place(0.0, None)
+    });
+    square(&mut m.root, DVec3::Y * -50.0, 5.0);
+
+    let r = round_trip(&m);
+    let images: Vec<_> = r.definitions.values().filter(|d| d.is_image).collect();
+    assert_eq!(images.len(), 1);
+    assert!(!images[0].is_group);
+    assert_eq!(images[0].entities.faces.len(), 1);
+    let root_image = r
+        .root
+        .instances
+        .iter()
+        .find(|i| r.definitions[i.definition].is_image)
+        .expect("image at the root");
+    assert_eq!(r.layers[root_image.layer.unwrap()].name, "Photos");
+    let group = r
+        .root
+        .instances
+        .iter()
+        .find(|i| r.definitions[i.definition].is_group)
+        .expect("group");
+    let nested = &r.definitions[group.definition].entities.instances;
+    assert_eq!(nested.len(), 1);
+    assert!(r.definitions[nested[0].definition].is_image);
+    assert!((nested[0].transform.transform_point3(DVec3::ZERO) - DVec3::X * 30.0).length() < 1e-9);
 }

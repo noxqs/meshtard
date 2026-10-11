@@ -313,6 +313,38 @@ pub struct Definition {
     pub is_image: bool,
 }
 
+/// A typed model option value (SketchUp's options manager, style items).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OptionValue {
+    Bool(bool),
+    Int(i32),
+    Double(f64),
+}
+
+impl OptionValue {
+    pub fn as_bool(self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub fn as_int(self) -> Option<i32> {
+        match self {
+            Self::Int(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(self) -> Option<f64> {
+        match self {
+            Self::Double(v) => Some(v),
+            Self::Int(v) => Some(f64::from(v)),
+            Self::Bool(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     /// e.g. `{25.0.575}`.
@@ -332,6 +364,10 @@ pub struct Model {
     pub styles: Vec<Style>,
     /// Dictionaries on the model itself (VFF only).
     pub attribute_dictionaries: AttrDicts,
+    /// The options manager by section and key (legacy files only), e.g.
+    /// `UnitsOptions` / `LengthUnit`. Names are those of SketchUp's Ruby
+    /// `OptionsManager`.
+    pub named_options: BTreeMap<String, BTreeMap<String, OptionValue>>,
     material_indices: BTreeMap<EntityId, usize>,
 }
 
@@ -580,6 +616,7 @@ pub(crate) fn build_model(mut p: RawParsed) -> Model {
         materials,
         styles,
         attribute_dictionaries: p.model_attribute_dicts,
+        named_options: p.named_options,
         material_indices,
     }
 }

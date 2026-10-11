@@ -8,7 +8,7 @@
 //! as the writer did (the "slot" numbering), starting at a base it has to
 //! recover first because the walk starts mid-file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use regex::Regex;
@@ -2559,7 +2559,77 @@ fn parse_into(data: &[u8], out: &mut RawParsed) -> Result<(), Error> {
     };
     out.pages = scan_pages_for_layers(data, start_pos, table).unwrap_or_default();
     out.styles = scan_styles(data);
+    out.named_options = scan_named_options(data);
     Ok(())
+}
+
+// ── named options ──────────────────────────────────────────────────────
+//
+// The model's options manager, early in the file: a u32 section count, then
+// per section its name and entries [CString key][u8 type][value] up to an
+// empty key. Types: 7 bool (u8), 4 int32, 6 f64, 10 string. Sections and keys
+// are those of SketchUp's Ruby `OptionsManager` (`UnitsOptions` / `LengthUnit`
+// ...); their order differs between files. Seen in SketchUp 6 to 2020 files
+// and the writer's scaffold.
+
+type NamedOptions = BTreeMap<String, BTreeMap<String, crate::model::OptionValue>>;
+
+fn scan_named_options(d: &[u8]) -> NamedOptions {
+    use crate::model::OptionValue;
+    let marked = |name: &str| -> Vec<u8> {
+        [0xff, 0xfe, 0xff, name.len() as u8]
+            .into_iter()
+            .chain(name.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    };
+    // The first section is the first of the known names to appear.
+    let Some(at) = [
+        "PageOptions",
+        "UnitsOptions",
+        "SlideshowOptions",
+        "NamedOptions",
+    ]
+    .iter()
+    .filter_map(|n| {
+        let needle = marked(n);
+        d.windows(needle.len()).position(|w| w == needle.as_slice())
+    })
+    .min() else {
+        return BTreeMap::new();
+    };
+    let Some(count) = at.checked_sub(4).and_then(|p| u32_at(d, p).ok()) else {
+        return BTreeMap::new();
+    };
+    let mut r = R { d, p: at };
+    let mut out = BTreeMap::new();
+    let mut read = || -> Result<(), Error> {
+        for _ in 0..count.min(64) {
+            let section = r.utf16()?;
+            let mut entries = BTreeMap::new();
+            loop {
+                let key = r.utf16()?;
+                if key.is_empty() {
+                    break;
+                }
+                let value = match r.u8()? {
+                    7 => OptionValue::Bool(r.u8()? != 0),
+                    4 => OptionValue::Int(r.u32()? as i32),
+                    6 => OptionValue::Double(r.f64()?),
+                    10 => {
+                        r.utf16()?;
+                        continue;
+                    }
+                    t => return Err(bad(format!("unknown option type {t}"))),
+                };
+                entries.insert(key, value);
+            }
+            out.insert(section, entries);
+        }
+        Ok(())
+    };
+    // A malformed tail keeps the sections read so far.
+    let _ = read();
+    out
 }
 
 #[cfg(test)]
@@ -2725,6 +2795,30 @@ mod tests {
         assert_eq!(m.materials.len(), 1);
         assert_eq!(m.materials[0].name, "RedMat");
         assert_eq!(layer_names(&m), BTreeSet::from(["Layer0"]));
+    }
+
+    #[test]
+    fn named_options() {
+        use crate::model::OptionValue;
+        for file in ["blank_v17.skp", "capilla_quiroz_v17.skp", "gondola_v20.skp"] {
+            let Some(m) = fixture(file) else {
+                return;
+            };
+            let units = &m.named_options["UnitsOptions"];
+            assert!(
+                matches!(units["LengthUnit"], OptionValue::Int(0..=5)),
+                "{file}"
+            );
+            assert!(matches!(units["SnapAngle"], OptionValue::Double(_)));
+            assert!(m.named_options.contains_key("PageOptions"));
+        }
+        if let Some(m) = fixture("blank_v17.skp") {
+            let units = &m.named_options["UnitsOptions"];
+            assert_eq!(units["LengthFormat"], OptionValue::Int(1));
+            assert_eq!(units["LengthPrecision"], OptionValue::Int(4));
+            assert_eq!(units["LengthSnapLength"], OptionValue::Double(0.0625));
+            assert_eq!(units["LengthSnapEnabled"], OptionValue::Bool(true));
+        }
     }
 
     #[test]

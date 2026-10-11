@@ -1336,7 +1336,8 @@ impl App {
             return false;
         };
         preferences::before_save(&self.prefs, &path);
-        let result = mt_kernel::export::to_skp(&doc.model)
+        let result = doc
+            .to_skp()
             .map_err(|e| e.to_string())
             .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
         match result {

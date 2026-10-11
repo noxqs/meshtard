@@ -222,6 +222,7 @@ pub struct RawParsed {
     pub definitions: BTreeMap<EntityId, RawDefinition>,
     pub root: RawDefinition,
     pub model_attribute_dicts: AttrDicts,
+    pub named_options: BTreeMap<String, BTreeMap<String, crate::model::OptionValue>>,
 }
 
 impl Default for RawParsed {
@@ -249,6 +250,7 @@ impl Default for RawParsed {
                 ..Default::default()
             },
             model_attribute_dicts: AttrDicts::new(),
+            named_options: BTreeMap::new(),
         }
     }
 }

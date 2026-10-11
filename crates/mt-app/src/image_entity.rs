@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_as_a_group_with_its_textured_face() {
+    fn saved_as_an_image_entity() {
         let mut png = Vec::new();
         image::RgbImage::from_pixel(4, 2, image::Rgb([200, 30, 30]))
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(back.root.instances.len(), 1);
         let inst = &back.root.instances[0];
         let def = &back.definitions[inst.definition];
-        assert!(def.is_group && !def.is_image);
+        assert!(def.is_image && !def.is_group);
         let face = def.entities.faces.values().next().unwrap();
         let mat = &back.materials[face.attrs.material.unwrap()];
         assert!(mat.texture.is_some());

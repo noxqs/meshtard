@@ -200,7 +200,7 @@ impl App {
                 let path = dir.join(format!("{name}.skp"));
                 let result = std::fs::create_dir_all(&dir)
                     .map_err(|e| e.to_string())
-                    .and_then(|()| mt_kernel::export::to_skp(&doc.model).map_err(|e| e.to_string()))
+                    .and_then(|()| doc.to_skp().map_err(|e| e.to_string()))
                     .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
                 self.message = Some(match result {
                     Ok(()) => {

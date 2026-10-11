@@ -21,8 +21,8 @@ pub struct Document {
     saved_camera: Option<mt_skp::ViewCamera>,
     /// Unit for typed and displayed lengths.
     pub units: mt_infer::units::LengthUnit,
-    /// The rest of Model Info > Units (format, precision, snapping). Not written to
-    /// the .skp: the writer keeps its scaffold's units.
+    /// The rest of Model Info > Units (format, precision, snapping). Saved with the
+    /// unit in the file's `UnitsOptions` (see [`units_to_options`]).
     pub unit_options: mt_infer::units::UnitsOptions,
     /// The model and edit context before each edit, most recent last (Edit > Undo).
     undo: Vec<Snapshot>,
@@ -165,6 +165,90 @@ const GUIDE_EXTENT: f64 = 1e5;
 /// Guide color and dash length (draft).
 const GUIDE_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 
+/// SketchUp's `UnitsOptions` codes (Ruby `Length::Inches` ... `Length::Meter`,
+/// `Length::Decimal` ... `Length::Fractional`; the scaffold's Architectural inches
+/// read back as `LengthFormat` 1 / `LengthUnit` 0).
+const UNIT_CODES: [(mt_infer::units::LengthUnit, i32); 5] = {
+    use mt_infer::units::LengthUnit::*;
+    [
+        (Inch, 0),
+        (Foot, 1),
+        (Millimeter, 2),
+        (Centimeter, 3),
+        (Meter, 4),
+    ]
+};
+const FORMAT_CODES: [(mt_infer::units::LengthFormat, i32); 4] = {
+    use mt_infer::units::LengthFormat::*;
+    [
+        (Decimal, 0),
+        (Architectural, 1),
+        (Engineering, 2),
+        (Fractional, 3),
+    ]
+};
+
+/// Model Info > Units as the file's `UnitsOptions` entries.
+pub fn units_to_options(
+    unit: mt_infer::units::LengthUnit,
+    o: &mt_infer::units::UnitsOptions,
+) -> Vec<mt_kernel::export::NamedOption<'static>> {
+    use mt_skp::OptionValue::{Bool, Double, Int};
+    let unit_code = UNIT_CODES.iter().find(|x| x.0 == unit).map_or(0, |c| c.1);
+    let format_code = FORMAT_CODES
+        .iter()
+        .find(|x| x.0 == o.format)
+        .map_or(0, |c| c.1);
+    [
+        ("LengthUnit", Int(unit_code)),
+        ("LengthFormat", Int(format_code)),
+        ("LengthPrecision", Int(i32::from(o.precision))),
+        ("LengthSnapEnabled", Bool(o.length_snapping)),
+        ("LengthSnapLength", Double(o.snap_length)),
+        ("AnglePrecision", Int(i32::from(o.angle_precision))),
+        ("AngleSnapEnabled", Bool(o.angle_snapping)),
+        ("SnapAngle", Double(o.snap_angle)),
+    ]
+    .into_iter()
+    .map(|(k, v)| ("UnitsOptions", k, v))
+    .collect()
+}
+
+/// Model Info > Units from a file's `UnitsOptions`; entries missing or out of range
+/// keep `unit` / `fallback`'s values.
+pub fn units_from_options(
+    o: &std::collections::BTreeMap<String, mt_skp::OptionValue>,
+    unit: mt_infer::units::LengthUnit,
+    fallback: mt_infer::units::UnitsOptions,
+) -> (mt_infer::units::LengthUnit, mt_infer::units::UnitsOptions) {
+    let int = |k: &str| o.get(k).and_then(|v| v.as_int());
+    let flag = |k: &str| o.get(k).and_then(|v| v.as_bool());
+    let num = |k: &str| o.get(k).and_then(|v| v.as_f64()).filter(|v| v.is_finite());
+    let small = |k: &str| {
+        int(k)
+            .and_then(|v| u8::try_from(v).ok())
+            .filter(|&v| v <= 10)
+    };
+    let unit = int("LengthUnit")
+        .and_then(|c| UNIT_CODES.iter().find(|x| x.1 == c))
+        .map_or(unit, |x| x.0);
+    let mut out = fallback;
+    if let Some(f) = int("LengthFormat").and_then(|c| FORMAT_CODES.iter().find(|x| x.1 == c)) {
+        out.format = f.0;
+    }
+    out.precision = small("LengthPrecision").unwrap_or(out.precision);
+    out.length_snapping = flag("LengthSnapEnabled").unwrap_or(out.length_snapping);
+    out.snap_length = num("LengthSnapLength")
+        .filter(|&v| v > 0.0)
+        .unwrap_or(out.snap_length);
+    out.angle_precision = small("AnglePrecision").unwrap_or(out.angle_precision);
+    out.angle_snapping = flag("AngleSnapEnabled").unwrap_or(out.angle_snapping);
+    out.snap_angle = num("SnapAngle")
+        .filter(|&v| v > 0.0)
+        .unwrap_or(out.snap_angle);
+    (unit, out)
+}
+
 impl Document {
     pub fn open(path: &Path) -> Result<Self, mt_skp::Error> {
         let src = mt_skp::read(path)?;
@@ -173,21 +257,29 @@ impl Document {
             .as_deref()
             .and_then(mt_infer::units::LengthUnit::from_name)
             .unwrap_or(mt_infer::units::LengthUnit::Inch);
+        // VFF files give only the unit: whole millimeters as in SketchUp's metric
+        // templates (unverified), two decimals otherwise. Legacy files carry the
+        // whole of Model Info > Units.
+        let fallback = mt_infer::units::UnitsOptions {
+            precision: if units == mt_infer::units::LengthUnit::Millimeter {
+                0
+            } else {
+                2
+            },
+            ..Default::default()
+        };
+        let (units, unit_options) = src
+            .named_options
+            .get("UnitsOptions")
+            .map_or((units, fallback), |o| {
+                units_from_options(o, units, fallback)
+            });
         Ok(Self {
             path: path.to_owned(),
             model: import::from_skp(&src),
             units,
             saved_camera: src.camera,
-            // The reader gets only the unit; whole millimeters as in SketchUp's
-            // metric templates (unverified), two decimals otherwise.
-            unit_options: mt_infer::units::UnitsOptions {
-                precision: if units == mt_infer::units::LengthUnit::Millimeter {
-                    0
-                } else {
-                    2
-                },
-                ..Default::default()
-            },
+            unit_options,
             undo: Vec::new(),
             redo: Vec::new(),
             context: Vec::new(),
@@ -197,6 +289,12 @@ impl Document {
             has_file: true,
             last_hidden: None,
         })
+    }
+
+    /// The model as `.skp` bytes, with its units.
+    pub fn to_skp(&self) -> Result<Vec<u8>, mt_skp::WriteError> {
+        let options = units_to_options(self.units, &self.unit_options);
+        mt_kernel::export::to_skp_with(&self.model, &options)
     }
 
     /// A new empty model, as SketchUp shows at startup.
@@ -1298,6 +1396,40 @@ mod tests {
         let doc = Document::open(&corpus("Untitled.skp")).unwrap();
         let root_only = doc.model.root.edges.len();
         assert!(doc.scene().edges.len() > root_only);
+    }
+
+    /// Model Info > Units survive save and reopen through the file's UnitsOptions.
+    #[test]
+    fn units_survive_save_and_reopen() {
+        use mt_infer::units::{LengthFormat, LengthUnit, UnitsOptions};
+        let dir = std::env::temp_dir().join(format!("mt-units-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("units.skp");
+        for empty in [true, false] {
+            let mut doc = Document::untitled();
+            if !empty {
+                mt_kernel::add_line(&mut doc.model.root, DVec3::ZERO, DVec3::X);
+            }
+            doc.units = LengthUnit::Centimeter;
+            doc.unit_options = UnitsOptions {
+                format: LengthFormat::Decimal,
+                precision: 3,
+                length_snapping: false,
+                snap_length: 0.5,
+                angle_precision: 2,
+                angle_snapping: false,
+                snap_angle: 7.5,
+            };
+            std::fs::write(&path, doc.to_skp().unwrap()).unwrap();
+            let back = Document::open(&path).unwrap();
+            assert_eq!(back.units, doc.units);
+            assert_eq!(back.unit_options, doc.unit_options);
+        }
+        // A SketchUp-saved v17 file: its own units (Decimal, two places here).
+        let doc = Document::open(&corpus("capilla_quiroz_v17.skp")).unwrap();
+        assert_eq!(doc.unit_options.format, LengthFormat::Decimal);
+        assert_eq!(doc.unit_options.precision, 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

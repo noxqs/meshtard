@@ -17,6 +17,11 @@
 //! exactly equal. Coordinates are in inches. Files open in the standard "Iso"
 //! view.
 //!
+//! Extensions beyond OpenSKP: plain edges with flags, face colors, style items
+//! ([`SkpBuilder::set_style_item`]) and named options such as units
+//! ([`SkpBuilder::set_named_option`]) patched into the scaffold in place, image
+//! instances of ordinary definitions, and group instances of shared definitions.
+//!
 //! # Ordering
 //!
 //! The file is assembled from sections that each start numbering their archive
@@ -53,7 +58,9 @@
 
 mod archive;
 mod geom;
+mod settings;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,6 +70,8 @@ use archive::{
     ArcParams, ArchiveWriter, Body, CurveKind, FaceRecord, InstanceKind, InstanceRecord, shift_ref,
 };
 pub use geom::rotation_matrix;
+
+pub use crate::model::OptionValue;
 
 /// A point or vector in inches.
 pub type Point3 = [f64; 3];
@@ -707,6 +716,10 @@ pub struct SkpBuilder {
     allow_empty_root: bool,
     /// Front and back face colors written into the scaffold's style.
     face_colors: Option<([u8; 3], [u8; 3])>,
+    /// Style items written into both of the scaffold's style records.
+    style_items: Vec<(i32, OptionValue)>,
+    /// Named options (section, key, value) written into the scaffold.
+    options: Vec<(String, String, OptionValue)>,
     font_slot: Option<u32>,
 }
 
@@ -750,6 +763,8 @@ impl SkpBuilder {
             plane_tolerance: None,
             allow_empty_root: false,
             face_colors: None,
+            style_items: Vec::new(),
+            options: Vec::new(),
             font_slot: None,
         }
     }
@@ -1398,6 +1413,8 @@ impl SkpBuilder {
             self.ensure_geometry_writer()?;
         }
         let name = match (kind, p.name.as_deref()) {
+            // An image's string is its source path; `add_image` leaves it empty.
+            (InstanceKind::Image, _) => "",
             (InstanceKind::Group, Some("")) | (_, None) => def.name.as_str(),
             (_, Some(n)) => n,
         };
@@ -1515,6 +1532,23 @@ impl SkpBuilder {
     ) -> Result<(), WriteError> {
         self.with_root(|s, b| {
             s.instance_op(Section::Root, b, InstanceKind::Component, def, placement)
+        })?;
+        self.root_items += 1;
+        Ok(())
+    }
+
+    /// Places an already finished definition as an image entity (`CImage`) at the
+    /// root. The definition should hold the picture as one textured rectangle, as
+    /// [`add_image`](Self::add_image) builds it; unlike that call, this one works
+    /// with definitions and layers written in their usual sections. Not part of
+    /// OpenSKP's API. The placement's name is not used.
+    pub fn add_image_instance(
+        &mut self,
+        def: &DefinitionId,
+        placement: &Placement,
+    ) -> Result<(), WriteError> {
+        self.with_root(|s, b| {
+            s.instance_op(Section::Root, b, InstanceKind::Image, def, placement)
         })?;
         self.root_items += 1;
         Ok(())
@@ -1676,6 +1710,53 @@ impl SkpBuilder {
         self.face_colors = Some((front, back));
     }
 
+    /// Sets style item `id` (a `style.xml` item id, e.g. 1006 `DrawSilhouettes`) in
+    /// the style and its working copy. The value must match the item's kind in the
+    /// scaffold (bool, int, or double); a mismatch or an id the scaffold lacks fails
+    /// when the file is built. See `settings.rs` for where the ids come from.
+    pub fn set_style_item(&mut self, id: i32, value: OptionValue) {
+        self.style_items.retain(|(i, _)| *i != id);
+        self.style_items.push((id, value));
+    }
+
+    /// Sets a named option of the model's options manager, e.g. `UnitsOptions` /
+    /// `LengthUnit`. The scaffold must have it with the value's type (checked when
+    /// the file is built).
+    pub fn set_named_option(&mut self, section: &str, key: &str, value: OptionValue) {
+        self.options.retain(|(s, k, _)| s != section || k != key);
+        self.options.push((section.into(), key.into(), value));
+    }
+
+    /// The scaffold with face colors, style items and named options applied.
+    fn patched_scaffold(&self) -> Result<Cow<'static, [u8]>, WriteError> {
+        if self.face_colors.is_none() && self.style_items.is_empty() && self.options.is_empty() {
+            return Ok(Cow::Borrowed(SCAFFOLD));
+        }
+        let mut v = SCAFFOLD.to_vec();
+        if let Some((front, back)) = self.face_colors {
+            for &(f, b) in &STYLE_COLOR_POS {
+                v[f..f + 3].copy_from_slice(&front);
+                v[b..b + 3].copy_from_slice(&back);
+            }
+        }
+        if !self.style_items.is_empty() {
+            let records = settings::scaffold_style_items();
+            for &(id, value) in &self.style_items {
+                settings::patch_style_item(&mut v, &records, id, value)?;
+            }
+        }
+        for (section, key, value) in &self.options {
+            settings::patch_option(&mut v, section, key, *value)?;
+        }
+        Ok(Cow::Owned(v))
+    }
+
+    /// The blank document with this builder's face colors, style items and named
+    /// options (for a model with nothing to splice in).
+    pub fn to_empty_document(&self) -> Result<Vec<u8>, WriteError> {
+        Ok(self.patched_scaffold()?.into_owned())
+    }
+
     /// Write a file with nothing at the root (after [`begin_root`](Self::begin_root)).
     pub fn set_allow_empty_root(&mut self, allow: bool) {
         self.allow_empty_root = allow;
@@ -1723,19 +1804,8 @@ impl SkpBuilder {
         let definition_shift = self.definition_shift();
         let geometry_start = SCAFFOLD_NEXT_SLOT + material_shift + layer_shift + definition_shift;
         let geometry_shift = geometry.next_slot - geometry_start;
-        let patched;
-        let d: &[u8] = match self.face_colors {
-            None => SCAFFOLD,
-            Some((front, back)) => {
-                let mut v = SCAFFOLD.to_vec();
-                for &(f, b) in &STYLE_COLOR_POS {
-                    v[f..f + 3].copy_from_slice(&front);
-                    v[b..b + 3].copy_from_slice(&back);
-                }
-                patched = v;
-                &patched
-            }
-        };
+        let patched = self.patched_scaffold()?;
+        let d: &[u8] = &patched;
         let mut out =
             Vec::with_capacity(d.len() + self.material_writer.buf.len() + geometry.buf.len());
 
@@ -1870,6 +1940,22 @@ impl DefinitionBuilder<'_> {
             Section::Definition,
             &mut self.body,
             InstanceKind::Group,
+            def,
+            placement,
+        )
+    }
+
+    /// Nests an already finished definition as an image entity (see
+    /// [`SkpBuilder::add_image_instance`]).
+    pub fn add_image_instance(
+        &mut self,
+        def: &DefinitionId,
+        placement: &Placement,
+    ) -> Result<(), WriteError> {
+        self.skp.instance_op(
+            Section::Definition,
+            &mut self.body,
+            InstanceKind::Image,
             def,
             placement,
         )

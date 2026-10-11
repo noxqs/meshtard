@@ -17,6 +17,23 @@ These are the hardest to get any other way.
 - [ ] Save the empty default model as `tests/corpus/2026/empty_default.skp`, and `File > Save As` SketchUp 2017 as `tests/corpus/2017/empty_default.skp`.
 - [ ] Scenario 12 steps 1 to 3: open the meshtard-saved files in SketchUp and screenshot the Save As version list.
 
+## 1b. Writer format captures (FEATURES.md item 39)
+
+meshtard cannot save these yet because where the SketchUp 2017 format keeps them is unknown. Each capture is a pair of files that differ in one setting only, so a byte diff finds the field. Start every pair from the same model (`File > New`, draw one 100" box, make it a group, Iso view, save), change one thing, save again. Save each file twice: as 2026 into `tests/corpus/2026/w39/` and with `File > Save As` "SketchUp 2017" into `tests/corpus/2017/w39/`, same names.
+
+- [ ] `base.skp`: the starting model, nothing changed.
+- [ ] Scenes: `scene_one.skp` with one scene "A" (Add Scene, default properties); `scene_two.skp` with scenes "A" (Iso, perspective) and "B" (Top, Camera > Parallel Projection, tag "T1" hidden in it), "A" selected; `scene_props.skp` like `scene_two.skp` but scene B with only Camera Location ticked in its properties, and a description "desc".
+- [ ] Face style: `face_wireframe.skp`, `face_hiddenline.skp`, `face_monochrome.skp` (View > Face Style, nothing else changed). Confirms RenderMode values (meshtard writes 0 / 1, Monochrome unknown).
+- [ ] Edges: `edges_off.skp` (View > Edge Style > Edges off). Confirms EdgeDisplayMode 0.
+- [ ] Fog: `fog_on.skp` (Window > Fog: Display Fog on, distances moved, Use background color off, a red color).
+- [ ] Component Edit: `hide_rest.skp` and `hide_similar.skp` (View > Component Edit, one option each).
+- [ ] Axes: `axes_moved.skp` (Tools > Axes: origin at (10", 20", 30"), red axis turned 30 degrees about blue).
+- [ ] Lock: `lock_on.skp` (the group locked).
+- [ ] Two-point: `two_point.skp` (Camera > Two-Point Perspective).
+- [ ] Section planes: `section_active.skp` (a section plane on the box's top face, active) and `section_inactive.skp` (the same plane, not active); `section_moved.skp` (the plane's graphic moved within its plane with Move, if SketchUp allows it).
+- [ ] Image: `image.skp` (File > Import a PNG as Image). Confirms OpenSKP's uncalibrated `CImage` schema.
+- [ ] Open a meshtard-saved file with non-default style settings and units (Hidden Line, profiles off, X-ray, Model Info > Units in cm) and check that SketchUp shows them (style records vs. the model's own rendering options).
+
 ## 2. Scenarios with corpus files
 
 Run each scenario file in this folder step by step, in this order (most valuable first):

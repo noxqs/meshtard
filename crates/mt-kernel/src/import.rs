@@ -35,25 +35,22 @@ struct Maps<'a> {
 
 pub fn from_skp(src: &skp::Model) -> Model {
     let mut model = Model::default();
-    if let Some(style) = src.styles.iter().find(|s| s.active).or(src.styles.first()) {
+    // The working copy holds the settings the model displays (edits not yet
+    // updated into the style included); files without one use the current style.
+    let style = src
+        .styles
+        .iter()
+        .find(|s| s.working_copy)
+        .or(src.styles.iter().find(|s| s.active))
+        .or(src.styles.first());
+    if let Some(style) = style {
         if let Some(c) = style.front_color {
             model.front_color = c;
         }
         if let Some(c) = style.back_color {
             model.back_color = c;
         }
-        // style.xml item 2001 looks like the render mode (2 = shaded in every corpus
-        // style) and 2005 like "show textures": both are set in "[Simple Style]", whose
-        // description says "Shaded with textures face style". Unverified guesses; other
-        // modes are left at the default.
-        let item = |id: i32| style.items.get(&id).map(|i| i.value.trim());
-        if item(2001) == Some("2") {
-            model.style.face_style = if item(2005) == Some("1") {
-                crate::model::FaceStyle::ShadedWithTextures
-            } else {
-                crate::model::FaceStyle::Shaded
-            };
-        }
+        read_style(style, &mut model.style);
     }
 
     let mut maps = Maps {
@@ -136,6 +133,15 @@ pub fn from_skp(src: &skp::Model) -> Model {
     if !src.dimensions.is_empty() {
         model.root.dimensions = dimensions(&src.dimensions);
     }
+    // A section plane is stored as its plane only; SketchUp draws it around the
+    // model, so its point is the model's bounding box center projected onto it.
+    let all = crate::group::Selection {
+        edges: model.root.edges.keys().collect(),
+        faces: model.root.faces.keys().collect(),
+        instances: (0..model.root.instances.len()).collect(),
+    };
+    let center = crate::group::bounds(&model.root, &all, &model.definitions)
+        .map_or(DVec3::ZERO, |(lo, hi)| (lo + hi) / 2.0);
     model.root.section_planes = src
         .root
         .section_planes
@@ -144,11 +150,14 @@ pub fn from_skp(src: &skp::Model) -> Model {
             // a x + b y + c z + d = 0. Active state is not read from the file yet.
             let n = DVec3::new(s.plane[0], s.plane[1], s.plane[2]);
             let len = n.length();
-            (len > 1e-12).then(|| crate::entities::SectionPlane {
-                point: -n * s.plane[3] / (len * len),
-                normal: n / len,
-                name: s.name.clone(),
-                hidden: s.hidden,
+            (len > 1e-12).then(|| {
+                let (n, d) = (n / len, s.plane[3] / len);
+                crate::entities::SectionPlane {
+                    point: center - n * (n.dot(center) + d),
+                    normal: n,
+                    name: s.name.clone(),
+                    hidden: s.hidden,
+                }
             })
         })
         .collect();
@@ -170,6 +179,57 @@ pub fn from_skp(src: &skp::Model) -> Model {
         });
     }
     model
+}
+
+/// Style settings from a style's items (`style.xml` ids, the same in legacy
+/// files; see [`crate::export::style_items`] for the ids and what is unverified).
+/// Items a style lacks keep their current value.
+fn read_style(style: &skp::Style, out: &mut crate::model::StyleSettings) {
+    use crate::model::FaceStyle;
+    let item = |id: i32| style.items.get(&id).map(|i| i.value.trim());
+    let int = |id: i32| item(id).and_then(|v| v.parse::<i64>().ok());
+    let bool_ = |id: i32| int(id).map(|v| v != 0);
+    let width = |id: i32| int(id).filter(|&v| v > 0).map(|v| v as f32);
+    let set = |v: &mut bool, x: Option<bool>| {
+        if let Some(x) = x {
+            *v = x;
+        }
+    };
+    let set_w = |v: &mut f32, x: Option<f32>| {
+        if let Some(x) = x {
+            *v = x;
+        }
+    };
+    set(&mut out.edges, int(1000).map(|v| v != 0));
+    set(&mut out.extension, bool_(1004));
+    set_w(&mut out.extension_length, width(1005));
+    set(&mut out.profiles, bool_(1006));
+    set_w(&mut out.profile_width, width(1007));
+    set(&mut out.depth_cue, bool_(1008));
+    set_w(&mut out.depth_cue_width, width(1009));
+    set(&mut out.back_edges, bool_(1015));
+    set(&mut out.xray, bool_(2004));
+    set(&mut out.axes, bool_(7008));
+    set(&mut out.hidden_geometry, bool_(7017).or(bool_(7010)));
+    set(&mut out.guides, bool_(7012).map(|hide| !hide));
+    if let Some(bits) = int(7013) {
+        out.section_planes = bits & 1 != 0;
+        out.section_cuts = bits & 2 != 0;
+    }
+    set_w(&mut out.section_cut_width, width(7014));
+    set(&mut out.section_fill, bool_(7015));
+    if let Some(c) = int(7016) {
+        let [r, g, b, _] = (c as i32).to_le_bytes();
+        out.section_fill_color = [r, g, b];
+    }
+    let texture = bool_(2007).unwrap_or(true);
+    match int(2001) {
+        Some(0) => out.face_style = FaceStyle::Wireframe,
+        Some(1) => out.face_style = FaceStyle::HiddenLine,
+        Some(2) if texture => out.face_style = FaceStyle::ShadedWithTextures,
+        Some(2) => out.face_style = FaceStyle::Shaded,
+        _ => {}
+    }
 }
 
 /// File > Import of a `.skp`: adds the whole of `src` to `dst` as one new component

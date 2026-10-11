@@ -210,7 +210,8 @@ Reading first means real SketchUp models are available for testing everything el
 - Not done: DWG, MP4 (no small pure-Rust encoder), OS print dialog, tiled printing, several trays shown at once, report templates over attributes.
 
 ### M14: Writer completeness (FEATURES.md item 39)
-- [ ] Scenes, styles, section planes, axes, units, locks, images survive save and reopen.
+- [x] Section planes (reopen in their plane around the model), style settings with known style items, units and snapping (`UnitsOptions`), image entities (`CImage`) survive save and reopen; round-trip tests in `crates/mt-kernel/tests/export.rs`.
+- [ ] Scenes, Monochrome, fog, Component Edit hiding, model axes, locks, two-point, active section, saved view: format unknown without SketchUp-saved samples; captures listed in `spec/parity/TRIAL_CHECKLIST.md` section 1b.
 
 ## Risks
 
