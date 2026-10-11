@@ -256,7 +256,7 @@ items = [
 [[menu]]
 label = "Help"
 items = [
-  { id = "help.welcome", label = "Welcome to SketchUp" },
+  { id = "help.welcome", label = "Welcome to Meshtard" },
   { id = "help.knowledge_center", label = "Knowledge Center" },
   { id = "help.contact", label = "Contact Us" },
   { separator = true },

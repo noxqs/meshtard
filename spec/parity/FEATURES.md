@@ -85,6 +85,32 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     - Done (M14): section planes reopen in their plane, drawn around the model (the file keeps only the plane; the importer placed them at the origin's foot on it); style settings written into the file's two style records by the item ids OpenSKP's `docs/API_DESIGN.md` confirmed against SketchUp 2026 (edges, back edges, profiles, depth cue, extension with widths, face style except Monochrome, X-ray, View > Axes / Guides / Hidden Geometry / Section Planes / Cuts / Fill, cut width, fill color) and read back from the displayed working copy; units and snapping in the options manager's `UnitsOptions` (keys of SketchUp's Ruby `OptionsManager`, read from SketchUp-saved v17 files too); image entities as `CImage` (root and nested).
     - Left, model-only until a SketchUp-saved sample shows the format (TRIAL_CHECKLIST.md 1b): scenes (the v17 `CViewPage` record is only partly known: name, flags, camera and hidden tags, not the rest or where the page list goes), Monochrome's RenderMode value, fog and Component Edit hiding (style items unknown), model axes, instance locks, two-point, the active section plane, the saved view. Also to confirm in SketchUp: RenderMode 0/1 for Wireframe/Hidden Line, EdgeDisplayMode 0 for Edges off, `CImage` schema, and whether SketchUp 2017 takes the display settings from the style records (written) or the model's own rendering-options block (not decoded).
 
+## Toolbars and cursors
+
+40. [ ] **View > Toolbars: the remaining toolbars** M. meshtard has Getting Started and Large Tool Set. SketchUp 2026's list (from memory, unverified; the trial's View > Toolbars screenshot is the reference) with priority by usefulness, all hidden by default:
+    1. Standard: New, Open, Save, Cut, Copy, Paste, Erase, Undo, Redo, Print, Model Info.
+    2. Views: Iso, Top, Front, Right, Back, Left.
+    3. Camera: Orbit, Pan, Zoom, Zoom Window, Zoom Extents, Previous, Position Camera, Look Around, Walk.
+    4. Styles: X-ray, Back Edges, Wireframe, Hidden Line, Shaded, Shaded With Textures, Monochrome (toggle state shown).
+    5. Edit: Move, Push/Pull, Rotate, Follow Me, Scale, Offset.
+    6. Drawing: Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arcs, Pie.
+    7. Principal: Select, Make Component, Paint Bucket, Eraser.
+    8. Construction: Tape Measure, Dimensions, Protractor, Text, Axes, 3D Text.
+    9. Section: Section Plane, Display Section Planes, Display Section Cuts, Display Section Fill.
+    10. Solid Tools: Outer Shell, Intersect, Union, Subtract, Trim, Split.
+    11. Tags: active-tag dropdown and Tags panel button (needs a dropdown item type in toolbars).
+    12. Shadows: shadows toggle, time and date sliders (needs slider item types).
+    13. Sandbox: From Contours, From Scratch (Smoove, Stamp, Drape, Add Detail, Flip Edge not built).
+    14. Measurements (the Measurements box as a toolbar).
+    Not planned: Location, Classifier, Dynamic Components, Trimble Connect, Warehouse, Advanced Camera Tools (Trimble services or extensions).
+    Each needs `spec/toolbars.toml` entries and icons for commands without one (`crates/mt-ui/src/icons.rs` `KNOWN`).
+
+41. [ ] **Mouse cursors per tool and state** M. SketchUp changes the cursor per tool and modifier; meshtard shows the system arrow everywhere. From memory (unverified; the trial records each one, see TRIAL_CHECKLIST.md 1c):
+    1. Each tool's own cursor: Select arrow, Line pencil, Rectangle / Circle / Polygon / Arc pencils with a shape badge, Eraser, Paint Bucket, Move (four arrows), Rotate (protractor), Scale, Push/Pull, Follow Me, Offset, Tape Measure, Protractor, Dimensions, Text, Section Plane, Orbit, Pan (hand), Zoom (magnifier), Zoom Window, Walk (feet), Look Around (eye), Position Camera.
+    2. Modifier badges: Select with Ctrl (+), Shift (+/-), Ctrl+Shift (-); Move, Rotate and Push/Pull with Ctrl (+, copy / new face); Paint Bucket with Alt (eyedropper) and Ctrl/Shift fill modes; Eraser with Shift (hide) and Ctrl (soften).
+    3. State cursors: Solid Tools' first/second pick badges and "not allowed" over non-solids; Push/Pull over a non-face; Follow Me over a path; resize cursors on scale grips; busy cursor during long operations.
+    Implementation: egui's `CursorIcon` set is small, so draw the tool cursors ourselves (hide the system cursor over the viewport and paint a 32 px procedural icon at the pointer, reusing `crates/mt-ui/src/icons.rs` drawing), keeping system cursors outside the viewport.
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)

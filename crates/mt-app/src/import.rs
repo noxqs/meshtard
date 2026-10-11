@@ -37,7 +37,7 @@ const FILTERS: [(&str, &[&str]); 5] = [
         "All Supported Types",
         &["skp", "obj", "stl", "png", "jpg", "jpeg"],
     ),
-    ("SketchUp Models (*.skp)", &["skp"]),
+    ("Meshtard Models (*.skp)", &["skp"]),
     ("OBJ Files (*.obj)", &["obj"]),
     ("STL Files (*.stl)", &["stl"]),
     ("Images (*.png, *.jpg)", &["png", "jpg", "jpeg"]),

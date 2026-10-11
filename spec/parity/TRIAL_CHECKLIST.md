@@ -92,3 +92,8 @@ The `.skp` files saved in sections 1 and 2 become automated round-trip tests. Th
 - [ ] `tests/corpus/2026/`: `empty_default.skp` and one `scenario_NN.skp` per scenario run
 - [ ] `tests/corpus/2017/`: the same names, saved as SketchUp 2017
 - [ ] `TRIAL_NOTES.md` filled and copied back into the repo
+
+## 1c. Toolbars and cursors (for FEATURES.md items 40 and 41)
+
+- [ ] Screenshot `View > Toolbars...` (the full list) and every toolbar in it into `spec/raw/ui/toolbars/<name>.png`, buttons in order, with tooltips of any unclear button.
+- [ ] Record the cursor for every tool (hover over empty space, over a face, over an edge) and with each modifier (Ctrl, Shift, Alt, Ctrl+Shift): a screen recording `spec/raw/cursors/cursors.mp4` going through the tools in menu order, plus close-up screenshots `spec/raw/cursors/<tool>[_<modifier>].png`. Note when a cursor changes without a key (Solid Tools picks, not-allowed, scale grips, busy).

@@ -1,5 +1,6 @@
-//! The splash screen shown while the app starts: the image fills the middle of the
-//! window over a plain background until start-up is done (a model passed on the
+//! The splash screen shown while the app starts: the image at its own size (smaller
+//! if the window is), centered in the window, with the start-up status near its
+//! bottom edge, until start-up is done (a model passed on the
 //! command line opens on a background thread meanwhile), shown for at least
 //! `MIN_SECS`, then fades out. SketchUp shows its splash in a separate borderless
 //! window before the main window; here it is drawn inside the main window.
@@ -107,49 +108,45 @@ impl App {
             return;
         }
         let screen = ctx.content_rect();
-        let tex = self.splash.texture(ctx).map(|t| (t.id(), t.size_vec2()));
+        let Some((id, size)) = self.splash.texture(ctx).map(|t| (t.id(), t.size_vec2())) else {
+            self.splash.done = true;
+            return;
+        };
+        // The image's own pixel size, shrunk only to fit the window.
+        let size = size / ctx.pixels_per_point();
+        let scale = (screen.width() / size.x)
+            .min(screen.height() / size.y)
+            .min(1.0);
+        let img = egui::Rect::from_center_size(screen.center(), size * scale);
+        let status = match &self.loading {
+            Some(l) => format!(
+                "Opening {}...",
+                l.path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+            ),
+            None => "Starting...".to_owned(),
+        };
+        let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
         egui::Area::new(egui::Id::new("mt_splash"))
             .order(egui::Order::Foreground)
-            .fixed_pos(screen.min)
+            .fixed_pos(img.min)
             .interactable(true)
             .show(ctx, |ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
-                let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
-                ui.painter().rect_filled(
+                let (rect, _) = ui.allocate_exact_size(img.size(), egui::Sense::click_and_drag());
+                ui.painter().image(
+                    id,
                     rect,
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(240, 240, 240, a),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::from_white_alpha(a),
                 );
-                if let Some((id, size)) = tex {
-                    // The image at up to 70% of the window, aspect kept.
-                    let scale = (rect.width() * 0.7 / size.x)
-                        .min(rect.height() * 0.7 / size.y)
-                        .min(1.0);
-                    let img = egui::Rect::from_center_size(rect.center(), size * scale);
-                    ui.painter().image(
-                        id,
-                        img,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::from_white_alpha(a),
-                    );
-                    let status = match &self.loading {
-                        Some(l) => format!(
-                            "Opening {}...",
-                            l.path
-                                .file_name()
-                                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-                        ),
-                        None => "Starting...".to_owned(),
-                    };
-                    ui.painter().text(
-                        egui::pos2(img.center().x, img.bottom() + 14.0),
-                        egui::Align2::CENTER_TOP,
-                        status,
-                        egui::FontId::proportional(13.0),
-                        egui::Color32::from_rgba_unmultiplied(60, 60, 60, a),
-                    );
-                }
+                ui.painter().text(
+                    egui::pos2(rect.center().x, rect.bottom() - 16.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    status,
+                    egui::FontId::proportional(13.0),
+                    egui::Color32::from_rgba_unmultiplied(40, 40, 40, a),
+                );
             });
         ctx.request_repaint();
     }

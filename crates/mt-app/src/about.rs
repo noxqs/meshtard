@@ -57,7 +57,7 @@ impl App {
             }
             ui.add_space(6.0);
             ui.heading(format!("meshtard {}", env!("CARGO_PKG_VERSION")));
-            ui.label("A SketchUp-compatible 3D modeler written in Rust.");
+            ui.label("A 3D modeler for .skp files, written in Rust.");
             ui.add_space(6.0);
             egui::Grid::new("mt_about_grid")
                 .num_columns(2)

@@ -356,7 +356,7 @@ impl App {
                     ui.label(version.as_str());
                     ui.end_row();
                     ui.label("Saves as");
-                    ui.label("SketchUp 2017");
+                    ui.label(".skp 2017");
                     ui.end_row();
                 });
                 false

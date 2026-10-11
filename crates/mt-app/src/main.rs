@@ -1330,7 +1330,7 @@ impl App {
                 || "Untitled.skp".into(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            filedialog::save(&[("SketchUp Models", &["skp"])], &name)
+            filedialog::save(&[("Meshtard Models", &["skp"])], &name)
         };
         let Some(path) = path else {
             return false;
@@ -1347,7 +1347,7 @@ impl App {
                     doc.mark_saved(&path);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 }
-                self.message = Some(format!("Saved {} (SketchUp 2017 format).", path.display()));
+                self.message = Some(format!("Saved {} (.skp 2017 format).", path.display()));
                 true
             }
             Err(e) => {

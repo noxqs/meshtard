@@ -37,7 +37,7 @@ impl App {
             Pending::Open(path) => {
                 let path = path.or_else(|| {
                     rfd::FileDialog::new()
-                        .add_filter("SketchUp Models", &["skp"])
+                        .add_filter("Meshtard Models", &["skp"])
                         .pick_file()
                 });
                 if let (Some(path), Some(rs)) = (path, frame.wgpu_render_state()) {

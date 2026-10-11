@@ -43,7 +43,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "{e}"),
-            Self::NotSkp => f.write_str("not a valid SketchUp file (bad header magic)"),
+            Self::NotSkp => f.write_str("not a valid .skp file (bad header magic)"),
             Self::Truncated => f.write_str("file is truncated"),
             Self::Malformed(m) => f.write_str(m),
         }
