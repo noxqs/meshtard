@@ -113,6 +113,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Untitled - meshtard")
+            .with_app_id("meshtard")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .expect("icon.png is a valid PNG"),
+            )
             .with_inner_size([1280.0, 800.0]),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
