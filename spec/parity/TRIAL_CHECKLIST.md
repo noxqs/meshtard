@@ -97,3 +97,8 @@ The `.skp` files saved in sections 1 and 2 become automated round-trip tests. Th
 
 - [ ] Screenshot `View > Toolbars...` (the full list) and every toolbar in it into `spec/raw/ui/toolbars/<name>.png`, buttons in order, with tooltips of any unclear button.
 - [ ] Record the cursor for every tool (hover over empty space, over a face, over an edge) and with each modifier (Ctrl, Shift, Alt, Ctrl+Shift): a screen recording `spec/raw/cursors/cursors.mp4` going through the tools in menu order, plus close-up screenshots `spec/raw/cursors/<tool>[_<modifier>].png`. Note when a cursor changes without a key (Solid Tools picks, not-allowed, scale grips, busy).
+
+## 1d. On-screen viewport widgets (FEATURES.md item 42)
+
+- [ ] With a new default model, screenshot the whole 3D view and zoom into each corner: is there an axes indicator or other widget? Repeat with View > Toolbars > Solar North (or the Shadows / Location settings) on, and with a model geo-located.
+- [ ] For each widget found: what happens on hover, click, double-click and drag; does it follow orbiting; is it in View menu toggles or Preferences; record it in `spec/raw/ui/widgets/`.

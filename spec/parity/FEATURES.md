@@ -111,6 +111,8 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     3. State cursors: Solid Tools' first/second pick badges and "not allowed" over non-solids; Push/Pull over a non-face; Follow Me over a path; resize cursors on scale grips; busy cursor during long operations.
     Implementation: egui's `CursorIcon` set is small, so draw the tool cursors ourselves (hide the system cursor over the viewport and paint a 32 px procedural icon at the pointer, reusing `crates/mt-ui/src/icons.rs` drawing), keeping system cursors outside the viewport.
 
+42. [ ] **On-screen viewport widgets** (to verify first) S-M. The user recalls an axes indicator in a corner of the 3D view. Not confirmed by SketchUp's help or release notes: official sources describe the drawing axes at the model origin (movable with the Axes tool) and, since 2026.2's notes, a solar north indicator attached to the axes origin; corner navigation gizmos found online belong to the mobile Viewer or third-party extensions. The trial (TRIAL_CHECKLIST.md 1d) records every on-screen element and how it reacts (click, drag, hover). Candidates to check: corner axes triad, solar north arrow, any navigation or view widget, scale/info overlays. Build only what the trial shows.
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)
