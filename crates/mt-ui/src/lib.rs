@@ -115,6 +115,7 @@
 //! [`Shell::show`] applies `spec/ui_theme.toml` to the context on its first call
 //! (see [`apply_theme`]); call it yourself earlier if other windows should use it.
 
+pub mod cursors;
 pub mod dock;
 pub mod icons;
 mod menu;

@@ -2,8 +2,9 @@
 //! the first solid, then the second) and the Tag tool (click entities to move them to
 //! the active tag; Alt+click samples an entity's tag).
 //!
-//! Unverified against SketchUp 2026: the cursor feedback (SketchUp shows a cursor
-//! badge with a circle-slash over non-solids; here a label by the cursor), the Tag
+//! Unverified against SketchUp 2026: the cursor feedback (a 1 / 2 badge for the pick
+//! and a circle-slash badge over non-solids, see `cursor.rs`, plus a label by the
+//! cursor that SketchUp may not show), the Tag
 //! tool's keys (Alt to sample is from memory of the 2025 Tag tool; Ctrl, said to keep
 //! the selection, is not done) and that a click on a selected entity tags the whole
 //! selection (as the Paint Bucket does).
@@ -46,6 +47,12 @@ impl PickTool {
             first: None,
             hover: None,
         })
+    }
+
+    /// The entity under the cursor is not a valid target (Solid Tools over a
+    /// non-solid or a locked instance).
+    pub fn hover_invalid(&self) -> bool {
+        self.hover.as_ref().is_some_and(|h| !h.2)
     }
 }
 
@@ -201,9 +208,6 @@ impl App {
                 let hover = match (pos, class) {
                     (Some(p), Some(c)) => {
                         let ok = matches!(c, SolidPick::Solid(_));
-                        if !ok {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
-                        }
                         Some((p, c.label(doc), ok))
                     }
                     _ => None,
