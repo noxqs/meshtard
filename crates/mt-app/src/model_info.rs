@@ -1,11 +1,18 @@
 //! Window > Model Info: a window with SketchUp's pages, alphabetically: Animation,
-//! Credits, Dimensions, File, Geo-location, Statistics, Text, Units.
+//! Components, Credits, Dimensions, File, Geo-location, Statistics, Text, Units.
 //!
-//! Units changes apply at once, each one undo step. They stay in the model while it
-//! is open but are not written to the .skp (the writer keeps its template's units),
-//! so a saved file reopens in its template unit. Dimensions and Text have no font
-//! settings yet (labels use the UI font): those pages show SketchUp's controls
-//! disabled. Geo-location is read only (no geo-location data is read).
+//! Units changes apply at once, each one undo step, and are saved in the .skp's
+//! `UnitsOptions` (area and volume units too; their codes are unverified). Length
+//! snapping rounds inferred lengths (`mt_infer::Engine::length_snap`), angle
+//! snapping Rotate's and the Protractor's angles near multiples of the snap angle,
+//! and angle precision every angle shown in the Measurements box.
+//!
+//! Components (fades, show component axes), Dimensions, Text and Geo-location
+//! (FEATURES.md 61) are model data that is not saved in .skp files yet. Dimensions
+//! and Text set the style of new labels; Update Selected gives the selected ones
+//! the current style. Label fonts are the UI font at the chosen size (no font
+//! choice). Geo-location's latitude and longitude are the Shadows settings'; the
+//! north angle turns the sun.
 
 use eframe::egui;
 use mt_infer::units::{LengthFormat, LengthUnit, UnitsOptions, parse_length};
@@ -16,6 +23,7 @@ use crate::App;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Page {
     Animation,
+    Components,
     Credits,
     Dimensions,
     File,
@@ -27,8 +35,9 @@ pub(crate) enum Page {
 }
 
 impl Page {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Animation,
+        Self::Components,
         Self::Credits,
         Self::Dimensions,
         Self::File,
@@ -41,6 +50,7 @@ impl Page {
     fn label(self) -> &'static str {
         match self {
             Self::Animation => "Animation",
+            Self::Components => "Components",
             Self::Credits => "Credits",
             Self::Dimensions => "Dimensions",
             Self::File => "File",
@@ -60,6 +70,44 @@ pub(crate) struct ModelInfo {
     snap_text: Option<String>,
     /// File page: size and saved version, read when the page opens.
     file: Option<(Option<u64>, String)>,
+    /// Geo-location's latitude and longitude fields while edited.
+    geo_text: Option<(String, String)>,
+}
+
+/// Font sizes offered for dimension and text labels (points; SketchUp opens a font
+/// dialog instead).
+const FONT_SIZES: [f32; 14] = [
+    8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 36.0, 48.0,
+];
+
+/// A font size choice; returns the size picked.
+fn font_size_combo(ui: &mut egui::Ui, id: &str, size: f32) -> f32 {
+    let mut s = size;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(format!("{s} pt"))
+        .show_ui(ui, |ui| {
+            for f in FONT_SIZES {
+                ui.selectable_value(&mut s, f, format!("{f} pt"));
+            }
+        });
+    s
+}
+
+/// An endpoint choice; returns the one picked.
+fn endpoint_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    e: mt_kernel::model_data::Endpoint,
+) -> mt_kernel::model_data::Endpoint {
+    let mut e = e;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(e.label())
+        .show_ui(ui, |ui| {
+            for x in mt_kernel::model_data::Endpoint::ALL {
+                ui.selectable_value(&mut e, x, x.label());
+            }
+        });
+    e
 }
 
 /// SketchUp's angle snapping choices (unverified).
@@ -114,6 +162,13 @@ impl App {
     pub(crate) fn model_info_ui(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         // The open model's display options for every length shown.
         mt_infer::units::set_display(self.document.as_ref().map(|d| d.unit_options));
+        // Length snapping for the inference engine (in the model's units).
+        self.engine.length_snap = self
+            .document
+            .as_ref()
+            .map(|d| d.unit_options)
+            .filter(|o| o.length_snapping && o.snap_length > 0.0)
+            .map(|o| o.snap_length);
         let Some(mut info) = self.model_info.take() else {
             return;
         };
@@ -263,10 +318,62 @@ impl App {
                     });
                 });
                 ui.add_space(8.0);
+                ui.strong("Area and Volume Units");
+                egui::Grid::new("mt_mi_area").num_columns(2).show(ui, |ui| {
+                    ui.label("Area");
+                    egui::ComboBox::from_id_salt("mt_mi_area_unit")
+                        .selected_text(opts.area_unit.label())
+                        .show_ui(ui, |ui| {
+                            for u in mt_infer::units::AreaUnit::ALL {
+                                ui.selectable_value(&mut opts.area_unit, u, u.label());
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Area precision");
+                    egui::ComboBox::from_id_salt("mt_mi_area_precision")
+                        .selected_text(decimals(opts.area_precision))
+                        .show_ui(ui, |ui| {
+                            for p in 0..=6 {
+                                ui.selectable_value(&mut opts.area_precision, p, decimals(p));
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Volume");
+                    egui::ComboBox::from_id_salt("mt_mi_volume_unit")
+                        .selected_text(opts.volume_unit.label())
+                        .show_ui(ui, |ui| {
+                            for u in mt_infer::units::VolumeUnit::ALL {
+                                ui.selectable_value(&mut opts.volume_unit, u, u.label());
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Volume precision");
+                    egui::ComboBox::from_id_salt("mt_mi_volume_precision")
+                        .selected_text(decimals(opts.volume_precision))
+                        .show_ui(ui, |ui| {
+                            for p in 0..=6 {
+                                ui.selectable_value(&mut opts.volume_precision, p, decimals(p));
+                            }
+                        });
+                    ui.end_row();
+                });
+                ui.add_space(8.0);
+                ui.strong("Display");
+                let mut show_units = !opts.suppress_units;
+                ui.add_enabled(
+                    opts.format == LengthFormat::Decimal,
+                    egui::Checkbox::new(&mut show_units, "Display units format"),
+                );
+                opts.suppress_units = !show_units;
+                ui.add_enabled(
+                    opts.format == LengthFormat::Architectural,
+                    egui::Checkbox::new(&mut opts.force_inch_display, "Force display of 0\""),
+                );
+                ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(
-                        "Units are kept while the model is open but not saved in the .skp \
-                         file. Snapping values are stored but not yet used by the tools.",
+                        "Saved in the .skp file. Length snapping rounds inferred lengths; \
+                         angle snapping applies near multiples of the snap angle.",
                     )
                     .small()
                     .weak(),
@@ -304,6 +411,18 @@ impl App {
                         }
                     });
                 ui.add_space(8.0);
+                if ui.button("Fix Problems").clicked() {
+                    let mut report = crate::fix_problems::Report::default();
+                    let changed = doc.edit_whole(|model| {
+                        report = crate::fix_problems::fix_model(model);
+                        report.fixed > 0
+                    });
+                    self.message = Some(report.message());
+                    if changed {
+                        self.selection.clear();
+                        return true;
+                    }
+                }
                 if ui.button("Purge Unused").clicked() {
                     let mut purged = purge::Purged::default();
                     let changed = doc.edit_whole(|model| {
@@ -406,37 +525,343 @@ impl App {
                 });
                 false
             }
-            Page::Dimensions | Page::Text => {
-                ui.add_enabled_ui(false, |ui| {
-                    ui.horizontal(|ui| {
-                        let _ = ui.button("Fonts...");
-                        ui.label("Default font, 12 pt");
-                    });
-                    if info.page == Page::Dimensions {
-                        ui.label("Leader Lines: Endpoints: Slash");
-                        ui.label("Dimension: Align to screen");
-                    } else {
-                        ui.label("Screen Text / Leader Text: default font");
-                        ui.label("Leader Lines: Endpoints: Closed Arrow");
-                    }
-                });
-                ui.label(
-                    egui::RichText::new("Font settings are not supported yet.")
-                        .small()
-                        .weak(),
-                );
-                false
-            }
-            Page::GeoLocation => {
-                ui.label("Not Geo-located");
-                ui.label(
-                    egui::RichText::new("Geo-location is read only and not read from files yet.")
-                        .small()
-                        .weak(),
-                );
-                false
-            }
+            Page::Components => self.components_page(ui),
+            Page::Dimensions => self.dimensions_page(ui),
+            Page::Text => self.text_page(ui),
+            Page::GeoLocation => self.geo_page(ui, info),
         }
+    }
+}
+
+/// `0`, `0.0`, `0.00`... for a number of decimals.
+fn decimals(p: u8) -> String {
+    if p == 0 {
+        "0".into()
+    } else {
+        format!("0.{}", "0".repeat(usize::from(p)))
+    }
+}
+
+impl App {
+    /// Model Info > Components: fade (or hide) the rest of the model and similar
+    /// components while editing one, and show component axes. Slider drags are not
+    /// undo steps (display settings, as View > Component Edit).
+    fn components_page(&mut self, ui: &mut egui::Ui) -> bool {
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        let m = &mut doc.model;
+        let before = (
+            m.edit_fade,
+            m.style.hide_similar_components,
+            m.style.hide_rest_of_model,
+        );
+        ui.strong("Component/Group Editing");
+        egui::Grid::new("mt_mi_components")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Fade similar");
+                ui.add(egui::Slider::new(&mut m.edit_fade.similar, 0.0..=1.0).show_value(false));
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut m.style.hide_similar_components, "Hide");
+                ui.end_row();
+                ui.label("Fade rest of model");
+                ui.add(egui::Slider::new(&mut m.edit_fade.rest, 0.0..=1.0).show_value(false));
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut m.style.hide_rest_of_model, "Hide");
+                ui.end_row();
+            });
+        ui.add_space(8.0);
+        ui.strong("Component Axes");
+        ui.checkbox(&mut m.edit_fade.show_axes, "Show component axes");
+        ui.label(
+            egui::RichText::new("Kept in the model, not saved in the .skp file.")
+                .small()
+                .weak(),
+        );
+        before
+            != (
+                m.edit_fade,
+                m.style.hide_similar_components,
+                m.style.hide_rest_of_model,
+            )
+    }
+
+    /// Selected dimensions or texts of the open context.
+    fn selected_annotations(&self, dims: bool) -> Vec<usize> {
+        use crate::document::Owner;
+        self.selection
+            .items()
+            .iter()
+            .filter_map(|o| match (*o, dims) {
+                (Owner::Dimension(i), true) | (Owner::Text(i), false) => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Model Info > Dimensions: text size and alignment, endpoints; Select All
+    /// Dimensions and Update Selected Dimensions.
+    fn dimensions_page(&mut self, ui: &mut egui::Ui) -> bool {
+        use mt_kernel::model_data::DimensionAlign;
+        let selected = self.selected_annotations(true);
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        let mut s = doc.model.dimension_style;
+        ui.strong("Text");
+        ui.horizontal(|ui| {
+            ui.label("Size");
+            s.font_size = font_size_combo(ui, "mt_mi_dim_font", s.font_size);
+        });
+        ui.add_space(6.0);
+        ui.strong("Leader Lines");
+        ui.horizontal(|ui| {
+            ui.label("Endpoints");
+            s.endpoint = endpoint_combo(ui, "mt_mi_dim_end", s.endpoint);
+        });
+        ui.add_space(6.0);
+        ui.strong("Dimension");
+        ui.radio_value(&mut s.align, DimensionAlign::Screen, "Align to screen");
+        let along = s.align != DimensionAlign::Screen;
+        ui.horizontal(|ui| {
+            if ui.radio(along, "Align to dimension line").clicked() && !along {
+                s.align = DimensionAlign::Above;
+            }
+            ui.add_enabled_ui(along, |ui| {
+                egui::ComboBox::from_id_salt("mt_mi_dim_align")
+                    .selected_text(match s.align {
+                        DimensionAlign::Centered => "Centered",
+                        DimensionAlign::Outside => "Outside",
+                        _ => "Above",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut s.align, DimensionAlign::Above, "Above");
+                        ui.selectable_value(&mut s.align, DimensionAlign::Centered, "Centered");
+                        ui.selectable_value(&mut s.align, DimensionAlign::Outside, "Outside");
+                    });
+            });
+        });
+        let mut rebuild = false;
+        if s != doc.model.dimension_style {
+            rebuild |= doc.edit_model(|m, _| {
+                m.dimension_style = s;
+                true
+            });
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Select All Dimensions").clicked() {
+                let n = doc.active().dimensions.len();
+                self.selection.apply(
+                    crate::selection::Mode::Replace,
+                    (0..n).map(crate::document::Owner::Dimension),
+                );
+                rebuild = true;
+            }
+            if ui
+                .add_enabled(
+                    !selected.is_empty(),
+                    egui::Button::new("Update Selected Dimensions"),
+                )
+                .clicked()
+            {
+                rebuild |= doc.edit(|ents| {
+                    let mut any = false;
+                    for &i in &selected {
+                        if let Some(d) = ents.dimensions.get_mut(i) {
+                            any |= d.style != Some(s);
+                            d.style = Some(s);
+                        }
+                    }
+                    any
+                });
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Dimensions without their own style follow these settings. Kept in the \
+                 model, not saved in the .skp file.",
+            )
+            .small()
+            .weak(),
+        );
+        rebuild
+    }
+
+    /// Model Info > Text: size and color, leader type and endpoint; Select All Screen
+    /// Text and Update Selected Text.
+    fn text_page(&mut self, ui: &mut egui::Ui) -> bool {
+        use mt_kernel::model_data::LeaderKind;
+        let selected = self.selected_annotations(false);
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        let mut s = doc.model.text_style;
+        ui.strong("Text");
+        ui.horizontal(|ui| {
+            ui.label("Size");
+            s.font_size = font_size_combo(ui, "mt_mi_text_font", s.font_size);
+            ui.label("Color");
+            ui.color_edit_button_srgb(&mut s.color);
+        });
+        ui.add_space(6.0);
+        ui.strong("Leader Lines");
+        egui::Grid::new("mt_mi_leader")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Endpoint");
+                s.endpoint = endpoint_combo(ui, "mt_mi_text_end", s.endpoint);
+                ui.end_row();
+                ui.label("Leader");
+                egui::ComboBox::from_id_salt("mt_mi_text_leader")
+                    .selected_text(s.leader.label())
+                    .show_ui(ui, |ui| {
+                        for k in LeaderKind::ALL {
+                            ui.selectable_value(&mut s.leader, k, k.label());
+                        }
+                    });
+                ui.end_row();
+            });
+        let mut rebuild = false;
+        if s != doc.model.text_style {
+            rebuild |= doc.edit_model(|m, _| {
+                m.text_style = s;
+                true
+            });
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Select All Screen Text").clicked() {
+                let items: Vec<_> = (doc.active().texts.iter().enumerate())
+                    .filter(|(_, t)| t.screen)
+                    .map(|(i, _)| crate::document::Owner::Text(i))
+                    .collect();
+                self.selection.apply(crate::selection::Mode::Replace, items);
+                rebuild = true;
+            }
+            if ui
+                .add_enabled(
+                    !selected.is_empty(),
+                    egui::Button::new("Update Selected Text"),
+                )
+                .clicked()
+            {
+                rebuild |= doc.edit(|ents| {
+                    let mut any = false;
+                    for &i in &selected {
+                        if let Some(t) = ents.texts.get_mut(i) {
+                            any |= t.style != Some(s);
+                            t.style = Some(s);
+                        }
+                    }
+                    any
+                });
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Texts without their own style follow these settings. Kept in the model, \
+                 not saved in the .skp file.",
+            )
+            .small()
+            .weak(),
+        );
+        rebuild
+    }
+
+    /// Model Info > Geo-location: manual latitude and longitude (the Shadows
+    /// settings') and the north angle, used by the sun. Clear Location forgets it.
+    fn geo_page(&mut self, ui: &mut egui::Ui, info: &mut ModelInfo) -> bool {
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
+        let m = &mut doc.model;
+        ui.label(if m.geo.located {
+            "Geo-located (set manually)"
+        } else {
+            "Not Geo-located"
+        });
+        ui.add_space(6.0);
+        ui.strong("Set Manual Location");
+        let (lat, lon) = info.geo_text.get_or_insert_with(|| {
+            (
+                format!("{:.4}", m.shadows.latitude),
+                format!("{:.4}", m.shadows.longitude),
+            )
+        });
+        let mut commit = false;
+        egui::Grid::new("mt_mi_geo").num_columns(2).show(ui, |ui| {
+            ui.label("Latitude");
+            commit |= ui
+                .add(egui::TextEdit::singleline(lat).desired_width(100.0))
+                .lost_focus();
+            ui.end_row();
+            ui.label("Longitude");
+            commit |= ui
+                .add(egui::TextEdit::singleline(lon).desired_width(100.0))
+                .lost_focus();
+            ui.end_row();
+        });
+        let mut north = m.geo.north_angle;
+        ui.horizontal(|ui| {
+            ui.label("North angle");
+            ui.add(
+                egui::DragValue::new(&mut north)
+                    .range(0.0..=360.0)
+                    .speed(0.5)
+                    .suffix("°"),
+            );
+        });
+        let mut changed = false;
+        if commit {
+            let parse = |s: &str, max: f64| {
+                s.trim()
+                    .replace(',', ".")
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && v.abs() <= max)
+            };
+            let (la, lo) = (parse(lat, 90.0), parse(lon, 180.0));
+            if let (Some(la), Some(lo)) = (la, lo)
+                && (la, lo) != (m.shadows.latitude, m.shadows.longitude)
+            {
+                m.shadows.latitude = la;
+                m.shadows.longitude = lo;
+                m.geo.located = true;
+                changed = true;
+            }
+            info.geo_text = None;
+        }
+        if north != m.geo.north_angle {
+            m.geo.north_angle = north.rem_euclid(360.0);
+            changed = true;
+        }
+        if ui
+            .add_enabled(m.geo.located, egui::Button::new("Clear Location"))
+            .clicked()
+        {
+            let d = mt_kernel::ShadowSettings::default();
+            m.shadows.latitude = d.latitude;
+            m.shadows.longitude = d.longitude;
+            m.geo = Default::default();
+            info.geo_text = None;
+            changed = true;
+        }
+        ui.label(
+            egui::RichText::new(
+                "The location and north angle place the sun for shadows. Kept in the \
+                 model, not saved in the .skp file; no map import.",
+            )
+            .small()
+            .weak(),
+        );
+        if changed {
+            self.apply_shadows();
+        }
+        false
     }
 }
 

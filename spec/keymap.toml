@@ -26,6 +26,7 @@ verified = false
 "view.anim_previous" = "PageUp"
 "view.anim_next" = "PageDown"
 "tool.select" = "Space"
+"tool.lasso" = "Shift+Space"
 "tool.eraser" = "E"
 "tool.paint_bucket" = "B"
 "tool.line" = "L"

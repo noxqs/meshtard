@@ -166,6 +166,17 @@ pub struct UnitsOptions {
     pub angle_snapping: bool,
     /// Degrees.
     pub snap_angle: f64,
+    /// Area and volume display units and their decimal places.
+    pub area_unit: AreaUnit,
+    pub area_precision: u8,
+    pub volume_unit: VolumeUnit,
+    pub volume_precision: u8,
+    /// "Force display of 0\"": Architectural whole feet show `5' 0"` instead of `5'`
+    /// (the file's `ForceInchDisplay`).
+    pub force_inch_display: bool,
+    /// "Display units format" unchecked: Decimal lengths without the unit symbol (the
+    /// file's `SuppressUnitsDisplay`).
+    pub suppress_units: bool,
 }
 
 impl Default for UnitsOptions {
@@ -178,8 +189,256 @@ impl Default for UnitsOptions {
             angle_precision: 1,
             angle_snapping: true,
             snap_angle: 15.0,
+            area_unit: AreaUnit::SquareInches,
+            area_precision: 2,
+            volume_unit: VolumeUnit::CubicInches,
+            volume_precision: 2,
+            // Kept on so Architectural shows `5' 0"` as before (SketchUp's template
+            // default is unverified).
+            force_inch_display: true,
+            suppress_units: false,
         }
     }
+}
+
+/// Model Info > Units > Area. Codes are the file's `AreaUnit` values (Ruby
+/// `Length::SquareInches` ... `Length::SquareYards`; unverified).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AreaUnit {
+    #[default]
+    SquareInches,
+    SquareFeet,
+    SquareMillimeters,
+    SquareCentimeters,
+    SquareMeters,
+    SquareYards,
+}
+
+impl AreaUnit {
+    pub const ALL: [Self; 6] = [
+        Self::SquareInches,
+        Self::SquareFeet,
+        Self::SquareMillimeters,
+        Self::SquareCentimeters,
+        Self::SquareMeters,
+        Self::SquareYards,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SquareInches => "Square Inches",
+            Self::SquareFeet => "Square Feet",
+            Self::SquareMillimeters => "Square Millimeters",
+            Self::SquareCentimeters => "Square Centimeters",
+            Self::SquareMeters => "Square Meters",
+            Self::SquareYards => "Square Yards",
+        }
+    }
+
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::SquareInches => "in²",
+            Self::SquareFeet => "ft²",
+            Self::SquareMillimeters => "mm²",
+            Self::SquareCentimeters => "cm²",
+            Self::SquareMeters => "m²",
+            Self::SquareYards => "yd²",
+        }
+    }
+
+    /// Square inches in one unit.
+    pub fn square_inches(self) -> f64 {
+        let side = match self {
+            Self::SquareInches => 1.0,
+            Self::SquareFeet => 12.0,
+            Self::SquareMillimeters => 1.0 / 25.4,
+            Self::SquareCentimeters => 1.0 / 2.54,
+            Self::SquareMeters => 1000.0 / 25.4,
+            Self::SquareYards => 36.0,
+        };
+        side * side
+    }
+
+    pub fn code(self) -> i32 {
+        Self::ALL.iter().position(|u| *u == self).unwrap_or(0) as i32
+    }
+
+    pub fn from_code(code: i32) -> Option<Self> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|i| Self::ALL.get(i).copied())
+    }
+
+    /// The square of a length unit (files without an area unit).
+    pub fn of_length(unit: LengthUnit) -> Self {
+        match unit {
+            LengthUnit::Inch => Self::SquareInches,
+            LengthUnit::Foot => Self::SquareFeet,
+            LengthUnit::Millimeter => Self::SquareMillimeters,
+            LengthUnit::Centimeter => Self::SquareCentimeters,
+            LengthUnit::Meter => Self::SquareMeters,
+        }
+    }
+}
+
+/// Model Info > Units > Volume. Codes are the file's `VolumeUnit` values (Ruby
+/// `Length::CubicInches` ... `Length::USGallons`; unverified).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VolumeUnit {
+    #[default]
+    CubicInches,
+    CubicFeet,
+    CubicMillimeters,
+    CubicCentimeters,
+    CubicMeters,
+    CubicYards,
+    Liters,
+    UsGallons,
+}
+
+impl VolumeUnit {
+    pub const ALL: [Self; 8] = [
+        Self::CubicInches,
+        Self::CubicFeet,
+        Self::CubicMillimeters,
+        Self::CubicCentimeters,
+        Self::CubicMeters,
+        Self::CubicYards,
+        Self::Liters,
+        Self::UsGallons,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CubicInches => "Cubic Inches",
+            Self::CubicFeet => "Cubic Feet",
+            Self::CubicMillimeters => "Cubic Millimeters",
+            Self::CubicCentimeters => "Cubic Centimeters",
+            Self::CubicMeters => "Cubic Meters",
+            Self::CubicYards => "Cubic Yards",
+            Self::Liters => "Liters",
+            Self::UsGallons => "US Gallons",
+        }
+    }
+
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::CubicInches => "in³",
+            Self::CubicFeet => "ft³",
+            Self::CubicMillimeters => "mm³",
+            Self::CubicCentimeters => "cm³",
+            Self::CubicMeters => "m³",
+            Self::CubicYards => "yd³",
+            Self::Liters => "L",
+            Self::UsGallons => "gal",
+        }
+    }
+
+    /// Cubic inches in one unit.
+    pub fn cubic_inches(self) -> f64 {
+        let cube = |side: f64| side * side * side;
+        match self {
+            Self::CubicInches => 1.0,
+            Self::CubicFeet => cube(12.0),
+            Self::CubicMillimeters => cube(1.0 / 25.4),
+            Self::CubicCentimeters => cube(1.0 / 2.54),
+            Self::CubicMeters => cube(1000.0 / 25.4),
+            Self::CubicYards => cube(36.0),
+            Self::Liters => cube(10.0 / 2.54),
+            Self::UsGallons => 231.0,
+        }
+    }
+
+    pub fn code(self) -> i32 {
+        Self::ALL.iter().position(|u| *u == self).unwrap_or(0) as i32
+    }
+
+    pub fn from_code(code: i32) -> Option<Self> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|i| Self::ALL.get(i).copied())
+    }
+
+    /// The cube of a length unit (files without a volume unit).
+    pub fn of_length(unit: LengthUnit) -> Self {
+        match unit {
+            LengthUnit::Inch => Self::CubicInches,
+            LengthUnit::Foot => Self::CubicFeet,
+            LengthUnit::Millimeter => Self::CubicMillimeters,
+            LengthUnit::Centimeter => Self::CubicCentimeters,
+            LengthUnit::Meter => Self::CubicMeters,
+        }
+    }
+}
+
+/// `value` with `precision` decimals and the `~ ` mark when rounded.
+fn decimal_text(value: f64, precision: u8) -> String {
+    let p = usize::from(precision.min(6));
+    let text = format!("{value:.p$}");
+    let shown: f64 = text.parse().unwrap_or(value);
+    format!("{}{text}", approx(value, shown))
+}
+
+/// An area in square inches in Model Info's area unit and precision, e.g.
+/// `12.50 ft²` (SketchUp's exact spacing unverified).
+pub fn format_area(square_inches: f64, opts: &UnitsOptions) -> String {
+    let v = square_inches / opts.area_unit.square_inches();
+    format!(
+        "{} {}",
+        decimal_text(v, opts.area_precision),
+        opts.area_unit.suffix()
+    )
+}
+
+/// A volume in cubic inches in Model Info's volume unit and precision.
+pub fn format_volume(cubic_inches: f64, opts: &UnitsOptions) -> String {
+    let v = cubic_inches / opts.volume_unit.cubic_inches();
+    format!(
+        "{} {}",
+        decimal_text(v, opts.volume_precision),
+        opts.volume_unit.suffix()
+    )
+}
+
+/// Length snapping: `length` (inches) rounded to the snap length when enabled.
+pub fn snap_length(length: f64, opts: &UnitsOptions) -> f64 {
+    if !opts.length_snapping || opts.snap_length <= 0.0 || !length.is_finite() {
+        return length;
+    }
+    (length / opts.snap_length).round() * opts.snap_length
+}
+
+/// Angle snapping: `angle` (radians) moves to the nearest multiple of the snap angle
+/// when it is within a quarter of the snap angle of it (how close SketchUp must be is
+/// unverified).
+pub fn snap_angle(angle: f64, opts: &UnitsOptions) -> f64 {
+    if !opts.angle_snapping || opts.snap_angle <= 0.0 || !angle.is_finite() {
+        return angle;
+    }
+    let step = opts.snap_angle.to_radians();
+    let k = (angle / step).round();
+    if (angle - k * step).abs() <= step * 0.25 {
+        k * step
+    } else {
+        angle
+    }
+}
+
+/// [`snap_angle`] with the open model's options ([`set_display`]); unchanged without.
+pub fn snap_angle_display(angle: f64) -> f64 {
+    display().map_or(angle, |o| snap_angle(angle, &o))
+}
+
+/// An angle in degrees for the Measurements box: the number only, with Model Info's
+/// angle precision (one decimal without a model).
+pub fn angle_text(deg: f64) -> String {
+    let p = usize::from(display().map_or(1, |o| o.angle_precision).min(6));
+    format!("{deg:.p$}")
+}
+
+/// The open model's display options, if any.
+pub fn display_options() -> Option<UnitsOptions> {
+    display()
 }
 
 /// Display options in effect for [`LengthUnit::format`]; `None` keeps the plain
@@ -241,7 +500,12 @@ pub fn format_length(inches: f64, unit: LengthUnit, opts: &UnitsOptions) -> Stri
             let text = format!("{v:.p$}");
             let shown: f64 = text.parse().unwrap_or(v);
             let sign = if shown == 0.0 { "" } else { sign };
-            format!("{}{sign}{text}{}", approx(v, shown), unit.suffix())
+            let suffix = if opts.suppress_units && opts.format == LengthFormat::Decimal {
+                ""
+            } else {
+                unit.suffix()
+            };
+            format!("{}{sign}{text}{suffix}", approx(v, shown))
         }
         LengthFormat::Fractional => {
             let den = 1u32 << opts.precision.min(6);
@@ -259,8 +523,11 @@ pub fn format_length(inches: f64, unit: LengthUnit, opts: &UnitsOptions) -> Stri
             let sign = if rounded == 0.0 { "" } else { sign };
             let (feet, inch) = (whole / 12, whole % 12);
             let inches = fraction_text(inch, num, den);
-            // Under a foot only inches are shown (unverified).
-            let text = if feet > 0 {
+            // Under a foot only inches are shown (unverified). Whole feet show their
+            // zero inches only with "Force display of 0\"".
+            let text = if feet > 0 && inch == 0 && num == 0 && !opts.force_inch_display {
+                format!("{feet}'")
+            } else if feet > 0 {
                 format!("{feet}' {inches}\"")
             } else {
                 format!("{inches}\"")
@@ -373,6 +640,60 @@ mod tests {
         assert_eq!(format_length(-6.25, mm, &o), "-6 1/4\"");
         assert_eq!(format_length(66.53, mm, &o), "~ 5' 6 1/2\"");
         assert_eq!(format_angle(12.345, &o), "~ 12.3°");
+        o.force_inch_display = false;
+        assert_eq!(format_length(60.0, mm, &o), "5'");
+        assert_eq!(format_length(66.5, mm, &o), "5' 6 1/2\"");
+        o.format = LengthFormat::Decimal;
+        o.suppress_units = true;
+        o.precision = 1;
+        assert_eq!(format_length(12.5, LengthUnit::Inch, &o), "12.5");
+    }
+
+    #[test]
+    fn areas_and_volumes_in_their_units() {
+        let mut o = UnitsOptions {
+            area_unit: AreaUnit::SquareFeet,
+            area_precision: 2,
+            volume_unit: VolumeUnit::Liters,
+            volume_precision: 1,
+            ..UnitsOptions::default()
+        };
+        assert_eq!(format_area(144.0 * 2.5, &o), "2.50 ft²");
+        // One liter is 61.0237 cubic inches.
+        assert_eq!(format_volume(61.023_744, &o), "~ 1.0 L");
+        o.area_unit = AreaUnit::SquareMeters;
+        o.area_precision = 0;
+        assert_eq!(format_area(1600.0, &o), "~ 1 m²");
+        for u in AreaUnit::ALL {
+            assert_eq!(AreaUnit::from_code(u.code()), Some(u));
+        }
+        for u in VolumeUnit::ALL {
+            assert_eq!(VolumeUnit::from_code(u.code()), Some(u));
+        }
+        assert_eq!(VolumeUnit::from_code(8), None);
+        assert!((VolumeUnit::UsGallons.cubic_inches() - 231.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn snapping_rounds_lengths_and_angles() {
+        let mut o = UnitsOptions {
+            length_snapping: true,
+            snap_length: 0.25,
+            angle_snapping: true,
+            snap_angle: 15.0,
+            ..UnitsOptions::default()
+        };
+        assert!((snap_length(10.13, &o) - 10.25).abs() < 1e-12);
+        assert!((snap_length(10.1, &o) - 10.0).abs() < 1e-12);
+        let deg = |d: f64| d.to_radians();
+        assert!((snap_angle(deg(44.0), &o) - deg(45.0)).abs() < 1e-12);
+        assert!((snap_angle(deg(-31.0), &o) - deg(-30.0)).abs() < 1e-12);
+        // Between ticks the angle is free.
+        assert!((snap_angle(deg(37.0), &o) - deg(37.0)).abs() < 1e-12);
+        o.length_snapping = false;
+        o.angle_snapping = false;
+        assert_eq!(snap_length(10.13, &o), 10.13);
+        assert_eq!(snap_angle(deg(44.0), &o), deg(44.0));
     }
 
     #[test]

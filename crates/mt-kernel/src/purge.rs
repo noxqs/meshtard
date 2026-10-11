@@ -211,6 +211,7 @@ mod tests {
             name: name.into(),
             color: [0; 3],
             visible: true,
+            ..Layer::default()
         }
     }
 
@@ -276,6 +277,7 @@ mod tests {
             fov_deg: 35.0,
             perspective: true,
             hidden_layers: vec![1, 2],
+            ..Default::default()
         });
         (m, [nested, only_in_unused, used, unused])
     }

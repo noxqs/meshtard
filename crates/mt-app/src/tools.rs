@@ -969,7 +969,7 @@ impl DrawTool for CenterArc {
             (Some(_), Some(_), Some(p)) => (
                 "Angle",
                 self.arc(p.point)
-                    .map(|a| format!("{:.1}", a.end_angle.to_degrees()))
+                    .map(|a| mt_infer::units::angle_text(a.end_angle.to_degrees()))
                     .unwrap_or_default(),
             ),
             _ => ("Radius", String::new()),
@@ -1350,8 +1350,8 @@ pub fn parse_angle(text: &str) -> Option<f64> {
 /// typed angle places a guide line through the center at that angle.
 ///
 /// Unverified against SketchUp: the protractor here is drawn at the radius of the
-/// start click (SketchUp's is a fixed screen size), angles do not snap to the 15°
-/// ticks, typed angles turn towards the side the cursor is on, and Ctrl (measure
+/// start click (SketchUp's is a fixed screen size), angles snap to Model Info's
+/// snap angle only near its multiples, typed angles turn towards the side the cursor is on, and Ctrl (measure
 /// only, no guide) is not supported.
 #[derive(Debug, Default)]
 pub struct Protractor {
@@ -1376,7 +1376,9 @@ impl Protractor {
         let (_, n) = self.center?;
         let (base, _) = self.base?;
         let d = self.in_plane(p)?;
-        (d.length() > mt_kernel::TOL).then(|| signed_angle(base, d, n))
+        // Model Info > Units angle snapping.
+        (d.length() > mt_kernel::TOL)
+            .then(|| mt_infer::units::snap_angle_display(signed_angle(base, d, n)))
     }
 
     /// The guide direction at `angle` from the start direction.
@@ -1416,7 +1418,7 @@ impl DrawTool for Protractor {
     fn measurement(&self, cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
         let v = cur
             .and_then(|c| self.angle(c.point))
-            .map(|a| format!("{:.1}", a.to_degrees()));
+            .map(|a| mt_infer::units::angle_text(a.to_degrees()));
         ("Angle", v.unwrap_or_default())
     }
 

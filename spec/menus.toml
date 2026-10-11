@@ -222,6 +222,7 @@ items = [
 label = "Tools"
 items = [
   { id = "tool.select", label = "Select" },
+  { id = "tool.lasso", label = "Lasso" },
   { id = "tool.eraser", label = "Eraser" },
   { id = "tool.tag", label = "Tag" },
   { id = "tool.paint_bucket", label = "Paint Bucket" },

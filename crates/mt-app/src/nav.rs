@@ -7,6 +7,8 @@ use mt_render::Camera;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Select,
+    /// Tools > Lasso (see `lasso`).
+    Lasso,
     /// A drawing tool from `tools`, by command id.
     Draw(&'static str),
     /// A modify tool from `modify`, by command id.
@@ -33,6 +35,7 @@ impl Tool {
     pub fn from_command(id: &str) -> Option<Self> {
         Some(match id {
             "tool.select" => Self::Select,
+            "tool.lasso" => Self::Lasso,
             "tool.eraser" => Self::Eraser,
             "tool.line" => Self::Draw("tool.line"),
             "tool.rectangle" => Self::Draw("tool.rectangle"),
@@ -82,6 +85,7 @@ impl Tool {
     pub fn command(self) -> &'static str {
         match self {
             Self::Select => "tool.select",
+            Self::Lasso => "tool.lasso",
             Self::Draw(id) | Self::Modify(id) | Self::Pick(id) => id,
             Self::Eraser => "tool.eraser",
             Self::Orbit => "camera.orbit",
@@ -100,6 +104,9 @@ impl Tool {
         match self {
             Self::Select => {
                 "Select objects. Shift to extend select. Drag mouse to select multiple."
+            }
+            Self::Lasso => {
+                "Drag a lasso: clockwise selects what it touches, counterclockwise what is inside. Click points, double-click to finish."
             }
             Self::Draw(_) | Self::Modify(_) | Self::Pick(_) => "",
             Self::Eraser => {
@@ -143,6 +150,7 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
     if input.left_drag != DVec2::ZERO {
         match tool {
             Tool::Select
+            | Tool::Lasso
             | Tool::Draw(_)
             | Tool::Modify(_)
             | Tool::Pick(_)

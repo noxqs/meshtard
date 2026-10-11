@@ -373,12 +373,38 @@ impl Rect {
             max: a.max(b),
         }
     }
+}
 
+/// A screen region a drag selects with: the Select tool's box or the Lasso's polygon.
+pub trait Region {
+    fn contains(&self, p: DVec2) -> bool;
+    /// Whether segment `a-b` touches the region.
+    fn touches_segment(&self, a: DVec2, b: DVec2) -> bool;
+    /// Whether a point of the region lies inside the screen triangle (with
+    /// [`Region::touches_segment`] on its sides: whether the triangle touches it).
+    fn any_point_in(&self, tri: [DVec2; 3]) -> bool;
+
+    fn touches_triangle(&self, [a, b, c]: [DVec2; 3]) -> bool {
+        self.touches_segment(a, b)
+            || self.touches_segment(b, c)
+            || self.touches_segment(c, a)
+            || self.any_point_in([a, b, c])
+    }
+}
+
+/// Whether `p` lies inside (or on) the screen triangle.
+fn in_triangle(p: DVec2, [a, b, c]: [DVec2; 3]) -> bool {
+    let s = |u: DVec2, v: DVec2| (v - u).perp_dot(p - u);
+    let (d1, d2, d3) = (s(a, b), s(b, c), s(c, a));
+    (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
+}
+
+impl Region for Rect {
     fn contains(&self, p: DVec2) -> bool {
         p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
     }
 
-    /// Whether segment `a-b` touches the rectangle (Liang-Barsky clipping).
+    /// Liang-Barsky clipping.
     fn touches_segment(&self, a: DVec2, b: DVec2) -> bool {
         let d = b - a;
         let (mut t0, mut t1) = (0.0f64, 1.0f64);
@@ -404,16 +430,91 @@ impl Rect {
         t0 <= t1
     }
 
-    fn touches_triangle(&self, [a, b, c]: [DVec2; 3]) -> bool {
-        let inside_tri = |p: DVec2| {
-            let s = |u: DVec2, v: DVec2| (v - u).perp_dot(p - u);
-            let (d1, d2, d3) = (s(a, b), s(b, c), s(c, a));
-            (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
-        };
-        self.touches_segment(a, b)
-            || self.touches_segment(b, c)
-            || self.touches_segment(c, a)
-            || inside_tri(self.min)
+    fn any_point_in(&self, tri: [DVec2; 3]) -> bool {
+        in_triangle(self.min, tri)
+    }
+}
+
+/// A closed screen polygon (the Lasso tool's outline), in viewport pixels.
+#[derive(Debug, Clone, Default)]
+pub struct Polygon {
+    pub points: Vec<DVec2>,
+}
+
+impl Polygon {
+    pub fn new(points: Vec<DVec2>) -> Self {
+        Self { points }
+    }
+
+    /// Twice the signed area with y pointing down (screen pixels): positive when the
+    /// outline runs clockwise as seen on screen.
+    pub fn clockwise_area2(&self) -> f64 {
+        let n = self.points.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (self.points[i], self.points[(i + 1) % n]);
+                a.perp_dot(b)
+            })
+            .sum()
+    }
+
+    /// Drawn clockwise on screen: the Lasso selects what it touches (crossing);
+    /// counterclockwise selects only what lies fully inside (window).
+    pub fn is_clockwise(&self) -> bool {
+        self.clockwise_area2() > 0.0
+    }
+
+    fn sides(&self) -> impl Iterator<Item = (DVec2, DVec2)> + '_ {
+        let n = self.points.len();
+        (0..n).map(move |i| (self.points[i], self.points[(i + 1) % n]))
+    }
+}
+
+/// Whether segments `a-b` and `c-d` intersect (touching counts).
+fn segments_cross(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> bool {
+    let o = |p: DVec2, q: DVec2, r: DVec2| (q - p).perp_dot(r - p);
+    let on = |p: DVec2, q: DVec2, r: DVec2| {
+        r.x >= p.x.min(q.x) && r.x <= p.x.max(q.x) && r.y >= p.y.min(q.y) && r.y <= p.y.max(q.y)
+    };
+    let (d1, d2, d3, d4) = (o(c, d, a), o(c, d, b), o(a, b, c), o(a, b, d));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+    (d1 == 0.0 && on(c, d, a))
+        || (d2 == 0.0 && on(c, d, b))
+        || (d3 == 0.0 && on(a, b, c))
+        || (d4 == 0.0 && on(a, b, d))
+}
+
+impl Region for Polygon {
+    /// Even-odd rule (a self-crossing lasso leaves its doubly wound parts out).
+    fn contains(&self, p: DVec2) -> bool {
+        if self.points.len() < 3 {
+            return false;
+        }
+        let mut inside = false;
+        for (a, b) in self.sides() {
+            if (a.y > p.y) != (b.y > p.y) {
+                let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
+                if p.x < x {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
+
+    fn touches_segment(&self, a: DVec2, b: DVec2) -> bool {
+        self.points.len() >= 3
+            && (self.contains(a)
+                || self.contains(b)
+                || self.sides().any(|(c, d)| segments_cross(a, b, c, d)))
+    }
+
+    fn any_point_in(&self, tri: [DVec2; 3]) -> bool {
+        self.points.first().is_some_and(|p| in_triangle(*p, tri))
     }
 }
 
@@ -424,6 +525,32 @@ pub fn box_select(
     camera: &Camera,
     viewport: DVec2,
     rect: Rect,
+    window: bool,
+) -> Vec<Owner> {
+    region_select(scene, camera, viewport, &rect, window)
+}
+
+/// Entities selected by a lasso: clockwise (on screen) selects what the outline
+/// touches, counterclockwise only what lies fully inside it.
+pub fn lasso_select(
+    scene: &Scene,
+    camera: &Camera,
+    viewport: DVec2,
+    lasso: &Polygon,
+) -> Vec<Owner> {
+    if lasso.points.len() < 3 {
+        return Vec::new();
+    }
+    region_select(scene, camera, viewport, lasso, !lasso.is_clockwise())
+}
+
+/// Entities in a screen region: `window` needs them fully inside, otherwise touching
+/// is enough. Geometry behind the camera never counts as inside.
+pub fn region_select(
+    scene: &Scene,
+    camera: &Camera,
+    viewport: DVec2,
+    rect: &impl Region,
     window: bool,
 ) -> Vec<Owner> {
     let mut inside: Vec<Owner> = Vec::new();
@@ -550,6 +677,106 @@ mod tests {
             DVec2::new(0.0, 100.0),
         ];
         assert!(r.touches_triangle(big), "rect inside a triangle touches it");
+    }
+
+    /// A scene of the entities' faces and edges, every piece owned by itself.
+    fn scene_of(e: &Entities) -> Scene {
+        let mut scene = Scene::default();
+        let f = |p: DVec3| p.as_vec3().to_array();
+        for (id, edge) in &e.edges {
+            scene.edges.push(mt_render::Segment::line(
+                f(e.pos(edge.start)),
+                f(e.pos(edge.end)),
+                [0.0, 0.0, 0.0, 1.0],
+                [1.0, 0.0],
+            ));
+            scene.edge_owner.push(Some(Owner::Edge(id)));
+        }
+        for fid in e.faces.keys() {
+            for tri in mt_kernel::tessellate::triangulate(e, fid) {
+                scene.triangles.push(tri);
+                scene.tri_owner.push(Some(Owner::Face(fid)));
+            }
+        }
+        scene
+    }
+
+    #[test]
+    fn polygon_orientation_and_containment() {
+        // Screen pixels, y down: right, then down, then left is clockwise on screen.
+        let cw = Polygon::new(vec![
+            DVec2::new(0.0, 0.0),
+            DVec2::new(10.0, 0.0),
+            DVec2::new(10.0, 10.0),
+            DVec2::new(0.0, 10.0),
+        ]);
+        assert!(cw.is_clockwise());
+        let mut ccw = cw.clone();
+        ccw.points.reverse();
+        assert!(!ccw.is_clockwise());
+        assert!(cw.contains(DVec2::new(5.0, 5.0)) && ccw.contains(DVec2::new(5.0, 5.0)));
+        assert!(!cw.contains(DVec2::new(15.0, 5.0)));
+        assert!(cw.touches_segment(DVec2::new(5.0, -5.0), DVec2::new(5.0, 15.0)));
+        assert!(!cw.touches_segment(DVec2::new(11.0, -5.0), DVec2::new(11.0, 15.0)));
+        // A triangle around the whole lasso touches it.
+        let big = [
+            DVec2::new(-100.0, -100.0),
+            DVec2::new(100.0, -100.0),
+            DVec2::new(0.0, 100.0),
+        ];
+        assert!(cw.touches_triangle(big));
+    }
+
+    #[test]
+    fn lasso_clockwise_touches_counterclockwise_inside() {
+        // Square A at x 0..1 and square B at x 5..6 on the ground.
+        let mut e = Entities::new();
+        square(&mut e, 0.0);
+        square(&mut e, 5.0);
+        let scene = scene_of(&e);
+        let camera = Camera {
+            eye: DVec3::new(3.0, -40.0, 60.0),
+            target: DVec3::new(3.0, 0.5, 0.0),
+            fov_deg: 35.0,
+            perspective: true,
+            two_point: false,
+        };
+        let viewport = DVec2::new(800.0, 600.0);
+        // A lasso around all of A and the left half of B.
+        let outline: Vec<DVec2> = [(-0.5, -0.5), (5.5, -0.5), (5.5, 1.5), (-0.5, 1.5)]
+            .iter()
+            .map(|&(x, y)| camera.project(DVec3::new(x, y, 0.0), viewport).unwrap())
+            .collect();
+        let mut cw = Polygon::new(outline);
+        if !cw.is_clockwise() {
+            cw.points.reverse();
+        }
+        let mut ccw = cw.clone();
+        ccw.points.reverse();
+        let in_a = |o: &Owner| match *o {
+            Owner::Edge(id) => {
+                let ed = &e.edges[id];
+                e.pos(ed.start).x < 2.0 && e.pos(ed.end).x < 2.0
+            }
+            Owner::Face(f) => e.loop_points(&e.faces[f].outer).iter().all(|p| p.x < 2.0),
+            _ => false,
+        };
+        let inside = lasso_select(&scene, &camera, viewport, &ccw);
+        // A's face and four edges, and B's left edge (x = 5) which lies inside too.
+        assert_eq!(inside.len(), 6, "{inside:?}");
+        assert_eq!(inside.iter().filter(|o| !in_a(o)).count(), 1);
+        assert!(
+            !inside
+                .iter()
+                .any(|o| matches!(o, Owner::Face(_)) && !in_a(o))
+        );
+        let touched = lasso_select(&scene, &camera, viewport, &cw);
+        // B's face, its two edges across the outline and its left edge are touched
+        // too; its right edge is not.
+        assert_eq!(touched.len(), 5 + 4, "{touched:?}");
+        assert_eq!(touched.iter().filter(|o| !in_a(o)).count(), 4);
+        // Too few points select nothing.
+        assert!(lasso_select(&scene, &camera, viewport, &Polygon::new(vec![])).is_empty());
     }
 
     #[test]

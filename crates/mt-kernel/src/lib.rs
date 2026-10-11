@@ -21,6 +21,7 @@ pub mod intersect;
 pub mod mesh_export;
 pub mod mesh_import;
 pub mod model;
+pub mod model_data;
 pub mod offset;
 pub mod ops;
 pub mod orient;

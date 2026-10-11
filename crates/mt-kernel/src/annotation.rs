@@ -33,6 +33,9 @@ pub struct Dimension {
     pub text: Option<String>,
     pub kind: DimensionKind,
     pub hidden: bool,
+    /// Font, alignment and endpoints set by Model Info > Dimensions > Update Selected;
+    /// `None` follows the model's `dimension_style` (not saved in .skp).
+    pub style: Option<crate::model_data::DimensionStyle>,
 }
 
 impl Dimension {
@@ -44,6 +47,7 @@ impl Dimension {
             text: None,
             kind: DimensionKind::Linear,
             hidden: false,
+            style: None,
         }
     }
 
@@ -116,6 +120,9 @@ pub struct Text {
     pub text: String,
     pub screen: bool,
     pub hidden: bool,
+    /// Font, color and leader set by Model Info > Text > Update Selected; `None`
+    /// follows the model's `text_style` (not saved in .skp).
+    pub style: Option<crate::model_data::TextStyle>,
 }
 
 impl Text {
@@ -126,6 +133,7 @@ impl Text {
             text,
             screen: false,
             hidden: false,
+            style: None,
         }
     }
 
@@ -136,6 +144,7 @@ impl Text {
             text,
             screen: true,
             hidden: false,
+            style: None,
         }
     }
 }

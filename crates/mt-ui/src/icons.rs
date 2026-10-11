@@ -62,6 +62,7 @@ impl Palette {
 /// Command ids that have their own icon. Every other id gets the fallback icon.
 pub const KNOWN: &[&str] = &[
     "tool.select",
+    "tool.lasso",
     "edit.make_component",
     "tool.eraser",
     "tool.tag",
@@ -129,6 +130,7 @@ pub fn paint(painter: &Painter, rect: Rect, id: &str, palette: &Palette) -> bool
     let known = has_icon(id);
     match id {
         "tool.select" => select(&p),
+        "tool.lasso" => lasso(&p),
         "edit.make_component" => make_component(&p),
         "tool.eraser" => eraser(&p),
         "tool.tag" => tag(&p),
@@ -380,6 +382,30 @@ fn select(p: &Pen) {
             (15.6, 20.3),
             (12.6, 14.2),
             (18.0, 14.2),
+        ],
+        p.c.accent,
+    );
+}
+
+/// The Lasso: a small arrow and a loose loop (own drawing, unverified).
+fn lasso(p: &Pen) {
+    let pts: Vec<Pt> = (0..=24)
+        .map(|i| {
+            let a = (i as f32 / 24.0) * std::f32::consts::TAU;
+            (13.0 + 8.5 * a.cos(), 9.0 + 5.5 * a.sin())
+        })
+        .collect();
+    p.line(&pts, 1.6, p.c.ink);
+    p.line(&[(8.0, 13.5), (6.0, 18.0), (8.5, 22.0)], 1.6, p.c.ink);
+    p.fan(
+        &[
+            (14.0, 11.0),
+            (14.0, 20.5),
+            (16.2, 18.4),
+            (17.8, 21.8),
+            (19.2, 21.1),
+            (17.6, 17.8),
+            (20.6, 17.8),
         ],
         p.c.accent,
     );

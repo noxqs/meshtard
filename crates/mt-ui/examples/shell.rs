@@ -55,6 +55,7 @@ fn tag(name: &str, visible: bool, color: [u8; 3]) -> TagRow {
         name: name.to_owned(),
         visible,
         color,
+        ..TagRow::default()
     }
 }
 
@@ -72,6 +73,7 @@ fn component(name: &str, description: &str, instances: usize) -> ComponentRow {
         name: name.to_owned(),
         description: description.to_owned(),
         instances,
+        ..ComponentRow::default()
     }
 }
 
@@ -84,9 +86,8 @@ fn node(name: &str, definition: Option<&str>, children: Vec<OutlinerNode>) -> Ou
             },
             None => OutlinerKind::Group,
         },
-        hidden: false,
-        selected: false,
         children,
+        ..OutlinerNode::default()
     }
 }
 

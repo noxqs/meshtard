@@ -46,6 +46,17 @@ pub struct TrayData {
     /// One face with a textured material is selected: the Materials panel's Position
     /// Texture button (command `tool.texture_position`) is enabled.
     pub can_position_texture: bool,
+    /// Tag folders in model order ([`TagRow::folder`] indexes them).
+    pub tag_folders: Vec<TagFolderRow>,
+    /// Tags panel "Color by tag".
+    pub color_by_tag: bool,
+    /// Scenes panel details, one per entry of `scenes`.
+    pub scene_details: Vec<SceneDetails>,
+    /// Styles panel "In Model" style names and the one last applied.
+    pub styles: Vec<String>,
+    pub active_style: Option<usize>,
+    /// The selection holds groups or components (Components > Replace Selected).
+    pub can_replace_component: bool,
 }
 
 impl Default for TrayData {
@@ -55,6 +66,7 @@ impl Default for TrayData {
                 name: "Untagged".to_owned(),
                 visible: true,
                 color: [255, 255, 255],
+                ..TagRow::default()
             }],
             active_tag: 0,
             materials: Vec::new(),
@@ -72,6 +84,12 @@ impl Default for TrayData {
             components: Vec::new(),
             current_component: None,
             can_position_texture: false,
+            tag_folders: Vec::new(),
+            color_by_tag: false,
+            scene_details: Vec::new(),
+            styles: Vec::new(),
+            active_style: None,
+            can_replace_component: false,
         }
     }
 }
@@ -83,7 +101,182 @@ pub struct TagRow {
     pub visible: bool,
     /// Tag color (used by "Color by tag").
     pub color: [u8; 3],
+    /// The folder it is in (index into [`TrayData::tag_folders`]).
+    pub folder: Option<usize>,
+    /// Dash pattern, an index into [`DASH_NAMES`].
+    pub dashes: usize,
 }
+
+impl Default for TagRow {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            visible: true,
+            color: [255, 255, 255],
+            folder: None,
+            dashes: 0,
+        }
+    }
+}
+
+/// The Tags panel's dash patterns, in the order the app maps them (unverified
+/// against SketchUp's list).
+pub const DASH_NAMES: [&str; 6] = [
+    "Default",
+    "Dash",
+    "Short Dash",
+    "Long Dash",
+    "Dot",
+    "Dash Dot",
+];
+
+/// A tag folder of the Tags panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagFolderRow {
+    pub name: String,
+    /// The folder it is in.
+    pub parent: Option<usize>,
+    pub visible: bool,
+}
+
+/// A row of the Tags panel's tree: a folder or a tag, indented by `depth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagTreeItem {
+    Folder(usize),
+    Tag(usize),
+}
+
+/// The Tags panel's rows: "Untagged" first, then the folders (with their subfolders
+/// and tags under them, unless collapsed) and the tags outside folders, each in model
+/// order. With a filter (case-insensitive substring of the name) only matching tags
+/// and the folders leading to them are listed, opened.
+pub fn tag_tree_rows(
+    tags: &[TagRow],
+    folders: &[TagFolderRow],
+    collapsed: &HashSet<usize>,
+    filter: &str,
+) -> Vec<(TagTreeItem, usize)> {
+    let filter = filter.trim().to_lowercase();
+    let tag_matches = |i: usize| filter.is_empty() || tags[i].name.to_lowercase().contains(&filter);
+    // Whether a folder holds a matching tag anywhere below it.
+    fn holds(
+        f: usize,
+        tags: &[TagRow],
+        folders: &[TagFolderRow],
+        m: &dyn Fn(usize) -> bool,
+        depth: usize,
+    ) -> bool {
+        depth <= folders.len()
+            && ((1..tags.len()).any(|t| tags[t].folder == Some(f) && m(t))
+                || (0..folders.len())
+                    .any(|g| folders[g].parent == Some(f) && holds(g, tags, folders, m, depth + 1)))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        parent: Option<usize>,
+        depth: usize,
+        tags: &[TagRow],
+        folders: &[TagFolderRow],
+        collapsed: &HashSet<usize>,
+        filtering: bool,
+        m: &dyn Fn(usize) -> bool,
+        out: &mut Vec<(TagTreeItem, usize)>,
+    ) {
+        if depth > folders.len() {
+            return;
+        }
+        for f in 0..folders.len() {
+            let parent_ok = match parent {
+                Some(p) => folders[f].parent == Some(p),
+                // Folders whose parent is missing are listed at the top.
+                None => folders[f].parent.is_none_or(|p| p >= folders.len()),
+            };
+            if !parent_ok || (filtering && !holds(f, tags, folders, m, 0)) {
+                continue;
+            }
+            out.push((TagTreeItem::Folder(f), depth));
+            if filtering || !collapsed.contains(&f) {
+                walk(
+                    Some(f),
+                    depth + 1,
+                    tags,
+                    folders,
+                    collapsed,
+                    filtering,
+                    m,
+                    out,
+                );
+            }
+        }
+        for (t, tag) in tags.iter().enumerate().skip(1) {
+            let here = match parent {
+                Some(p) => tag.folder == Some(p),
+                None => tag.folder.is_none_or(|p| p >= folders.len()),
+            };
+            if here && m(t) {
+                out.push((TagTreeItem::Tag(t), depth));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if !tags.is_empty() && tag_matches(0) {
+        out.push((TagTreeItem::Tag(0), 0));
+    }
+    walk(
+        None,
+        0,
+        tags,
+        folders,
+        collapsed,
+        !filter.is_empty(),
+        &tag_matches,
+        &mut out,
+    );
+    out
+}
+
+/// Names of the scene properties a scene can save, in [`SceneDetails::props`] order.
+pub const SCENE_PROPS: [&str; 7] = [
+    "Camera Location",
+    "Hidden Geometry",
+    "Visible Tags",
+    "Active Section Planes",
+    "Style and Fog",
+    "Shadow Settings",
+    "Axes Location",
+];
+
+/// A scene's details in the Scenes panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneDetails {
+    pub description: String,
+    pub include_in_animation: bool,
+    /// Properties to save, in [`SCENE_PROPS`] order.
+    pub props: [bool; 7],
+}
+
+impl Default for SceneDetails {
+    fn default() -> Self {
+        Self {
+            description: String::new(),
+            include_in_animation: true,
+            props: [true; 7],
+        }
+    }
+}
+
+/// Component behaviors of the Components panel's Edit tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ComponentBehavior {
+    /// "Glue to", an index into [`GLUE_NAMES`].
+    pub glue: usize,
+    pub cut_opening: bool,
+    pub always_face_camera: bool,
+    pub shadows_face_sun: bool,
+}
+
+/// The "Glue to" choices.
+pub const GLUE_NAMES: [&str; 5] = ["None", "Any", "Horizontal", "Vertical", "Sloped"];
 
 /// One material of the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,12 +389,13 @@ pub fn parse_hex_color(text: &str) -> Option<[u8; 3]> {
 }
 
 /// One component definition of the model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComponentRow {
     pub name: String,
     pub description: String,
     /// Number of instances placed in the model (0 = unused; Purge Unused removes it).
     pub instances: usize,
+    pub behavior: ComponentBehavior,
 }
 
 /// "1 instance" / "3 instances": the instance count of a component definition.
@@ -251,6 +445,33 @@ pub struct OutlinerNode {
     pub selected: bool,
     /// Nested groups and components, in model order.
     pub children: Vec<OutlinerNode>,
+    /// Its own Hidden flag (the eye; `hidden` also counts hidden tags).
+    pub instance_hidden: bool,
+    /// Locked (lock icon).
+    pub locked: bool,
+    /// Open for editing, or containing the open group or component.
+    pub open: bool,
+}
+
+impl Default for OutlinerNode {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kind: OutlinerKind::Group,
+            hidden: false,
+            selected: false,
+            children: Vec::new(),
+            instance_hidden: false,
+            locked: false,
+            open: false,
+        }
+    }
+}
+
+/// Whether the Outliner may move the node at `from` into the node at `to` (empty: the
+/// model root): not into itself or its own subtree, and not where it already is.
+pub fn outliner_can_move(from: &[usize], to: &[usize]) -> bool {
+    !from.is_empty() && !to.starts_with(from) && from[..from.len() - 1] != *to
 }
 
 impl OutlinerNode {
@@ -442,6 +663,12 @@ pub struct ShadowSettings {
     pub on_faces: bool,
     /// Display: On ground.
     pub on_ground: bool,
+    /// UTC offset in minutes (east positive).
+    pub utc_offset_minutes: i16,
+    /// "Use sun for shading" (lit by the sun with shadows off).
+    pub use_sun_for_shading: bool,
+    /// Display: From edges.
+    pub from_edges: bool,
 }
 
 impl Default for ShadowSettings {
@@ -454,8 +681,18 @@ impl Default for ShadowSettings {
             dark: 45,
             on_faces: true,
             on_ground: true,
+            utc_offset_minutes: -7 * 60,
+            use_sun_for_shading: false,
+            from_edges: false,
         }
     }
+}
+
+/// "UTC-07:00" style label of a UTC offset in minutes.
+pub fn utc_label(minutes: i16) -> String {
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let m = minutes.unsigned_abs();
+    format!("UTC{sign}{:02}:{:02}", m / 60, m % 60)
 }
 
 const MONTH_DAYS: [u16; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -587,9 +824,8 @@ mod tests {
         OutlinerNode {
             name: name.to_owned(),
             kind: OutlinerKind::Group,
-            hidden: false,
-            selected: false,
             children,
+            ..OutlinerNode::default()
         }
     }
 
@@ -599,9 +835,7 @@ mod tests {
             kind: OutlinerKind::Component {
                 definition: def.to_owned(),
             },
-            hidden: false,
-            selected: false,
-            children: Vec::new(),
+            ..OutlinerNode::default()
         }
     }
 
@@ -698,6 +932,7 @@ mod tests {
             name: "Door".to_owned(),
             description: "Single door".to_owned(),
             instances: 2,
+            ..ComponentRow::default()
         };
         assert_eq!(component_edit(&row, " Door ", "Single door "), None);
         assert_eq!(component_edit(&row, "  ", "Single door"), None);
@@ -737,6 +972,64 @@ mod tests {
         assert_eq!(parse_hex_color("#12345"), None);
         assert_eq!(parse_hex_color("#12345g"), None);
         assert_eq!(parse_hex_color("+1+2+3"), None);
+    }
+
+    fn tag(name: &str, folder: Option<usize>) -> TagRow {
+        TagRow {
+            name: name.into(),
+            folder,
+            ..TagRow::default()
+        }
+    }
+
+    fn folder(name: &str, parent: Option<usize>) -> TagFolderRow {
+        TagFolderRow {
+            name: name.into(),
+            parent,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn tag_tree_lists_folders_then_loose_tags() {
+        use TagTreeItem::{Folder, Tag};
+        let tags = vec![
+            tag("Untagged", None),
+            tag("Walls", Some(0)),
+            tag("Roof", None),
+            tag("Doors", Some(1)),
+        ];
+        let folders = vec![folder("Building", None), folder("Openings", Some(0))];
+        let rows = tag_tree_rows(&tags, &folders, &HashSet::new(), "");
+        assert_eq!(
+            rows,
+            [
+                (Tag(0), 0),
+                (Folder(0), 0),
+                (Folder(1), 1),
+                (Tag(3), 2),
+                (Tag(1), 1),
+                (Tag(2), 0)
+            ]
+        );
+        let collapsed = HashSet::from([0]);
+        let rows = tag_tree_rows(&tags, &folders, &collapsed, "");
+        assert_eq!(rows, [(Tag(0), 0), (Folder(0), 0), (Tag(2), 0)]);
+        // A filter opens the folders leading to matches and drops the rest.
+        let rows = tag_tree_rows(&tags, &folders, &collapsed, " door");
+        assert_eq!(rows, [(Folder(0), 0), (Folder(1), 1), (Tag(3), 2)]);
+    }
+
+    #[test]
+    fn outliner_moves_refuse_loops() {
+        assert!(outliner_can_move(&[0, 1], &[]));
+        assert!(outliner_can_move(&[0, 1], &[2]));
+        assert!(!outliner_can_move(&[0], &[]), "already at the root");
+        assert!(!outliner_can_move(&[0], &[0, 3]), "into its own child");
+        assert!(!outliner_can_move(&[0], &[0]), "into itself");
+        assert!(!outliner_can_move(&[0, 1], &[0]), "already there");
+        assert_eq!(utc_label(-420), "UTC-07:00");
+        assert_eq!(utc_label(330), "UTC+05:30");
     }
 
     #[test]

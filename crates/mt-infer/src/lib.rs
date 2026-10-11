@@ -561,6 +561,10 @@ pub struct Engine {
     /// The acquirable point under the cursor and since when (seconds), for delayed
     /// acquisition.
     hover: Option<(DVec3, f64)>,
+    /// Model Info > Units length snapping: lengths from the anchor along a direction
+    /// inference, a locked direction or a free point are rounded to this many inches
+    /// (`None`: off). The app sets it from the model.
+    pub length_snap: Option<f64>,
 }
 
 /// Point on line `o + t * d` closest to the ray.
@@ -577,10 +581,11 @@ fn closest_on_line(o: DVec3, d: DVec3, ray_o: DVec3, ray_d: DVec3) -> DVec3 {
 }
 
 impl Engine {
-    /// Forgets everything but the drawing axes.
+    /// Forgets everything but the drawing axes and length snapping.
     pub fn reset(&mut self) {
         *self = Self {
             axes: self.axes,
+            length_snap: self.length_snap,
             ..Self::default()
         };
     }
@@ -751,6 +756,13 @@ impl Engine {
         anchor: Option<DVec3>,
     ) -> Inference {
         let mut i = self.infer_point(geom, bvh, view, cursor, anchor);
+        if let Some(a) = anchor
+            && !i.locked
+            && (i.kind.is_direction() && !matches!(i.kind, Kind::FromPoint(_))
+                || i.kind == Kind::Free)
+        {
+            i.point = self.snapped(a, i.point);
+        }
         i.segment = i.edge.and_then(|e| geom.edges.get(e).copied());
         if matches!(i.kind, Kind::Endpoint | Kind::Midpoint | Kind::OnEdge) {
             i.container = i.edge.and_then(|e| geom.container_of_edge(e));
@@ -800,7 +812,7 @@ impl Engine {
                 // Locked: stay on the line; a point inference is projected onto it.
                 let p = match point.filter(|p| p.kind.is_point()) {
                     Some(p) => a + dir * (p.point - a).dot(dir),
-                    None => closest_on_line(a, dir, ray.origin, ray.dir),
+                    None => self.snapped(a, closest_on_line(a, dir, ray.origin, ray.dir)),
                 };
                 return Inference {
                     point: p,
@@ -841,6 +853,20 @@ impl Engine {
             segment: None,
             container: None,
         }
+    }
+
+    /// `p` moved along the line from `anchor` so its distance is a multiple of the
+    /// snap length ([`Engine::length_snap`]).
+    fn snapped(&self, anchor: DVec3, p: DVec3) -> DVec3 {
+        let Some(step) = self.length_snap.filter(|s| *s > 0.0) else {
+            return p;
+        };
+        let d = p - anchor;
+        let len = d.length();
+        if len <= 1e-12 {
+            return p;
+        }
+        anchor + d / len * ((len / step).round() * step)
     }
 
     fn remember(&mut self, geom: &Geometry, p: &Inference) {
@@ -1537,6 +1563,35 @@ mod tests {
             Some(a),
         );
         assert_eq!(i.kind, Kind::Along(Axis::Red));
+    }
+
+    #[test]
+    fn length_snapping_rounds_direction_lengths() {
+        let (g, b) = square();
+        let mut e = Engine {
+            length_snap: Some(10.0),
+            ..Engine::default()
+        };
+        let a = DVec3::new(200.0, 200.0, 0.0);
+        let cursor = at(DVec3::new(323.0, 200.0, 0.0)) + DVec2::new(0.0, 3.0);
+        let i = infer(&mut e, &g, &b, cursor, Some(a));
+        assert_eq!(i.kind, Kind::Along(Axis::Red));
+        assert!((i.point.distance(a) - 120.0).abs() < 1e-9, "{:?}", i.point);
+        // Locked directions snap too; point inferences do not.
+        e.toggle_axis_lock(Axis::Red);
+        let i = infer(&mut e, &g, &b, cursor, Some(a));
+        assert!(i.locked && (i.point.distance(a) - 120.0).abs() < 1e-9);
+        e.unlock();
+        let corner = DVec3::new(100.0, 0.0, 0.0);
+        let i = infer(&mut e, &g, &b, at(corner), Some(a));
+        assert_eq!((i.kind, i.point), (Kind::Endpoint, corner));
+        // Off: the length follows the cursor.
+        e.length_snap = None;
+        let i = infer(&mut e, &g, &b, cursor, Some(a));
+        assert!((i.point.distance(a) - 120.0).abs() > 0.5);
+        e.length_snap = Some(10.0);
+        e.reset();
+        assert_eq!(e.length_snap, Some(10.0), "reset keeps length snapping");
     }
 
     #[test]

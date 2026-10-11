@@ -1,7 +1,7 @@
 //! The Default Tray's model panels: Tags, Materials, Outliner, Scenes, Styles and
 //! Shadows. Builds `mt_ui::TrayData` from the document and applies the panels' events.
 
-use mt_kernel::{Entities, Layer, Material, Model, Page};
+use mt_kernel::{Entities, Layer, Material, Model};
 use mt_ui::{Event, MaterialRow, OutlinerKind, OutlinerNode, SelectMode, TagRow, TrayData};
 
 use crate::App;
@@ -36,8 +36,39 @@ impl App {
                 },
                 visible: l.visible,
                 color: l.color,
+                folder: l.folder,
+                dashes: mt_kernel::model_data::Dashes::ALL
+                    .iter()
+                    .position(|d| *d == l.dashes)
+                    .unwrap_or(0),
             })
             .collect();
+        data.tag_folders = m
+            .tag_folders
+            .iter()
+            .map(|f| mt_ui::TagFolderRow {
+                name: f.name.clone(),
+                parent: f.parent,
+                visible: f.visible,
+            })
+            .collect();
+        data.color_by_tag = m.color_by_tag;
+        data.styles = m.styles.iter().map(|s| s.name.clone()).collect();
+        data.active_style = m.active_style;
+        data.scene_details = m
+            .pages
+            .iter()
+            .map(|p| mt_ui::SceneDetails {
+                description: p.description.clone(),
+                include_in_animation: p.include_in_animation,
+                props: crate::tray_more::props_to_ui(p.props),
+            })
+            .collect();
+        data.can_replace_component = self
+            .selection
+            .items()
+            .iter()
+            .any(|o| matches!(o, Owner::Instance(_)));
         data.materials = m
             .materials
             .iter()
@@ -64,14 +95,23 @@ impl App {
         } else {
             Vec::new()
         };
-        data.outliner = outliner(m, &m.root, &selected, 0);
+        data.outliner = outliner(m, &m.root, &selected, Some(&doc.context), 0);
         let defs = component_definitions(m);
         data.components = defs
             .iter()
-            .map(|&d| mt_ui::ComponentRow {
-                name: m.definitions[d].name.clone(),
-                description: m.definitions[d].description.clone(),
-                instances: mt_kernel::group::instance_count(m, d),
+            .map(|&d| {
+                let def = &m.definitions[d];
+                mt_ui::ComponentRow {
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    instances: mt_kernel::group::instance_count(m, d),
+                    behavior: mt_ui::ComponentBehavior {
+                        glue: crate::tray_more::glue_index(def.glue),
+                        cut_opening: def.cut_opening,
+                        always_face_camera: def.always_face_camera,
+                        shadows_face_sun: def.shadows_face_sun,
+                    },
+                }
             })
             .collect();
         data.current_component = self.current_component;
@@ -126,6 +166,9 @@ impl App {
             dark: (s.dark * 100.0).round() as u8,
             on_faces: s.on_faces,
             on_ground: s.on_ground,
+            utc_offset_minutes: (s.utc_offset * 60.0).round() as i16,
+            use_sun_for_shading: s.use_sun_for_shading,
+            from_edges: s.from_edges,
         };
         data
     }
@@ -139,7 +182,6 @@ impl App {
             }
             e => e,
         };
-        let camera = self.camera.clone();
         let Some(doc) = self.document.as_mut() else {
             return false;
         };
@@ -152,6 +194,7 @@ impl App {
                     name: format!("Tag{n}"),
                     color: tag_color(m.layers.len()),
                     visible: true,
+                    ..Layer::default()
                 });
                 true
             }),
@@ -378,23 +421,8 @@ impl App {
                 self.selection.apply(mode, [Owner::Instance(last)]);
                 true
             }
-            Event::SceneAdd => {
-                let n = doc.model.pages.len() + 1;
-                doc.edit_model(|m, _| {
-                    let page = page(m, format!("Scene {n}"), &camera);
-                    m.pages.push(page);
-                    true
-                });
-                self.active_scene = Some(doc.model.pages.len() - 1);
-                false
-            }
-            Event::SceneUpdate(i) => doc.edit_model(|m, _| {
-                let Some(name) = m.pages.get(i).map(|p| p.name.clone()) else {
-                    return false;
-                };
-                m.pages[i] = page(m, name, &camera);
-                true
-            }),
+            Event::SceneAdd => self.scene_add(),
+            Event::SceneUpdate(i) => self.scene_update(i),
             Event::SceneDelete(i) => {
                 self.active_scene = None;
                 doc.edit_model(|m, _| {
@@ -406,32 +434,10 @@ impl App {
                     }
                 })
             }
-            Event::SceneActivate(i) => {
-                let Some(p) = doc.model.pages.get(i).cloned() else {
-                    return false;
-                };
-                self.active_scene = Some(i);
-                // The camera moves there over the View > Animation > Settings
-                // transition time (see
-                // `App::animate_camera`); tag visibility changes at once (SketchUp fades
-                // it, unverified).
-                let to = mt_render::Camera {
-                    eye: p.eye,
-                    target: p.target,
-                    fov_deg: p.fov_deg,
-                    perspective: p.perspective,
-                    two_point: false,
-                };
-                self.transition = Some(Transition::with_secs(
-                    self.camera.clone(),
-                    to,
-                    self.animation.transition_secs(),
-                ));
-                for (k, l) in doc.model.layers.iter_mut().enumerate() {
-                    l.visible = !p.hidden_layers.contains(&k);
-                }
-                true
-            }
+            // The camera moves there over the View > Animation > Settings transition
+            // time (see `App::animate_camera`); tag visibility and the other saved
+            // properties change at once (SketchUp fades tags, unverified).
+            Event::SceneActivate(i) => self.scene_activate(i),
             Event::StyleChanged(s) => {
                 let st = &mut doc.model.style;
                 st.edges = s.edges;
@@ -481,9 +487,12 @@ impl App {
                 sh.dark = f64::from(s.dark) / 100.0;
                 sh.on_faces = s.on_faces;
                 sh.on_ground = s.on_ground;
+                sh.utc_offset = f64::from(s.utc_offset_minutes) / 60.0;
+                sh.use_sun_for_shading = s.use_sun_for_shading;
+                sh.from_edges = s.from_edges;
                 true
             }
-            _ => false,
+            e => self.tray_more_event(e),
         }
     }
 }
@@ -559,30 +568,12 @@ impl App {
 
 /// Component definitions in Components panel order (groups and images are not
 /// listed).
-fn component_definitions(m: &Model) -> Vec<mt_kernel::DefinitionId> {
+pub(crate) fn component_definitions(m: &Model) -> Vec<mt_kernel::DefinitionId> {
     m.definitions
         .iter()
         .filter(|(_, d)| !d.is_group && !d.is_image)
         .map(|(k, _)| k)
         .collect()
-}
-
-/// A scene from the current view and tag visibility.
-fn page(m: &Model, name: String, camera: &mt_render::Camera) -> Page {
-    Page {
-        name,
-        eye: camera.eye,
-        target: camera.target,
-        fov_deg: camera.fov_deg,
-        perspective: camera.perspective,
-        hidden_layers: m
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.visible)
-            .map(|(i, _)| i)
-            .collect(),
-    }
 }
 
 /// Colors for new tags (draft; SketchUp's palette is unverified).
@@ -598,15 +589,25 @@ fn tag_color(i: usize) -> [u8; 3] {
     PALETTE[i % PALETTE.len()]
 }
 
-fn outliner(m: &Model, ents: &Entities, selected: &[usize], depth: usize) -> Vec<OutlinerNode> {
+/// The Outliner tree below `ents`; `open` is the rest of the open context's path at
+/// this level (`None` off the path).
+fn outliner(
+    m: &Model,
+    ents: &Entities,
+    selected: &[usize],
+    open: Option<&[usize]>,
+    depth: usize,
+) -> Vec<OutlinerNode> {
     ents.instances
         .iter()
         .enumerate()
         .map(|(i, inst)| {
             let def = m.definitions.get(inst.definition);
-            let on_hidden_tag = inst
-                .layer
-                .is_some_and(|l| m.layers.get(l).is_some_and(|x| !x.visible));
+            let on_hidden_tag = inst.layer.is_some_and(|l| !m.layer_shown(l));
+            let child_open = open.and_then(|p| match p {
+                [first, rest @ ..] if *first == i => Some(rest),
+                _ => None,
+            });
             OutlinerNode {
                 name: inst.name.clone(),
                 kind: match def {
@@ -619,9 +620,12 @@ fn outliner(m: &Model, ents: &Entities, selected: &[usize], depth: usize) -> Vec
                 selected: depth == 0 && selected.contains(&i),
                 // Guard against definitions that contain themselves.
                 children: match def {
-                    Some(d) if depth < 32 => outliner(m, &d.entities, &[], depth + 1),
+                    Some(d) if depth < 32 => outliner(m, &d.entities, &[], child_open, depth + 1),
                     _ => Vec::new(),
                 },
+                instance_hidden: inst.hidden,
+                locked: inst.locked,
+                open: child_open.is_some(),
             }
         })
         .collect()

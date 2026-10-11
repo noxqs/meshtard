@@ -23,6 +23,22 @@ pub struct Layer {
     pub name: String,
     pub color: [u8; 3],
     pub visible: bool,
+    /// The tag folder it is in (index into `Model::tag_folders`; not saved in .skp).
+    pub folder: Option<usize>,
+    /// Edges on the tag are drawn with this dash pattern (not saved in .skp).
+    pub dashes: crate::model_data::Dashes,
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            color: [255, 255, 255],
+            visible: true,
+            folder: None,
+            dashes: crate::model_data::Dashes::Solid,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +60,12 @@ pub struct Definition {
     pub glue: GlueTo,
     /// Entity Info > Advanced Attributes kept on the definition.
     pub attributes: DefinitionAttrs,
+    /// Components panel, Edit tab: "Cut opening" (cuts the face it is glued to; not
+    /// applied yet), "Always face camera" and "Shadows face sun" (stored only). Not
+    /// saved in .skp.
+    pub cut_opening: bool,
+    pub always_face_camera: bool,
+    pub shadows_face_sun: bool,
 }
 
 /// The definition half of Entity Info's Advanced Attributes (Price, Size, URL, Type);
@@ -93,6 +115,30 @@ pub struct Page {
     pub perspective: bool,
     /// Tags hidden in this scene.
     pub hidden_layers: Vec<LayerId>,
+    /// Scenes panel details (not saved in .skp).
+    pub description: String,
+    /// "Include in Animation": View > Animation plays it.
+    pub include_in_animation: bool,
+    /// "Properties to save" and what they saved.
+    pub props: crate::model_data::SceneProps,
+    pub state: crate::model_data::SceneState,
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            eye: DVec3::new(-300.0, -300.0, 200.0),
+            target: DVec3::ZERO,
+            fov_deg: 35.0,
+            perspective: true,
+            hidden_layers: Vec::new(),
+            description: String::new(),
+            include_in_animation: true,
+            props: Default::default(),
+            state: Default::default(),
+        }
+    }
 }
 
 /// SketchUp's face styles (View > Face Style).
@@ -223,6 +269,10 @@ pub struct ShadowSettings {
     pub dark: f64,
     pub on_faces: bool,
     pub on_ground: bool,
+    /// "Use sun for shading": faces are lit by the sun even with shadows off.
+    pub use_sun_for_shading: bool,
+    /// Display "From edges": edges cast shadows (stored only; not drawn).
+    pub from_edges: bool,
 }
 
 impl Default for ShadowSettings {
@@ -240,6 +290,8 @@ impl Default for ShadowSettings {
             dark: 0.45,
             on_faces: true,
             on_ground: true,
+            use_sun_for_shading: false,
+            from_edges: false,
         }
     }
 }
@@ -261,6 +313,20 @@ pub struct Model {
     /// directions and the origin, in world space; identity for the default axes. Not
     /// read from or written to .skp files yet (mt-skp does not expose them).
     pub axes: DMat4,
+    /// Tags panel folders (`Layer::folder` indexes them).
+    pub tag_folders: Vec<crate::model_data::TagFolder>,
+    /// Tags panel "Color by tag": faces and edges drawn in their tag's color.
+    pub color_by_tag: bool,
+    /// Styles panel "In Model" styles and the one last applied.
+    pub styles: Vec<crate::model_data::NamedStyle>,
+    pub active_style: Option<usize>,
+    /// Model Info > Components.
+    pub edit_fade: crate::model_data::EditFade,
+    /// Model Info > Dimensions and Text: styles of new dimensions and texts.
+    pub dimension_style: crate::model_data::DimensionStyle,
+    pub text_style: crate::model_data::TextStyle,
+    /// Model Info > Geo-location.
+    pub geo: crate::model_data::GeoLocation,
 }
 
 impl Default for Model {
@@ -271,8 +337,7 @@ impl Default for Model {
             materials: Vec::new(),
             layers: vec![Layer {
                 name: "Layer0".into(),
-                color: [255, 255, 255],
-                visible: true,
+                ..Layer::default()
             }],
             // SketchUp's default style (values from OpenSKP's fixture checks).
             front_color: [255, 255, 255],
@@ -281,6 +346,14 @@ impl Default for Model {
             style: StyleSettings::default(),
             shadows: ShadowSettings::default(),
             axes: DMat4::IDENTITY,
+            tag_folders: Vec::new(),
+            color_by_tag: false,
+            styles: Vec::new(),
+            active_style: None,
+            edit_fade: Default::default(),
+            dimension_style: Default::default(),
+            text_style: Default::default(),
+            geo: Default::default(),
         }
     }
 }

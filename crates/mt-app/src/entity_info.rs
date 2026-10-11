@@ -221,6 +221,10 @@ pub(crate) fn describe(doc: &Document, items: &[Owner]) -> EntityInfo {
 /// An area in square inches shown in `unit`s squared, e.g. "12.50 m²" (SketchUp's
 /// format and precision unverified).
 pub(crate) fn format_area(square_inches: f64, unit: LengthUnit) -> String {
+    // The open model's Model Info > Units area unit and precision.
+    if let Some(o) = mt_infer::units::display_options() {
+        return mt_infer::units::format_area(square_inches, &o);
+    }
     let name = match unit {
         LengthUnit::Inch => "in",
         LengthUnit::Foot => "ft",

@@ -727,11 +727,13 @@ mod tests {
                     name: "Untagged".into(),
                     visible: true,
                     color: [200, 200, 200],
+                    ..TagRow::default()
                 },
                 TagRow {
                     name: "Walls".into(),
                     visible: true,
                     color: [200, 100, 100],
+                    ..TagRow::default()
                 },
             ],
             ..TrayData::default()

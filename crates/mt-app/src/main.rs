@@ -16,9 +16,12 @@ mod entity_info;
 mod errors;
 mod export;
 mod filedialog;
+mod fix_problems;
 mod flip;
+mod grips;
 mod image_entity;
 mod import;
+mod lasso;
 mod locks;
 #[cfg(target_os = "macos")]
 mod macos_menu;
@@ -48,6 +51,7 @@ mod text3d;
 mod texture_position;
 mod tools;
 mod tray;
+mod tray_more;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
@@ -83,6 +87,7 @@ const IMPLEMENTED: &[&str] = &[
     "file.save_copy_as",
     "file.exit",
     "tool.select",
+    "tool.lasso",
     "tool.line",
     "tool.rectangle",
     "tool.rotated_rectangle",
@@ -398,6 +403,10 @@ struct App {
     ctx_menu: context_menu::ContextMenu,
     /// Texture Position and externally edited textures.
     textures: texture_position::Textures,
+    /// The Lasso tool's outline while drawn.
+    lasso: lasso::Lasso,
+    /// The Move tool's grips on group and component boxes.
+    grips: grips::Grips,
 }
 
 impl App {
@@ -495,6 +504,8 @@ impl App {
             present: Default::default(),
             ctx_menu: Default::default(),
             textures: Default::default(),
+            lasso: Default::default(),
+            grips: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -619,9 +630,10 @@ impl App {
         let shadows = self
             .document
             .as_ref()
-            .map(|d| &d.model.shadows)
-            .filter(|s| s.enabled)
-            .map(|s| {
+            .map(|d| (&d.model.shadows, d.model.geo.north_angle))
+            // "Use sun for shading": sun lighting without shadows.
+            .filter(|(s, _)| s.enabled || s.use_sun_for_shading)
+            .map(|(s, north)| {
                 // The settings hold no year; the current SketchUp default year is unverified.
                 let sun = mt_render::sun_direction(
                     s.latitude,
@@ -633,12 +645,13 @@ impl App {
                     s.hour,
                     s.minute,
                 );
+                let sun = mt_render::rotate_north(sun, north);
                 mt_render::Shadows {
                     sun_dir: sun.as_vec3().to_array(),
                     light: s.light as f32,
                     dark: s.dark as f32,
-                    on_faces: s.on_faces,
-                    on_ground: s.on_ground,
+                    on_faces: s.on_faces && s.enabled,
+                    on_ground: s.on_ground && s.enabled,
                 }
             });
         self.viewport.set_shadows(shadows);
@@ -757,7 +770,8 @@ impl App {
                 .live(&to_local(inf, self.ctx_xf))
                 .map(|(t, xf, copy)| (t.to_vec(), xf, copy)),
             _ => None,
-        };
+        }
+        .or_else(|| self.grips.live());
         if want == self.live {
             return;
         }
@@ -1451,6 +1465,7 @@ impl App {
             Tool::Select => {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
+            Tool::Lasso => self.lasso_tool(ui, &response, rect, viewport_px, &render_state.device),
             Tool::Draw(_) => self.draw_tool(ui, &response, rect, viewport_px, &render_state.device),
             Tool::Modify(_) => {
                 self.modify_tool(ui, &response, rect, viewport_px, &render_state.device)
@@ -1507,8 +1522,10 @@ impl App {
             egui::Color32::WHITE,
         );
         self.draw_selection_box(ui, &response, rect);
+        self.draw_lasso(ui, &response, rect);
         self.draw_zoom_box(ui, &response, rect);
         self.pick_overlay(ui, rect);
+        self.grips_paint(ui, rect, viewport_px, &render_state.device);
         self.texture_position_paint(ui, rect, viewport_px);
         if self.annotations(ui, rect, viewport_px) {
             self.rebuild(&render_state.device);
@@ -1744,6 +1761,9 @@ impl App {
             self.inference = None;
             return;
         }
+        if self.grips_frame(ui, response, rect, viewport_px, device) {
+            return;
+        }
         let Some(tool) = self.modify.as_mut() else {
             return;
         };
@@ -1819,6 +1839,10 @@ impl App {
             self.engine
                 .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now)
         });
+        // A grabbed bounding box grip is Move's base point.
+        if let (Some(p), Some(i)) = (self.grips.take_base(), self.inference.as_mut()) {
+            i.point = self.ctx_xf.transform_point3(p);
+        }
         // Locked groups and components are left out of what modify tools act on.
         let unlocked: Vec<Owner> = self
             .selection

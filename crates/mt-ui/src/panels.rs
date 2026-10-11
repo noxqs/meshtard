@@ -5,8 +5,6 @@
 //! are unverified are noted on each function. Every [`Event`] here is pushed only in
 //! response to a click, drag or typed text.
 
-use std::collections::HashSet;
-
 use egui::{
     Align2, Color32, FontId, Painter, Rect, Response, RichText, Sense, Stroke, StrokeKind, pos2,
     vec2,
@@ -14,32 +12,23 @@ use egui::{
 
 use crate::theme::Theme32;
 use crate::tray_data::{
-    FaceStyle, OutlinerKind, SelectMode, TextureAction, TrayData, component_edit, date_label,
-    hex_color, hsl_to_rgb, instances_label, outliner_node, outliner_rows, parse_hex_color,
-    rgb_to_hsl, time_label,
+    FaceStyle, TextureAction, TrayData, component_edit, date_label, hex_color, hsl_to_rgb,
+    instances_label, parse_hex_color, rgb_to_hsl, time_label,
 };
 use crate::{Event, Shell};
 
 /// Height of a list row in the panels.
-const ROW: f32 = 20.0;
+pub(crate) const ROW: f32 = 20.0;
 /// Size of the small flat icon buttons above lists.
 const ICON_BUTTON: f32 = 22.0;
 
 /// Panel-local UI state that is not model data.
 #[derive(Debug, Default)]
 pub(crate) struct TrayUi {
-    /// Row selected in the Tags list (target of Delete Tag).
-    tag_selected: Option<usize>,
-    /// Tag being renamed and the edited text; `bool` = focus already requested.
-    tag_rename: Option<(usize, String, bool)>,
     material_tab: MaterialTab,
     /// Name field of the Materials panel and the material it was loaded from.
     material_name: String,
     material_name_of: Option<usize>,
-    /// Outliner paths whose children are listed.
-    outliner_expanded: HashSet<Vec<usize>>,
-    outliner_root_collapsed: bool,
-    outliner_filter: String,
     styles_page: StylesPage,
     component_tab: ComponentTab,
     /// Edit tab fields of the Components panel and the definition they were loaded
@@ -64,6 +53,9 @@ pub(crate) struct TrayUi {
     texture_of: Option<usize>,
     /// Texture size aspect lock (on by default).
     texture_unlocked: bool,
+    /// State of the panel parts in `panels2` (tag folders, Outliner editing, scene
+    /// details, In Model styles).
+    pub(crate) more: crate::panels2::MoreUi,
 }
 
 /// Color picker pages of the Materials Edit tab (SketchUp: Color Wheel, HLS, HSB,
@@ -106,7 +98,7 @@ impl Shell {
         let mut data = std::mem::take(&mut self.data);
         let known = match id {
             "window.tags" => {
-                self.tags_panel(ui, &data);
+                self.tags_panel2(ui, &mut data);
                 true
             }
             "window.materials" => {
@@ -118,15 +110,15 @@ impl Shell {
                 true
             }
             "window.outliner" => {
-                self.outliner_panel(ui, &data);
+                self.outliner_panel2(ui, &data);
                 true
             }
             "window.scenes" => {
-                self.scenes_panel(ui, &data);
+                self.scenes_panel2(ui, &data);
                 true
             }
             "window.styles" => {
-                self.styles_panel(ui, &mut data);
+                self.styles_panel2(ui, &mut data);
                 true
             }
             "window.shadows" => {
@@ -145,152 +137,6 @@ impl Shell {
         };
         self.data = data;
         known
-    }
-
-    /// Tags panel: Add Tag / Delete Tag buttons, then a list with columns name
-    /// (pencil on the active tag), visibility eye and color swatch.
-    ///
-    /// Unverified against SketchUp 2026: column order and widths, the pencil
-    /// position, the Dashes column and tag folders (both left out), and whether the
-    /// active tag's eye is disabled (done here, as SketchUp does not hide the active
-    /// tag as far as remembered).
-    fn tags_panel(&mut self, ui: &mut egui::Ui, data: &TrayData) {
-        let t = self.theme.clone();
-        let selected = self.tray_ui.tag_selected.filter(|&i| i < data.tags.len());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if icon_button(ui, &t, "Add Tag", true, paint_plus).clicked() {
-                self.pending.push(Event::TagAdd);
-            }
-            let can_delete = selected.is_some_and(|i| i > 0);
-            if icon_button(ui, &t, "Delete Tag", can_delete, paint_minus).clicked()
-                && let Some(i) = selected
-            {
-                self.pending.push(Event::TagDelete(i));
-                self.tray_ui.tag_selected = None;
-            }
-        });
-
-        let w = ui.available_width();
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let (head, _) = ui.allocate_exact_size(vec2(w, ROW), Sense::hover());
-        let cols = TagColumns::new(head);
-        let p = ui.painter();
-        p.rect_filled(head, 0.0, t.panel_header);
-        p.text(
-            pos2(cols.name.left() + 4.0, head.center().y),
-            Align2::LEFT_CENTER,
-            "Name",
-            FontId::proportional(t.sizes.font),
-            t.text,
-        );
-        paint_eye(p, cols.eye, t.text, true);
-
-        for (i, tag) in data.tags.iter().enumerate() {
-            let (row, row_resp) = ui.allocate_exact_size(vec2(w, ROW), Sense::click());
-            let cols = TagColumns::new(row);
-            let is_sel = selected == Some(i);
-            let fill = if is_sel {
-                t.pressed
-            } else if row_resp.hovered() {
-                t.hover
-            } else {
-                t.field
-            };
-            ui.painter().rect_filled(row, 0.0, fill);
-            if row_resp.clicked() {
-                self.tray_ui.tag_selected = Some(i);
-            }
-
-            // Name, or the rename field.
-            let renaming = matches!(&self.tray_ui.tag_rename, Some((r, _, _)) if *r == i);
-            if renaming {
-                let (_, text, focused) = self.tray_ui.tag_rename.as_mut().expect("renaming");
-                let edit = egui::TextEdit::singleline(text)
-                    .margin(egui::Margin::symmetric(3, 1))
-                    .frame(
-                        egui::Frame::NONE
-                            .fill(t.field)
-                            .stroke(Stroke::new(1.0, t.hover_border)),
-                    );
-                let r = ui.put(cols.name.shrink2(vec2(1.0, 1.0)), edit);
-                if !*focused {
-                    r.request_focus();
-                    *focused = true;
-                }
-                if r.lost_focus() {
-                    let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                    let (_, text, _) = self.tray_ui.tag_rename.take().expect("renaming");
-                    let text = text.trim().to_owned();
-                    if !cancel && !text.is_empty() && text != tag.name {
-                        self.pending.push(Event::TagRename(i, text));
-                    }
-                }
-            } else {
-                ui.painter().with_clip_rect(cols.name).text(
-                    pos2(cols.name.left() + 4.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    &tag.name,
-                    FontId::proportional(t.sizes.font),
-                    t.text,
-                );
-                if row_resp.double_clicked() && i > 0 {
-                    self.tray_ui.tag_rename = Some((i, tag.name.clone(), false));
-                }
-            }
-
-            // Pencil: shown on the active tag, click sets the active tag.
-            let pencil = ui
-                .interact(
-                    cols.pencil,
-                    ui.id().with(("mt_ui_tag_pencil", i)),
-                    Sense::click(),
-                )
-                .on_hover_text("Active tag");
-            if i == data.active_tag {
-                paint_pencil(ui.painter(), cols.pencil, t.text);
-            } else if pencil.hovered() {
-                paint_pencil(ui.painter(), cols.pencil, t.text_disabled);
-            }
-            if pencil.clicked() && i != data.active_tag {
-                self.pending.push(Event::TagActive(i));
-            }
-
-            // Visibility eye.
-            let can_hide = i != data.active_tag;
-            let eye = ui.interact(
-                cols.eye,
-                ui.id().with(("mt_ui_tag_eye", i)),
-                if can_hide {
-                    Sense::click()
-                } else {
-                    Sense::hover()
-                },
-            );
-            let ink = if can_hide { t.text } else { t.text_disabled };
-            paint_eye(ui.painter(), cols.eye, ink, tag.visible);
-            if eye.clicked() {
-                self.pending.push(Event::TagVisible(i, !tag.visible));
-            }
-
-            // Color swatch with the egui color picker.
-            let mut color = tag.color;
-            let swatch = cols.color.shrink2(vec2(3.0, 3.0));
-            let r = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(swatch), |ui| {
-                    ui.spacing_mut().interact_size = swatch.size();
-                    egui::color_picker::color_edit_button_srgb(ui, &mut color)
-                })
-                .inner;
-            ui.painter()
-                .rect_stroke(swatch, 0.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
-            if r.changed() && color != tag.color {
-                self.pending.push(Event::TagColor(i, color));
-            }
-        }
-        let (bottom, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
-        ui.painter()
-            .hline(bottom.x_range(), bottom.top(), Stroke::new(1.0, t.border));
     }
 
     /// Materials panel: preview swatch and name of the current material, then the
@@ -416,7 +262,20 @@ impl Shell {
                                     StrokeKind::Inside,
                                 );
                             }
-                            if r.on_hover_text(name).clicked() {
+                            let r = r.on_hover_text(name);
+                            if let Some(i) = cell {
+                                r.context_menu(|ui| {
+                                    if ui.button("Duplicate").clicked() {
+                                        self.pending.push(Event::MaterialDuplicate(i));
+                                        ui.close();
+                                    }
+                                    if ui.button("Area").clicked() {
+                                        self.pending.push(Event::MaterialArea(i));
+                                        ui.close();
+                                    }
+                                });
+                            }
+                            if r.clicked() {
                                 data.current_material = cell;
                                 self.pending.push(match cell {
                                     Some(i) => Event::MaterialPick(i),
@@ -835,7 +694,24 @@ impl Shell {
             if !c.description.is_empty() {
                 tip = format!("{tip}\n{}", c.description);
             }
-            if r.on_hover_text(tip).clicked() {
+            let r = r.on_hover_text(tip);
+            r.context_menu(|ui| {
+                if ui.button("Select Instances").clicked() {
+                    self.pending.push(Event::ComponentSelectInstances(i));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        data.can_replace_component,
+                        egui::Button::new("Replace Selected"),
+                    )
+                    .clicked()
+                {
+                    self.pending.push(Event::ComponentReplaceSelected(i));
+                    ui.close();
+                }
+            });
+            if r.clicked() {
                 data.current_component = Some(i);
                 self.pending.push(Event::ComponentPick(i));
             }
@@ -887,6 +763,37 @@ impl Shell {
         ui.label(
             RichText::new(instances_label(data.components[i].instances)).color(t.text_disabled),
         );
+        // Component behaviors (Glue to, Cut opening, Always face camera, Shadows face
+        // sun); SketchUp's layout of this group is unverified.
+        ui.add_space(4.0);
+        ui.label(RichText::new("Component Axes and Behaviors").strong());
+        let before = data.components[i].behavior;
+        let b = &mut data.components[i].behavior;
+        ui.horizontal(|ui| {
+            ui.label("Glue to");
+            egui::ComboBox::from_id_salt("mt_ui_component_glue")
+                .selected_text(crate::tray_data::GLUE_NAMES[b.glue.min(4)])
+                .show_ui(ui, |ui| {
+                    for (k, name) in crate::tray_data::GLUE_NAMES.iter().enumerate() {
+                        ui.selectable_value(&mut b.glue, k, *name);
+                    }
+                });
+        });
+        ui.add_enabled(
+            b.glue != 0,
+            egui::Checkbox::new(&mut b.cut_opening, "Cut opening"),
+        );
+        ui.checkbox(&mut b.always_face_camera, "Always face camera");
+        ui.add_enabled(
+            b.always_face_camera,
+            egui::Checkbox::new(&mut b.shadows_face_sun, "Shadows face sun"),
+        );
+        if *b != before {
+            self.pending.push(Event::ComponentBehavior {
+                index: i,
+                behavior: *b,
+            });
+        }
         if name.lost_focus() || desc.lost_focus() {
             if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
                 // Cancel: reload from the model next frame.
@@ -910,187 +817,11 @@ impl Shell {
         }
     }
 
-    /// Outliner: filter field, then the tree with the model root, expand arrows,
-    /// group/component icons, greyed hidden entries and highlighted selection.
-    ///
-    /// Unverified: the group and component icon drawings, the root's label (the
-    /// app may pass the file name), and that Ctrl/Shift follow the Select tool's
-    /// add/toggle keys (see [`SelectMode::from_modifiers`]).
-    fn outliner_panel(&mut self, ui: &mut egui::Ui, data: &TrayData) {
-        let t = self.theme.clone();
-        ui.add(
-            egui::TextEdit::singleline(&mut self.tray_ui.outliner_filter)
-                .hint_text("Filter")
-                .desired_width(ui.available_width()),
-        );
-        ui.add_space(2.0);
-        let w = ui.available_width();
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let frame_top = ui.cursor().top();
-
-        // Root row.
-        let (row, _) = ui.allocate_exact_size(vec2(w, ROW), Sense::hover());
-        ui.painter().rect_filled(row, 0.0, t.field);
-        let arrow = Rect::from_center_size(pos2(row.left() + 8.0, row.center().y), vec2(12.0, ROW));
-        let has_any = !data.outliner.is_empty();
-        if has_any {
-            let r = ui.interact(arrow, ui.id().with("mt_ui_outliner_root"), Sense::click());
-            if r.clicked() {
-                self.tray_ui.outliner_root_collapsed ^= true;
-            }
-            paint_arrow(
-                ui.painter(),
-                arrow.center(),
-                !self.tray_ui.outliner_root_collapsed,
-                t.text,
-            );
-        }
-        let icon =
-            Rect::from_center_size(pos2(row.left() + 24.0, row.center().y), vec2(14.0, 14.0));
-        paint_model_icon(ui.painter(), icon, t.text);
-        ui.painter().text(
-            pos2(icon.right() + 5.0, row.center().y),
-            Align2::LEFT_CENTER,
-            &data.outliner_root,
-            FontId::proportional(t.sizes.font),
-            t.text,
-        );
-
-        if !self.tray_ui.outliner_root_collapsed {
-            let rows = outliner_rows(
-                &data.outliner,
-                &self.tray_ui.outliner_expanded,
-                &self.tray_ui.outliner_filter,
-            );
-            let mods = ui.input(|i| i.modifiers);
-            for r in rows {
-                let Some(node) = outliner_node(&data.outliner, &r.path) else {
-                    continue;
-                };
-                let (row, resp) = ui.allocate_exact_size(vec2(w, ROW), Sense::click());
-                let fill = if node.selected {
-                    t.selection
-                } else if resp.hovered() {
-                    t.hover
-                } else {
-                    t.field
-                };
-                ui.painter().rect_filled(row, 0.0, fill);
-                let x = row.left() + 16.0 + 14.0 * r.depth as f32;
-                let ink = match (node.selected, node.hidden) {
-                    (true, _) => Color32::WHITE,
-                    (false, true) => t.text_disabled,
-                    (false, false) => t.text,
-                };
-                if r.has_children {
-                    let arrow =
-                        Rect::from_center_size(pos2(x + 8.0, row.center().y), vec2(14.0, ROW));
-                    let a = ui.interact(
-                        arrow,
-                        ui.id().with(("mt_ui_outliner_arrow", &r.path)),
-                        Sense::click(),
-                    );
-                    if a.clicked() {
-                        let exp = &mut self.tray_ui.outliner_expanded;
-                        if r.open {
-                            exp.remove(&r.path);
-                        } else {
-                            exp.insert(r.path.clone());
-                        }
-                    }
-                    paint_arrow(ui.painter(), arrow.center(), r.open, ink);
-                }
-                let icon = Rect::from_center_size(pos2(x + 24.0, row.center().y), vec2(14.0, 14.0));
-                match node.kind {
-                    OutlinerKind::Group => paint_group_icon(ui.painter(), icon, ink),
-                    OutlinerKind::Component { .. } => paint_component_icon(ui.painter(), icon, ink),
-                }
-                ui.painter().with_clip_rect(row).text(
-                    pos2(icon.right() + 5.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    node.label(),
-                    FontId::proportional(t.sizes.font),
-                    ink,
-                );
-                if resp.clicked() {
-                    self.pending.push(Event::OutlinerSelect {
-                        path: r.path.clone(),
-                        mode: SelectMode::from_modifiers(mods.command || mods.ctrl, mods.shift),
-                    });
-                }
-            }
-        }
-        let area = Rect::from_min_max(
-            pos2(ui.min_rect().left(), frame_top),
-            pos2(ui.min_rect().left() + w, ui.cursor().top()),
-        );
-        ui.painter()
-            .rect_stroke(area, 0.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    }
-
-    /// Scenes panel: Update / Add / Delete buttons and the scene list; clicking a
-    /// scene activates it. Unverified: thumbnails, name/description fields and the
-    /// move up/down buttons of SketchUp's panel are left out.
-    fn scenes_panel(&mut self, ui: &mut egui::Ui, data: &TrayData) {
-        let t = self.theme.clone();
-        let active = data.active_scene.filter(|&i| i < data.scenes.len());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if icon_button(ui, &t, "Update Scene", active.is_some(), paint_refresh).clicked()
-                && let Some(i) = active
-            {
-                self.pending.push(Event::SceneUpdate(i));
-            }
-            if icon_button(ui, &t, "Add Scene", true, paint_plus).clicked() {
-                self.pending.push(Event::SceneAdd);
-            }
-            if icon_button(ui, &t, "Delete Scene", active.is_some(), paint_minus).clicked()
-                && let Some(i) = active
-            {
-                self.pending.push(Event::SceneDelete(i));
-            }
-        });
-        let w = ui.available_width();
-        ui.spacing_mut().item_spacing.y = 0.0;
-        if data.scenes.is_empty() {
-            ui.label(RichText::new("No scenes. Click + to add one.").color(t.text_disabled));
-            return;
-        }
-        let top = ui.cursor().top();
-        for (i, name) in data.scenes.iter().enumerate() {
-            let (row, r) = ui.allocate_exact_size(vec2(w, ROW + 4.0), Sense::click());
-            let (fill, ink) = if active == Some(i) {
-                (t.selection, Color32::WHITE)
-            } else if r.hovered() {
-                (t.hover, t.text)
-            } else {
-                (t.field, t.text)
-            };
-            ui.painter().rect_filled(row, 0.0, fill);
-            ui.painter().with_clip_rect(row).text(
-                pos2(row.left() + 8.0, row.center().y),
-                Align2::LEFT_CENTER,
-                name,
-                FontId::proportional(t.sizes.font),
-                ink,
-            );
-            if r.clicked() {
-                self.pending.push(Event::SceneActivate(i));
-            }
-        }
-        let area = Rect::from_x_y_ranges(
-            ui.min_rect().left()..=ui.min_rect().left() + w,
-            top..=ui.cursor().top(),
-        );
-        ui.painter()
-            .rect_stroke(area, 0.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    }
-
-    /// Styles panel, Edit tab only: Edge Settings (Edges, Profiles + width), Face
+    /// Styles panel, Edit tab: Edge Settings (Edges, Profiles + width), Face
     /// Settings (face style, X-ray) and Modeling Settings (Section Cut Width).
     /// Unverified: SketchUp shows these pages behind icon buttons and the face
     /// styles as icon buttons; text is used here.
-    fn styles_panel(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
+    pub(crate) fn styles_edit(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
         let t = self.theme.clone();
         let before = data.style;
         let s = &mut data.style;
@@ -1161,6 +892,22 @@ impl Shell {
             .spacing(vec2(6.0, 4.0))
             .show(ui, |ui| {
                 ui.spacing_mut().slider_width = slider_w;
+                ui.label("UTC");
+                egui::ComboBox::from_id_salt("mt_ui_shadows_utc")
+                    .selected_text(crate::tray_data::utc_label(s.utc_offset_minutes))
+                    .show_ui(ui, |ui| {
+                        // Whole and half hours from UTC-12:00 to UTC+14:00.
+                        for k in -24..=28 {
+                            let m = k * 30;
+                            ui.selectable_value(
+                                &mut s.utc_offset_minutes,
+                                m,
+                                crate::tray_data::utc_label(m),
+                            );
+                        }
+                    });
+                ui.label("");
+                ui.end_row();
                 ui.label("Time");
                 ui.add(egui::Slider::new(&mut s.minute_of_day, 0..=24 * 60 - 1).show_value(false));
                 ui.label(time_label(s.minute_of_day));
@@ -1178,10 +925,12 @@ impl Shell {
                 ui.label(s.dark.to_string());
                 ui.end_row();
             });
-        ui.horizontal(|ui| {
+        ui.checkbox(&mut s.use_sun_for_shading, "Use sun for shading");
+        ui.horizontal_wrapped(|ui| {
             ui.label("Display:");
             ui.checkbox(&mut s.on_faces, "On faces");
             ui.checkbox(&mut s.on_ground, "On ground");
+            ui.checkbox(&mut s.from_edges, "From edges");
         });
         if data.shadows != before {
             self.pending.push(Event::ShadowsChanged(data.shadows));
@@ -1252,6 +1001,16 @@ impl Shell {
             ui.add_space(4.0);
             for (i, name) in data.scenes.iter().enumerate() {
                 let active = data.active_scene == Some(i);
+                // Scenes left out of the animation in parentheses (Scenes panel).
+                let name = &if data
+                    .scene_details
+                    .get(i)
+                    .is_none_or(|d| d.include_in_animation)
+                {
+                    name.clone()
+                } else {
+                    format!("({name})")
+                };
                 let font = FontId::proportional(t.sizes.font);
                 let text_w = ui
                     .painter()
@@ -1307,37 +1066,8 @@ impl Shell {
     }
 }
 
-/// Columns of a Tags row, right to left: color swatch, eye, pencil, name.
-struct TagColumns {
-    name: Rect,
-    pencil: Rect,
-    eye: Rect,
-    color: Rect,
-}
-
-impl TagColumns {
-    fn new(row: Rect) -> Self {
-        let color = Rect::from_min_max(pos2(row.right() - 30.0, row.top()), row.max);
-        let eye = Rect::from_min_max(
-            pos2(color.left() - 24.0, row.top()),
-            pos2(color.left(), row.bottom()),
-        );
-        let pencil = Rect::from_min_max(
-            pos2(eye.left() - 20.0, row.top()),
-            pos2(eye.left(), row.bottom()),
-        );
-        let name = Rect::from_min_max(row.min, pos2(pencil.left(), row.bottom()));
-        Self {
-            name,
-            pencil,
-            eye,
-            color,
-        }
-    }
-}
-
 /// Flat icon button (hover/pressed look of the toolbars) with a painted icon.
-fn icon_button(
+pub(crate) fn icon_button(
     ui: &mut egui::Ui,
     t: &Theme32,
     tooltip: &str,
@@ -1370,7 +1100,7 @@ fn icon_button(
 }
 
 /// Tab header button; the selected tab is drawn like the panel body.
-fn tab_button(ui: &mut egui::Ui, t: &Theme32, label: &str, selected: bool) -> Response {
+pub(crate) fn tab_button(ui: &mut egui::Ui, t: &Theme32, label: &str, selected: bool) -> Response {
     let font = FontId::proportional(t.sizes.font);
     let w = ui
         .painter()
@@ -1434,7 +1164,7 @@ fn paint_default_swatch(p: &Painter, rect: Rect, t: &Theme32) {
     p.rect_stroke(rect, 0.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
 }
 
-fn paint_plus(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_plus(p: &Painter, r: Rect, ink: Color32) {
     let c = r.center();
     let s = Stroke::new(1.6, ink);
     p.circle_stroke(c, r.width() / 2.0, Stroke::new(1.0, ink));
@@ -1442,7 +1172,7 @@ fn paint_plus(p: &Painter, r: Rect, ink: Color32) {
     p.line_segment([c - vec2(0.0, 4.0), c + vec2(0.0, 4.0)], s);
 }
 
-fn paint_minus(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_minus(p: &Painter, r: Rect, ink: Color32) {
     let c = r.center();
     p.circle_stroke(c, r.width() / 2.0, Stroke::new(1.0, ink));
     p.line_segment(
@@ -1451,7 +1181,7 @@ fn paint_minus(p: &Painter, r: Rect, ink: Color32) {
     );
 }
 
-fn paint_refresh(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_refresh(p: &Painter, r: Rect, ink: Color32) {
     let c = r.center();
     let rad = r.width() / 2.0 - 1.0;
     let pts: Vec<_> = (0..=20)
@@ -1474,7 +1204,7 @@ fn paint_refresh(p: &Painter, r: Rect, ink: Color32) {
 }
 
 /// Eye icon; a closed eye (line with lashes) when not visible.
-fn paint_eye(p: &Painter, r: Rect, ink: Color32, open: bool) {
+pub(crate) fn paint_eye(p: &Painter, r: Rect, ink: Color32, open: bool) {
     let c = r.center();
     let s = Stroke::new(1.1, ink);
     let curve = |sign: f32| -> Vec<egui::Pos2> {
@@ -1499,7 +1229,7 @@ fn paint_eye(p: &Painter, r: Rect, ink: Color32, open: bool) {
     }
 }
 
-fn paint_pencil(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_pencil(p: &Painter, r: Rect, ink: Color32) {
     let c = r.center();
     let a = c + vec2(4.5, -4.5);
     let b = c + vec2(-3.0, 3.0);
@@ -1516,7 +1246,7 @@ fn paint_pencil(p: &Painter, r: Rect, ink: Color32) {
 }
 
 /// Expand arrow: right-pointing when closed, down-pointing when open.
-fn paint_arrow(p: &Painter, c: egui::Pos2, open: bool, ink: Color32) {
+pub(crate) fn paint_arrow(p: &Painter, c: egui::Pos2, open: bool, ink: Color32) {
     let tri = if open {
         vec![
             pos2(c.x - 3.5, c.y - 2.0),
@@ -1534,7 +1264,7 @@ fn paint_arrow(p: &Painter, c: egui::Pos2, open: bool, ink: Color32) {
 }
 
 /// Model root icon (a small house); SketchUp's actual icon is unverified.
-fn paint_model_icon(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_model_icon(p: &Painter, r: Rect, ink: Color32) {
     let s = Stroke::new(1.1, ink);
     let roof = r.top() + r.height() * 0.45;
     p.add(egui::Shape::closed_line(
@@ -1550,7 +1280,7 @@ fn paint_model_icon(p: &Painter, r: Rect, ink: Color32) {
 }
 
 /// Group icon: a box outline (unverified).
-fn paint_group_icon(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_group_icon(p: &Painter, r: Rect, ink: Color32) {
     let r = r.shrink(1.5);
     let s = Stroke::new(1.1, ink);
     let d = 3.0;
@@ -1579,7 +1309,7 @@ fn paint_group_icon(p: &Painter, r: Rect, ink: Color32) {
 }
 
 /// Component icon: four small boxes (unverified).
-fn paint_component_icon(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_component_icon(p: &Painter, r: Rect, ink: Color32) {
     let r = r.shrink(1.0);
     let h = r.width() / 2.0;
     for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
@@ -1612,7 +1342,7 @@ fn paint_cube(p: &Painter, r: Rect, ink: Color32) {
 
 /// Details menu button: a right-pointing arrow head over three lines (unverified;
 /// SketchUp uses a small arrow icon).
-fn paint_details(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_details(p: &Painter, r: Rect, ink: Color32) {
     let s = Stroke::new(1.2, ink);
     for k in 0..3 {
         let y = r.top() + 3.0 + k as f32 * 4.0;
@@ -1824,6 +1554,7 @@ mod tests {
             name: name.into(),
             description: String::new(),
             instances,
+            ..ComponentRow::default()
         };
         s.set_tray_data(TrayData {
             components: vec![row("Door", 1), row("Window", 0)],

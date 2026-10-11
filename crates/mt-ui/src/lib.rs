@@ -123,6 +123,7 @@ mod entity_info;
 pub mod icons;
 mod menu;
 mod panels;
+mod panels2;
 mod status;
 mod theme;
 mod toolbar;
@@ -139,10 +140,12 @@ pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use menu::menu_list;
 pub use theme::apply as apply_theme;
 pub use tray_data::{
-    ComponentRow, FaceStyle, FogSettings, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow,
-    SelectMode, ShadowSettings, SoftenSettings, StyleSettings, TagRow, TextureAction, TextureRow,
+    ComponentBehavior, ComponentRow, DASH_NAMES, FaceStyle, FogSettings, GLUE_NAMES, MaterialRow,
+    OutlinerKind, OutlinerNode, OutlinerRow, SCENE_PROPS, SceneDetails, SelectMode, ShadowSettings,
+    SoftenSettings, StyleSettings, TagFolderRow, TagRow, TagTreeItem, TextureAction, TextureRow,
     TrayData, component_edit, date_label, day_of_year, hex_color, hsl_to_rgb, instances_label,
-    month_day, outliner_node, outliner_rows, parse_hex_color, rgb_to_hsl, time_label,
+    month_day, outliner_can_move, outliner_node, outliner_rows, parse_hex_color, rgb_to_hsl,
+    tag_tree_rows, time_label, utc_label,
 };
 pub use trays::{TrayDef, TrayLayout};
 
@@ -327,6 +330,77 @@ pub enum Event {
     /// (Window > Manage Trays, or a panel opened or closed). Save
     /// [`Shell::tray_layout`] if the app keeps it between runs.
     TrayLayoutChanged,
+
+    /// Tags: "Add Tag Folder" clicked: a new folder in `parent` (the selected
+    /// folder), taking the selected tag `tag` into it.
+    TagFolderAdd {
+        parent: Option<usize>,
+        tag: Option<usize>,
+    },
+    /// Tags: folder deleted (its tags and folders move up a level).
+    TagFolderDelete(usize),
+    /// Tags: folder renamed (trimmed, non-empty).
+    TagFolderRename(usize, String),
+    /// Tags: a folder's eye clicked; the new visibility.
+    TagFolderVisible(usize, bool),
+    /// Tags: a tag moved into a folder (`None`: out of every folder).
+    TagMove { tag: usize, folder: Option<usize> },
+    /// Tags: a tag's dash pattern chosen (index into [`DASH_NAMES`]).
+    TagDashes(usize, usize),
+    /// Tags: Details > Purge (tags no entity uses).
+    TagPurge,
+    /// Tags: Details > Select All Tagged: select the entities on this tag.
+    TagSelectAll(usize),
+    /// Tags: the Color by Tag toggle; its new state.
+    ColorByTag(bool),
+
+    /// Materials: right-click > Duplicate.
+    MaterialDuplicate(usize),
+    /// Materials: right-click > Area: report the area painted with it.
+    MaterialArea(usize),
+
+    /// Components: Select Instances of the definition (right-click in the list).
+    ComponentSelectInstances(usize),
+    /// Components: Replace Selected: the selected instances take this definition.
+    ComponentReplaceSelected(usize),
+    /// Components, Edit tab: the definition's behaviors changed.
+    ComponentBehavior {
+        index: usize,
+        behavior: ComponentBehavior,
+    },
+
+    /// Outliner: a row renamed (the instance name; may be empty).
+    OutlinerRename { path: Vec<usize>, name: String },
+    /// Outliner: a row's eye clicked: the instance's new visibility.
+    OutlinerVisible { path: Vec<usize>, visible: bool },
+    /// Outliner: a row dragged onto another (`to` empty: the model root). The app
+    /// moves the instance there keeping its place in the world.
+    OutlinerMove { from: Vec<usize>, to: Vec<usize> },
+
+    /// Scenes: name, description or Include in Animation of a scene edited.
+    SceneDetailsEdit {
+        index: usize,
+        name: String,
+        description: String,
+        include_in_animation: bool,
+    },
+    /// Scenes: the properties a scene saves changed (checked in the panel).
+    SceneProps { index: usize, props: [bool; 7] },
+    /// Scenes: the Update dialog confirmed: update these properties of the scene.
+    SceneUpdateWith { index: usize, props: [bool; 7] },
+    /// Scenes: Move Up (`up`) or Move Down.
+    SceneMove { index: usize, up: bool },
+
+    /// Styles: Create Style (from the current settings).
+    StyleCreate,
+    /// Styles: Update the style with the current settings.
+    StyleUpdate(usize),
+    /// Styles: delete a style.
+    StyleDelete(usize),
+    /// Styles: Purge Unused (styles no scene uses, but the active one).
+    StylePurge,
+    /// Styles: a style clicked in the Select tab: apply it.
+    StyleApply(usize),
 }
 
 /// A toolbar as listed by [`Shell::toolbars`].
@@ -872,6 +946,7 @@ mod tests {
                 name: "Door".into(),
                 description: "Single door".into(),
                 instances: 2,
+                ..ComponentRow::default()
             }],
             current_component: Some(0),
             ..TrayData::default()
