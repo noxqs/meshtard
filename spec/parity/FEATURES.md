@@ -191,6 +191,10 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
     - Missing inference kinds [doc]: Component Origin Point, Arc Midpoint, Extend Edge, Perpendicular to Face, On Section, Intersection with Hidden Section, Quarter / Three-Quarter Circle, Arc Side and Center, Circle/Polygon Center (some overlap with item 49).
     - Release rules (arrow key again, Escape, tool click) are not stated in the help: check in the trial (TRIAL_CHECKLIST.md 1e).
 
+## Robustness
+
+71. [ ] **Deterministic kernel operations** M. `crates/mt-kernel/tests/random_modify.rs` (`modeling_stays_valid`) failed once on the sequence saved in `random_modify.proptest-regressions` and passes on re-runs: some kernel operations depend on `HashMap` iteration order (the Solid Tools report also saw run-to-run differences in the arrangement code). Use ordered maps or sort keys where results depend on order, then loop the saved sequence many times (and under different `RandomState` seeds) until it is stable.
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)

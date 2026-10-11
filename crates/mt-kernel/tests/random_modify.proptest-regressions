@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7f2f7d9be2c3770b44ba87d8b63422632027df94ce232037f037e770fbb09e7a # shrinks to ops = [RotateFace(18346855573911240091, [8, 5], 1), Rect([4, 4], [8, 7], 2), PushPull(7849618756135466770, -2, true), RotateFace(686341465038043858, [2, 3], 3), Rect([2, 0], [8, 5], 2), PushPull(8754151273949067950, -6, true), MoveFace(6561195383487836501, [-3, 4, 3]), RotateFace(5022589730478460966, [4, 7], 2), MoveVertex(8301623109923085489, [3, -4, 1]), PushPull(10991082438405436364, -2, true), RotateFace(3213814545589595436, [0, 1], 3), PushPull(11259793238490997909, 0, true), PushPull(5098775759160597257, 3, true), MoveVertex(11630853330200522906, [-3, 0, 0]), RotateFace(2093048352774611825, [0, 0], 3), MoveFace(17388524383531577910, [2, -2, -3]), MoveVertex(12087605531465577290, [1, -3, -4]), RotateFace(6542172124950472960, [4, 0], 1), PushPull(8142421504315597539, 7, true)]
