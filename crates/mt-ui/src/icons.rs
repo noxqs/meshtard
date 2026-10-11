@@ -11,6 +11,8 @@ use egui::epaint::{Mesh, PathShape, PathStroke};
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, vec2};
 use mt_spec::IconColors;
 
+mod extra;
+
 /// Colors used by the icons.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -104,7 +106,12 @@ pub const KNOWN: &[&str] = &[
 
 /// Whether `id` has its own icon (otherwise [`paint`] draws the fallback).
 pub fn has_icon(id: &str) -> bool {
-    KNOWN.contains(&id)
+    KNOWN.contains(&id) || extra::KNOWN.contains(&id)
+}
+
+/// Every command id with its own icon ([`KNOWN`] and the later toolbars' icons).
+pub fn known() -> impl Iterator<Item = &'static str> {
+    KNOWN.iter().chain(extra::KNOWN).copied()
 }
 
 /// Paints the icon for command `id` into `rect` (square). Returns false if the
@@ -161,7 +168,11 @@ pub fn paint(painter: &Painter, rect: Rect, id: &str, palette: &Palette) -> bool
         "extensions.warehouse" => extension_warehouse(&p),
         "file.send_to_layout" => send_to_layout(&p),
         "extensions.manager" => extension_manager(&p),
-        _ => fallback(&p),
+        other => {
+            if !extra::paint(&p, other) {
+                fallback(&p);
+            }
+        }
     }
     known
 }
@@ -891,8 +902,9 @@ mod tests {
         let spec = mt_spec::Spec::builtin().unwrap();
         let palette = Palette::from_spec(&spec.ui_theme.icons);
         let rect = Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(24.0, 24.0));
-        for id in KNOWN {
+        for id in known() {
             assert!(paint(&painter, rect, id, &palette));
+            assert!(paint(&painter, rect, id, &palette.disabled()));
         }
         assert!(!paint(&painter, rect, "no.such", &palette.disabled()));
     }

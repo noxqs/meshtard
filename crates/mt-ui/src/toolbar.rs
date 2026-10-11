@@ -12,13 +12,14 @@ use egui::{
     Align2, Color32, CursorIcon, FontId, Id, LayerId, Order, Rect, Sense, Stroke, StrokeKind, Vec2,
     pos2, vec2,
 };
-use mt_spec::{Toolbar, ToolbarButton, ToolbarItem};
+use mt_spec::{Toolbar, ToolbarButton, ToolbarItem, ToolbarWidget, WidgetKind};
 
 use crate::dock::{
     self, Cell, Cells, DockEdge, DockLine, DropTarget, ROW_GAP, TITLE, ToolbarPosition,
     toolbar_cells,
 };
 use crate::menu::shortcut_text;
+use crate::tray_data::{date_label, time_label};
 use crate::{Event, Frame, Shell, icons};
 
 /// A toolbar being dragged by its grip or title bar.
@@ -209,6 +210,11 @@ impl Shell {
                     if let ToolbarItem::Button(button) = &toolbar.items[i] {
                         let id = Id::new(("mt_ui_toolbar_button", &toolbar.id, i));
                         self.tool_button(ui, frame, &toolbar.id, button, r, id);
+                    }
+                }
+                Cell::Widget(i) => {
+                    if let ToolbarItem::Widget(widget) = &toolbar.items[i] {
+                        self.toolbar_widget(ui, frame, &toolbar.id, widget, r);
                     }
                 }
                 Cell::Separator => {
@@ -555,6 +561,87 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// Draws a toolbar widget (tag dropdown, shadow slider, Measurements box) in
+    /// `rect`. Unverified: SketchUp's Shadows toolbar sliders and their labels.
+    fn toolbar_widget(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &Frame,
+        toolbar_id: &str,
+        widget: &ToolbarWidget,
+        rect: Rect,
+    ) {
+        let mut ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("mt_ui_toolbar_widget", toolbar_id, widget.widget as u8))
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+        let label_w = 58.0;
+        let response = match widget.widget {
+            WidgetKind::ActiveTag => {
+                let current = self.data.active_tag;
+                let name = |i: usize| {
+                    self.data
+                        .tags
+                        .get(i)
+                        .map_or_else(|| "Untagged".to_owned(), |t| t.name.clone())
+                };
+                let mut chosen = None;
+                let r = egui::ComboBox::from_id_salt(("mt_ui_toolbar_tag", toolbar_id))
+                    .width(rect.width() - 4.0)
+                    .selected_text(name(current))
+                    .show_ui(&mut ui, |ui| {
+                        for i in 0..self.data.tags.len().max(1) {
+                            if ui.selectable_label(i == current, name(i)).clicked() {
+                                chosen = Some(i);
+                            }
+                        }
+                    });
+                if let Some(i) = chosen
+                    && i != current
+                    && i < self.data.tags.len()
+                {
+                    self.data.active_tag = i;
+                    self.pending.push(Event::TagActive(i));
+                }
+                r.response
+            }
+            WidgetKind::ShadowDate | WidgetKind::ShadowTime => {
+                let mut s = self.data.shadows;
+                ui.spacing_mut().slider_width = (rect.width() - label_w - 4.0).max(30.0);
+                let (r, text) = if widget.widget == WidgetKind::ShadowDate {
+                    let r =
+                        ui.add(egui::Slider::new(&mut s.day_of_year, 1..=365).show_value(false));
+                    (r, date_label(s.day_of_year))
+                } else {
+                    let r = ui.add(
+                        egui::Slider::new(&mut s.minute_of_day, 0..=24 * 60 - 1).show_value(false),
+                    );
+                    (r, time_label(s.minute_of_day))
+                };
+                ui.add_sized(vec2(label_w, rect.height()), egui::Label::new(text));
+                if s != self.data.shadows {
+                    self.data.shadows = s;
+                    self.pending.push(Event::ShadowsChanged(s));
+                }
+                r
+            }
+            WidgetKind::Measurements => {
+                let label = ui.label(frame.measurements_label);
+                let w = (rect.width() - label.rect.width() - 6.0).max(40.0);
+                let id = Id::new(("mt_ui_measurements_toolbar", toolbar_id));
+                self.measurements_field(&mut ui, frame, id, w)
+            }
+        };
+        if !widget.tooltip.is_empty() {
+            response.on_hover_text(&widget.tooltip);
+        }
+    }
+}
+
 /// Dotted drag handle at the start of a toolbar.
 fn paint_grip(ui: &egui::Ui, rect: Rect, vertical: bool) {
     let color = Color32::from_gray(160);
@@ -568,5 +655,132 @@ fn paint_grip(ui: &egui::Ui, rect: Rect, vertical: bool) {
             pos2(c.x + o, c.y)
         };
         painter.rect_filled(Rect::from_center_size(p, vec2(1.5, 1.5)), 0.0, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EntityInfo, TagRow, TrayData};
+    use mt_spec::Spec;
+
+    /// The toolbars added after Getting Started and the Large Tool Set.
+    const LATER: &[&str] = &[
+        "standard",
+        "views",
+        "camera",
+        "styles",
+        "edit",
+        "drawing",
+        "principal",
+        "construction",
+        "section",
+        "solid_tools",
+        "tags",
+        "shadows",
+        "sandbox",
+        "measurements",
+    ];
+
+    #[test]
+    fn later_toolbars_load_hidden_and_listed() {
+        let spec = Spec::builtin().unwrap();
+        let shell = Shell::new(&spec);
+        let listed = shell.toolbars();
+        for id in LATER {
+            let info = listed
+                .iter()
+                .find(|t| t.id == *id)
+                .unwrap_or_else(|| panic!("`{id}` not in View > Toolbars"));
+            assert!(!info.visible && !info.floating, "{id}");
+            assert!(!info.name.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_button_is_a_menu_command_with_an_icon() {
+        let spec = Spec::builtin().unwrap();
+        let commands = spec.commands();
+        let mut missing = Vec::new();
+        for toolbar in &spec.toolbars.toolbar {
+            for button in toolbar.buttons() {
+                for id in std::iter::once(&button.id).chain(&button.flyout) {
+                    assert!(commands.contains_key(id), "{}: `{id}`", toolbar.id);
+                    if !icons::has_icon(id) {
+                        missing.push(format!("{}: {id}", toolbar.id));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no icon for {missing:?}");
+    }
+
+    /// Shows every toolbar docked, then floating, with tags and shadows data, and
+    /// checks each one is drawn.
+    #[test]
+    fn all_toolbars_draw_docked_and_floating() {
+        let spec = Spec::builtin().unwrap();
+        let mut s = Shell::new(&spec);
+        s.set_tray_data(TrayData {
+            tags: vec![
+                TagRow {
+                    name: "Untagged".into(),
+                    visible: true,
+                    color: [200, 200, 200],
+                },
+                TagRow {
+                    name: "Walls".into(),
+                    visible: true,
+                    color: [200, 100, 100],
+                },
+            ],
+            ..TrayData::default()
+        });
+        for t in &spec.toolbars.toolbar {
+            assert!(s.set_toolbar_visible(&t.id, true));
+        }
+        let info = EntityInfo::no_selection();
+        let frame = Frame {
+            spec: &spec,
+            active_tool: "tool.select",
+            status: "",
+            measurements_label: "Distance",
+            measurements_value: "10mm",
+            is_enabled: &|_| true,
+            is_checked: &|id| id == "view.xray" || id == "view.shaded",
+            entity_info: &info,
+        };
+        let ctx = egui::Context::default();
+        let run = |s: &mut Shell| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 1000.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let events = s.show(ui, &frame, |_| {});
+                assert!(events.is_empty(), "{events:?}");
+            });
+            out.textures_delta.clear();
+        };
+        run(&mut s);
+        run(&mut s);
+        let drawn: Vec<&str> = s
+            .dock_lines
+            .iter()
+            .flat_map(|l| &l.items)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        for t in &spec.toolbars.toolbar {
+            assert!(drawn.contains(&t.id.as_str()), "`{}` not docked", t.id);
+        }
+        for (i, t) in spec.toolbars.toolbar.iter().enumerate() {
+            let pos = pos2(40.0 + (i % 4) as f32 * 380.0, 80.0 + (i / 4) as f32 * 90.0);
+            s.toolbar_layout
+                .apply_drop(&t.id, &DropTarget::Float { pos });
+        }
+        run(&mut s);
+        run(&mut s);
+        assert!(s.dock_lines.iter().all(|l| l.items.is_empty()) || s.dock_lines.is_empty());
+        assert!(s.toolbars().iter().all(|t| t.visible && t.floating));
     }
 }

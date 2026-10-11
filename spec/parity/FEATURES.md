@@ -87,7 +87,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 
 ## Toolbars and cursors
 
-40. [ ] **View > Toolbars: the remaining toolbars** M. meshtard has Getting Started and Large Tool Set. SketchUp 2026's list (from memory, unverified; the trial's View > Toolbars screenshot is the reference) with priority by usefulness, all hidden by default:
+40. [x] **View > Toolbars: the remaining toolbars** M. meshtard has Getting Started and Large Tool Set. SketchUp 2026's list (from memory, unverified; the trial's View > Toolbars screenshot is the reference) with priority by usefulness, all hidden by default:
     1. Standard: New, Open, Save, Cut, Copy, Paste, Erase, Undo, Redo, Print, Model Info.
     2. Views: Iso, Top, Front, Right, Back, Left.
     3. Camera: Orbit, Pan, Zoom, Zoom Window, Zoom Extents, Previous, Position Camera, Look Around, Walk.
@@ -104,6 +104,8 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     14. Measurements (the Measurements box as a toolbar).
     Not planned: Location, Classifier, Dynamic Components, Trimble Connect, Warehouse, Advanced Camera Tools (Trimble services or extensions).
     Each needs `spec/toolbars.toml` entries and icons for commands without one (`crates/mt-ui/src/icons.rs` `KNOWN`).
+    - Done (M15): items 1-14 in `spec/toolbars.toml`, all hidden by default (top edge, second row; Measurements at the bottom), listed in View > Toolbars and the grip's right-click list, dockable and floating, saved with the layout (older saved `toolbars.toml` files load; new toolbars get their default places). New toolbar item kind `{ widget = ... }` for the active-tag dropdown, the shadow date and time sliders and the Measurements box. Icons for every new button in `crates/mt-ui/src/icons/extra.rs` (file, edit, Model Info, the six standard views plus Bottom, face styles, X-ray, Back Edges, section display toggles, Solid Tools, Tags, Shadows, Sandbox).
+    - Left: button order, grouping, separators and widget looks to check against the trial; Sandbox only has the two built tools (Smoove, Stamp, Drape, Add Detail, Flip Edge not built).
 
 41. [ ] **Mouse cursors per tool and state** M. SketchUp changes the cursor per tool and modifier; meshtard shows the system arrow everywhere. From memory (unverified; the trial records each one, see TRIAL_CHECKLIST.md 1c):
     1. Each tool's own cursor: Select arrow, Line pencil, Rectangle / Circle / Polygon / Arc pencils with a shape badge, Eraser, Paint Bucket, Move (four arrows), Rotate (protractor), Scale, Push/Pull, Follow Me, Offset, Tape Measure, Protractor, Dimensions, Text, Section Plane, Orbit, Pan (hand), Zoom (magnifier), Zoom Window, Walk (feet), Look Around (eye), Position Camera.

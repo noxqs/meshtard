@@ -561,6 +561,8 @@ pub(crate) enum Cell {
     Grip,
     /// Index into `Toolbar::items`.
     Button(usize),
+    /// Index into `Toolbar::items` of a [`mt_spec::ToolbarWidget`].
+    Widget(usize),
     Separator,
 }
 
@@ -571,10 +573,19 @@ pub(crate) struct Cells {
     pub cells: Vec<(Rect, Cell)>,
 }
 
+/// Runs of buttons and single widgets between separators.
+enum Run {
+    Buttons(Vec<usize>),
+    Widget(usize, f32),
+}
+
 /// Lays out `toolbar` upright (`vertical`: `columns` buttons per line, as docked
 /// left or right) or lying (lines of `columns` buttons stacked across, so the
 /// two-column Large Tool Set is two buttons high; unverified for SketchUp). `grip`:
 /// docked toolbars have one, floating ones are moved by their title bar instead.
+/// Widgets (dropdowns, sliders, the Measurements box) are their spec width wide and
+/// one button high lying, and get a line of their own upright (the toolbar widens to
+/// fit them; unverified for SketchUp).
 pub(crate) fn toolbar_cells(
     toolbar: &Toolbar,
     vertical: bool,
@@ -586,11 +597,16 @@ pub(crate) fn toolbar_cells(
     let gap = sizes.separator_gap;
     let n = toolbar.columns.max(1) as usize;
     let mut cells = Vec::new();
-    // Buttons between separators, then the separator (None at the end).
-    let mut groups: Vec<(Vec<usize>, bool)> = vec![(Vec::new(), false)];
+    // Runs between separators, then the separator (false at the end).
+    let mut groups: Vec<(Vec<Run>, bool)> = vec![(Vec::new(), false)];
     for (i, item) in toolbar.items.iter().enumerate() {
+        let group = &mut groups.last_mut().expect("never empty").0;
         match item {
-            ToolbarItem::Button(_) => groups.last_mut().expect("never empty").0.push(i),
+            ToolbarItem::Button(_) => match group.last_mut() {
+                Some(Run::Buttons(b)) => b.push(i),
+                _ => group.push(Run::Buttons(vec![i])),
+            },
+            ToolbarItem::Widget(w) => group.push(Run::Widget(i, w.width)),
             ToolbarItem::Separator { .. } => {
                 groups.last_mut().expect("never empty").1 = true;
                 groups.push((Vec::new(), false));
@@ -598,7 +614,12 @@ pub(crate) fn toolbar_cells(
         }
     }
     if vertical {
-        let width = n as f32 * size + 2.0 * pad;
+        let widest = toolbar
+            .widgets()
+            .map(|w| w.width)
+            .fold(n as f32 * size, f32::max);
+        let width = widest + 2.0 * pad;
+        // Buttons stay at the left; a wider widget makes the column wider.
         let mut y = pad;
         if grip {
             cells.push((
@@ -607,13 +628,29 @@ pub(crate) fn toolbar_cells(
             ));
             y += GRIP;
         }
-        for (buttons, sep) in groups {
-            for line in buttons.chunks(n) {
-                for (k, &i) in line.iter().enumerate() {
-                    let min = pos2(pad + k as f32 * size, y);
-                    cells.push((Rect::from_min_size(min, vec2(size, size)), Cell::Button(i)));
+        for (runs, sep) in groups {
+            for run in runs {
+                match run {
+                    Run::Buttons(buttons) => {
+                        for line in buttons.chunks(n) {
+                            for (k, &i) in line.iter().enumerate() {
+                                let min = pos2(pad + k as f32 * size, y);
+                                cells.push((
+                                    Rect::from_min_size(min, vec2(size, size)),
+                                    Cell::Button(i),
+                                ));
+                            }
+                            y += size;
+                        }
+                    }
+                    Run::Widget(i, w) => {
+                        cells.push((
+                            Rect::from_min_size(pos2(pad, y), vec2(w, size)),
+                            Cell::Widget(i),
+                        ));
+                        y += size;
+                    }
                 }
-                y += size;
             }
             if sep {
                 cells.push((
@@ -637,13 +674,30 @@ pub(crate) fn toolbar_cells(
             ));
             x += GRIP;
         }
-        for (buttons, sep) in groups {
-            for column in buttons.chunks(n) {
-                for (k, &i) in column.iter().enumerate() {
-                    let min = pos2(x, k as f32 * size);
-                    cells.push((Rect::from_min_size(min, vec2(size, size)), Cell::Button(i)));
+        for (runs, sep) in groups {
+            for run in runs {
+                match run {
+                    Run::Buttons(buttons) => {
+                        for column in buttons.chunks(n) {
+                            for (k, &i) in column.iter().enumerate() {
+                                let min = pos2(x, k as f32 * size);
+                                cells.push((
+                                    Rect::from_min_size(min, vec2(size, size)),
+                                    Cell::Button(i),
+                                ));
+                            }
+                            x += size;
+                        }
+                    }
+                    Run::Widget(i, w) => {
+                        let top = ((height - size) / 2.0).floor();
+                        cells.push((
+                            Rect::from_min_size(pos2(x + 2.0, top), vec2(w, size)),
+                            Cell::Widget(i),
+                        ));
+                        x += w + 4.0;
+                    }
                 }
-                x += size;
             }
             if sep {
                 cells.push((
@@ -906,6 +960,105 @@ mod tests {
             m.get("getting_started").unwrap().position,
             docked(DockEdge::Top, 0, 0)
         );
+    }
+
+    /// A `toolbars.toml` saved before the later toolbars existed still loads: its
+    /// places are kept and the new toolbars get their default (hidden) places.
+    #[test]
+    fn old_saved_layout_still_loads() {
+        let old = r#"
+[[toolbars]]
+id = "getting_started"
+visible = false
+
+[toolbars.position]
+kind = "floating"
+x = 300.0
+y = 200.0
+
+[[toolbars]]
+id = "large_tool_set"
+visible = true
+
+[toolbars.position]
+kind = "docked"
+edge = "right"
+row = 0
+index = 0
+"#;
+        let saved: ToolbarLayout = toml::from_str(old).unwrap();
+        let defaults = spec_layout();
+        let m = ToolbarLayout::merged(&defaults, &saved);
+        assert_eq!(m.toolbars.len(), defaults.toolbars.len());
+        let gs = m.get("getting_started").unwrap();
+        assert!(!gs.visible);
+        assert_eq!(
+            gs.position,
+            ToolbarPosition::Floating { x: 300.0, y: 200.0 }
+        );
+        assert_eq!(
+            m.get("large_tool_set").unwrap().position,
+            docked(DockEdge::Right, 0, 0)
+        );
+        let edge = |p: &ToolbarPlace| match p.position {
+            ToolbarPosition::Docked { edge, .. } => Some(edge),
+            ToolbarPosition::Floating { .. } => None,
+        };
+        for place in &m.toolbars[2..] {
+            assert!(!place.visible, "{}", place.id);
+            assert_eq!(edge(place), edge(defaults.get(&place.id).unwrap()));
+        }
+        // Showing a new toolbar puts it on its default edge, in one row with the
+        // other new toolbars of that edge (row 0 here: Getting Started floats).
+        let mut shown = m.clone();
+        shown.set_visible("standard", true);
+        shown.set_visible("views", true);
+        assert_eq!(
+            shown.rows(DockEdge::Top, true),
+            vec![(0, vec!["standard", "views"])]
+        );
+        assert_eq!(
+            shown.rows(DockEdge::Right, true),
+            vec![(0, vec!["large_tool_set"])]
+        );
+    }
+
+    #[test]
+    fn widgets_get_their_width() {
+        let spec = Spec::builtin().unwrap();
+        let sizes = &spec.ui_theme.sizes;
+        let shadows = spec
+            .toolbars
+            .toolbar
+            .iter()
+            .find(|t| t.id == "shadows")
+            .unwrap();
+        let lying = toolbar_cells(shadows, false, true, sizes);
+        let widgets: Vec<Rect> = lying
+            .cells
+            .iter()
+            .filter(|c| matches!(c.1, Cell::Widget(_)))
+            .map(|c| c.0)
+            .collect();
+        assert_eq!(widgets.len(), 2);
+        assert!(widgets.iter().all(|r| r.width() == 150.0));
+        assert!(widgets[0].max.x <= widgets[1].min.x);
+        assert!(lying.size.x > 300.0 + 2.0 * sizes.toolbar_button);
+        assert_eq!(lying.size.y, sizes.toolbar_button);
+        // Upright, each widget has a line of its own and the toolbar is as wide as
+        // the widest one.
+        let upright = toolbar_cells(shadows, true, true, sizes);
+        assert_eq!(upright.size.x, 150.0 + 2.0 * sizes.toolbar_padding);
+        let ys: Vec<f32> = upright
+            .cells
+            .iter()
+            .filter(|c| matches!(c.1, Cell::Widget(_)))
+            .map(|c| c.0.min.y)
+            .collect();
+        assert!(ys[0] < ys[1]);
+        for (r, _) in &upright.cells {
+            assert!(r.max.x <= upright.size.x && r.max.y <= upright.size.y);
+        }
     }
 
     #[test]

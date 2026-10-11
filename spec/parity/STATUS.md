@@ -14,6 +14,10 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Shell | Toolbar flyouts (Arcs, Shapes on Getting Started) | differs | opened by clicking the small corner triangle; SketchUp behavior not checked |
 | Shell | Toolbar tooltips | unverified | shows "Name (Shortcut)"; SketchUp's exact text not checked |
 | Shell | Toolbar icons | differs | own procedural drawings by design (Trimble icons are copyrighted) |
+| Shell | Toolbars Standard, Views, Camera, Styles, Edit, Drawing, Principal, Construction, Section, Solid Tools, Sandbox | unverified | `toolbars.toml`; hidden by default, shown from View > Toolbars, docked in a second top row; button order and grouping from memory. Style and section toggles show pressed when on |
+| Shell | Tags toolbar (Tags panel button, active-tag dropdown) | unverified | dropdown sets the active tag; SketchUp's order of the two items and dropdown width not checked |
+| Shell | Shadows toolbar (Shadow Settings, Display Shadows, date and time sliders) | unverified | sliders span the whole year / day; SketchUp's slider look, range and labels not checked |
+| Shell | Measurements toolbar | unverified | the Measurements box as a toolbar docked at the bottom when shown; the status bar keeps its own box too |
 | Shell | Window theme (colors, sizes) | unverified | `ui_theme.toml` draft (Windows 11 light) |
 | Shell | Measurements box typing from the viewport | unverified | digit or `.,;-+[<'"/*@=` starts typing, then all text until Enter/Escape |
 | Shell | Status bar hints per tool | unverified | wording from memory |

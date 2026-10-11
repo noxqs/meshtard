@@ -213,6 +213,10 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Section planes (reopen in their plane around the model), style settings with known style items, units and snapping (`UnitsOptions`), image entities (`CImage`) survive save and reopen; round-trip tests in `crates/mt-kernel/tests/export.rs`.
 - [ ] Scenes, Monochrome, fog, Component Edit hiding, model axes, locks, two-point, active section, saved view: format unknown without SketchUp-saved samples; captures listed in `spec/parity/TRIAL_CHECKLIST.md` section 1b.
 
+### M15: Toolbars and cursors (FEATURES.md items 40, 41)
+- [x] Item 40: the remaining View > Toolbars toolbars (Standard, Views, Camera, Styles, Edit, Drawing, Principal, Construction, Section, Solid Tools, Tags, Shadows, Sandbox, Measurements), hidden by default, dockable and floating like the others, with own icons for every button; widget items (tag dropdown, shadow sliders, Measurements box) in `toolbars.toml`.
+- [ ] Item 41: mouse cursors per tool and modifier (drawn by meshtard over the viewport).
+
 ## Risks
 
 1. **Kernel robustness.** Floating-point tolerance bugs are where most effort goes. Invariant checker and property tests from day one.

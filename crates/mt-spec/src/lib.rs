@@ -174,6 +174,14 @@ impl Spec {
                     toolbar.id
                 )));
             }
+            for w in toolbar.widgets() {
+                if !(w.width.is_finite() && w.width >= 16.0) {
+                    return Err(err(format!(
+                        "toolbar `{}`: widget {:?} needs a width of at least 16",
+                        toolbar.id, w.widget
+                    )));
+                }
+            }
             let mut buttons = BTreeSet::new();
             for button in toolbar.buttons() {
                 if !buttons.insert(button.id.as_str()) {
@@ -424,7 +432,14 @@ impl Toolbar {
     pub fn buttons(&self) -> impl Iterator<Item = &ToolbarButton> {
         self.items.iter().filter_map(|item| match item {
             ToolbarItem::Button(b) => Some(b),
-            ToolbarItem::Separator { .. } => None,
+            ToolbarItem::Widget(_) | ToolbarItem::Separator { .. } => None,
+        })
+    }
+
+    pub fn widgets(&self) -> impl Iterator<Item = &ToolbarWidget> {
+        self.items.iter().filter_map(|item| match item {
+            ToolbarItem::Widget(w) => Some(w),
+            _ => None,
         })
     }
 }
@@ -433,7 +448,33 @@ impl Toolbar {
 #[serde(untagged)]
 pub enum ToolbarItem {
     Button(ToolbarButton),
+    Widget(ToolbarWidget),
     Separator { separator: bool },
+}
+
+/// A toolbar item that is not a button: `{ widget = "...", width = 120, tooltip = "..." }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolbarWidget {
+    pub widget: WidgetKind,
+    /// Width in points when the toolbar lies flat (its own line when upright).
+    pub width: f32,
+    #[serde(default)]
+    pub tooltip: String,
+}
+
+/// What a [`ToolbarWidget`] shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetKind {
+    /// Dropdown of the model's tags; picking one makes it the active tag.
+    ActiveTag,
+    /// Shadows: the date slider.
+    ShadowDate,
+    /// Shadows: the time-of-day slider.
+    ShadowTime,
+    /// The Measurements box (label and value field).
+    Measurements,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -613,11 +654,64 @@ mod tests {
             .iter()
             .map(|t| t.id.as_str())
             .collect();
-        assert_eq!(ids, ["getting_started", "large_tool_set"]);
+        assert_eq!(
+            ids,
+            [
+                "getting_started",
+                "large_tool_set",
+                "standard",
+                "views",
+                "camera",
+                "styles",
+                "edit",
+                "drawing",
+                "principal",
+                "construction",
+                "section",
+                "solid_tools",
+                "tags",
+                "shadows",
+                "sandbox",
+                "measurements",
+            ]
+        );
         let gs = &spec.toolbars.toolbar[0];
         assert_eq!(gs.dock, Dock::Top);
         assert_eq!(gs.buttons().next().unwrap().id, "tool.select");
         assert_eq!(spec.toolbars.toolbar[1].columns, 2);
+        // Only the two default toolbars are shown on first start.
+        for t in &spec.toolbars.toolbar[2..] {
+            assert!(!t.visible, "{}", t.id);
+        }
+        let widgets = |id: &str| -> Vec<WidgetKind> {
+            let t = spec.toolbars.toolbar.iter().find(|t| t.id == id).unwrap();
+            t.widgets().map(|w| w.widget).collect()
+        };
+        assert_eq!(widgets("tags"), [WidgetKind::ActiveTag]);
+        assert_eq!(
+            widgets("shadows"),
+            [WidgetKind::ShadowDate, WidgetKind::ShadowTime]
+        );
+        assert_eq!(widgets("measurements"), [WidgetKind::Measurements]);
+    }
+
+    #[test]
+    fn bad_widgets_are_rejected() {
+        let narrow = TOOLBARS.replacen("width = 150.0", "width = 2.0", 1);
+        let err = Spec::parse(&Sources {
+            toolbars: &narrow,
+            ..BUILTIN
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("width"), "{err}");
+        let unknown = TOOLBARS.replacen("\"active_tag\", width", "\"nope\", width", 1);
+        assert!(
+            Spec::parse(&Sources {
+                toolbars: &unknown,
+                ..BUILTIN
+            })
+            .is_err()
+        );
     }
 
     #[test]

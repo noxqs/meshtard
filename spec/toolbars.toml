@@ -12,6 +12,12 @@
 #   items    buttons and separators, in order
 # Button: { id = command id from menus.toml, tooltip = "...", flyout = [ids] (optional) }.
 # A flyout button shows the first id until the user picks another one from its list.
+# Widget: { widget = "active_tag" | "shadow_date" | "shadow_time" | "measurements",
+#           width = points when lying flat, tooltip = "..." (optional) }.
+#
+# The toolbars after the Large Tool Set are hidden by default and docked in row 1 of
+# the top edge when shown (Measurements: the bottom edge; unverified). Button order and grouping are from memory;
+# check against the trial's View > Toolbars (TRIAL_CHECKLIST.md).
 verified = false
 
 [[toolbar]]
@@ -101,4 +107,229 @@ items = [
   { id = "camera.look_around", tooltip = "Look Around" },
   { id = "camera.walk", tooltip = "Walk" },
   { id = "tool.section_plane", tooltip = "Section Plane" },
+]
+
+[[toolbar]]
+id = "standard"
+name = "Standard"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "file.new", tooltip = "New" },
+  { id = "file.open", tooltip = "Open" },
+  { id = "file.save", tooltip = "Save" },
+  { separator = true },
+  { id = "edit.cut", tooltip = "Cut" },
+  { id = "edit.copy", tooltip = "Copy" },
+  { id = "edit.paste", tooltip = "Paste" },
+  { id = "edit.delete", tooltip = "Erase" },
+  { separator = true },
+  { id = "edit.undo", tooltip = "Undo" },
+  { id = "edit.redo", tooltip = "Redo" },
+  { separator = true },
+  { id = "file.print", tooltip = "Print" },
+  { separator = true },
+  { id = "window.model_info", tooltip = "Model Info" },
+]
+
+[[toolbar]]
+id = "views"
+name = "Views"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "camera.view_iso", tooltip = "Iso" },
+  { id = "camera.view_top", tooltip = "Top" },
+  { id = "camera.view_front", tooltip = "Front" },
+  { id = "camera.view_right", tooltip = "Right" },
+  { id = "camera.view_back", tooltip = "Back" },
+  { id = "camera.view_left", tooltip = "Left" },
+]
+
+[[toolbar]]
+id = "camera"
+name = "Camera"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "camera.orbit", tooltip = "Orbit" },
+  { id = "camera.pan", tooltip = "Pan" },
+  { id = "camera.zoom", tooltip = "Zoom" },
+  { id = "camera.zoom_window", tooltip = "Zoom Window" },
+  { id = "camera.zoom_extents", tooltip = "Zoom Extents" },
+  { id = "camera.previous", tooltip = "Previous" },
+  { separator = true },
+  { id = "camera.position", tooltip = "Position Camera" },
+  { id = "camera.look_around", tooltip = "Look Around" },
+  { id = "camera.walk", tooltip = "Walk" },
+]
+
+[[toolbar]]
+id = "styles"
+name = "Styles"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "view.xray", tooltip = "X-ray" },
+  { id = "view.back_edges", tooltip = "Back Edges" },
+  { separator = true },
+  { id = "view.wireframe", tooltip = "Wireframe" },
+  { id = "view.hidden_line", tooltip = "Hidden Line" },
+  { id = "view.shaded", tooltip = "Shaded" },
+  { id = "view.shaded_textures", tooltip = "Shaded With Textures" },
+  { id = "view.monochrome", tooltip = "Monochrome" },
+]
+
+[[toolbar]]
+id = "edit"
+name = "Edit"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.move", tooltip = "Move" },
+  { id = "tool.push_pull", tooltip = "Push/Pull" },
+  { id = "tool.rotate", tooltip = "Rotate" },
+  { id = "tool.follow_me", tooltip = "Follow Me" },
+  { id = "tool.scale", tooltip = "Scale" },
+  { id = "tool.offset", tooltip = "Offset" },
+]
+
+[[toolbar]]
+id = "drawing"
+name = "Drawing"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.line", tooltip = "Line" },
+  { id = "tool.freehand", tooltip = "Freehand" },
+  { id = "tool.rectangle", tooltip = "Rectangle" },
+  { id = "tool.rotated_rectangle", tooltip = "Rotated Rectangle" },
+  { id = "tool.circle", tooltip = "Circle" },
+  { id = "tool.polygon", tooltip = "Polygon" },
+  { id = "tool.arc", tooltip = "Arc" },
+  { id = "tool.arc_2pt", tooltip = "2 Point Arc" },
+  { id = "tool.arc_3pt", tooltip = "3 Point Arc" },
+  { id = "tool.pie", tooltip = "Pie" },
+]
+
+[[toolbar]]
+id = "principal"
+name = "Principal"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.select", tooltip = "Select" },
+  { id = "edit.make_component", tooltip = "Make Component" },
+  { id = "tool.paint_bucket", tooltip = "Paint Bucket" },
+  { id = "tool.eraser", tooltip = "Eraser" },
+]
+
+[[toolbar]]
+id = "construction"
+name = "Construction"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.tape_measure", tooltip = "Tape Measure" },
+  { id = "tool.dimensions", tooltip = "Dimensions" },
+  { id = "tool.protractor", tooltip = "Protractor" },
+  { id = "tool.text", tooltip = "Text" },
+  { id = "tool.axes", tooltip = "Axes" },
+  { id = "tool.text_3d", tooltip = "3D Text" },
+]
+
+[[toolbar]]
+id = "section"
+name = "Section"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.section_plane", tooltip = "Section Plane" },
+  { id = "view.section_planes", tooltip = "Display Section Planes" },
+  { id = "view.section_cuts", tooltip = "Display Section Cuts" },
+  { id = "view.section_fill", tooltip = "Display Section Fill" },
+]
+
+[[toolbar]]
+id = "solid_tools"
+name = "Solid Tools"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.outer_shell", tooltip = "Outer Shell" },
+  { id = "tool.solid_intersect", tooltip = "Intersect" },
+  { id = "tool.solid_union", tooltip = "Union" },
+  { id = "tool.solid_subtract", tooltip = "Subtract" },
+  { id = "tool.solid_trim", tooltip = "Trim" },
+  { id = "tool.solid_split", tooltip = "Split" },
+]
+
+[[toolbar]]
+id = "tags"
+name = "Tags"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "window.tags", tooltip = "Tags" },
+  { widget = "active_tag", width = 150.0, tooltip = "Active Tag" },
+]
+
+[[toolbar]]
+id = "shadows"
+name = "Shadows"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "window.shadows", tooltip = "Shadow Settings" },
+  { id = "view.shadows", tooltip = "Display Shadows" },
+  { separator = true },
+  { widget = "shadow_date", width = 150.0, tooltip = "Date" },
+  { widget = "shadow_time", width = 150.0, tooltip = "Time" },
+]
+
+[[toolbar]]
+id = "sandbox"
+name = "Sandbox"
+dock = "top"
+row = 1
+columns = 1
+visible = false
+items = [
+  { id = "tool.sandbox_from_contours", tooltip = "From Contours" },
+  { id = "tool.sandbox_from_scratch", tooltip = "From Scratch" },
+]
+
+[[toolbar]]
+id = "measurements"
+name = "Measurements"
+dock = "bottom"
+row = 0
+columns = 1
+visible = false
+items = [
+  { widget = "measurements", width = 220.0 },
 ]
