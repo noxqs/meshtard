@@ -179,32 +179,34 @@ fn collect(
 }
 
 /// A triangle side as exported: corners, normal, material slot and texture coordinates.
-struct Side {
-    points: [DVec3; 3],
-    normal: DVec3,
+pub(crate) struct Side {
+    pub(crate) points: [DVec3; 3],
+    pub(crate) normal: DVec3,
     /// Index into [`Materials::list`].
-    slot: usize,
-    uv: Option<[DVec2; 3]>,
+    pub(crate) slot: usize,
+    pub(crate) uv: Option<[DVec2; 3]>,
 }
 
 /// An exported material.
-struct ExportMaterial {
-    name: String,
-    color: [u8; 3],
-    opacity: f64,
+pub(crate) struct ExportMaterial {
+    pub(crate) name: String,
+    pub(crate) color: [u8; 3],
+    pub(crate) opacity: f64,
     /// File name of the texture image written next to the model, and its bytes.
-    texture: Option<(String, Arc<[u8]>)>,
+    pub(crate) texture: Option<(String, Arc<[u8]>)>,
 }
 
 /// The materials the exported sides use, in first-use order.
-struct Materials {
-    list: Vec<ExportMaterial>,
+pub(crate) struct Materials {
+    pub(crate) list: Vec<ExportMaterial>,
     /// Model material (or `None` front / back default) to slot.
     slots: HashMap<(Option<MaterialId>, bool), usize>,
+    /// Sanitized names given out, with their use counts.
+    used_names: HashMap<String, usize>,
 }
 
 /// File extension of image bytes (PNG, JPEG, BMP; PNG when unknown).
-fn image_extension(data: &[u8]) -> &'static str {
+pub(crate) fn image_extension(data: &[u8]) -> &'static str {
     if data.starts_with(&[0xff, 0xd8]) {
         "jpg"
     } else if data.starts_with(b"BM") {
@@ -229,17 +231,20 @@ fn sanitize(name: &str) -> String {
     if s.is_empty() { "material".into() } else { s }
 }
 
-/// The sides to export (both sides of each triangle with `two_sided`, the back one
-/// reversed), with their materials. `base` prefixes texture file names.
-fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
-    let mut mats = Materials {
-        list: Vec::new(),
-        slots: HashMap::new(),
-    };
-    let mut used_names: HashMap<String, usize> = HashMap::new();
-    let mut slot = |m: Option<MaterialId>, back: bool, mats: &mut Materials| -> usize {
+impl Materials {
+    pub(crate) fn new() -> Self {
+        Self {
+            list: Vec::new(),
+            slots: HashMap::new(),
+            used_names: HashMap::new(),
+        }
+    }
+
+    /// The slot of model material `m` (`None`: the style's front or back color),
+    /// added on first use. `base` prefixes texture file names.
+    fn slot(&mut self, model: &Model, m: Option<MaterialId>, back: bool, base: &str) -> usize {
         let key = (m, back && m.is_none());
-        if let Some(&s) = mats.slots.get(&key) {
+        if let Some(&s) = self.slots.get(&key) {
             return s;
         }
         let mat = m.and_then(|i| model.materials.get(i));
@@ -249,7 +254,7 @@ fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
             None => ("FrontColor".into(), model.front_color, 1.0),
         };
         let mut name = sanitize(&raw);
-        let n = used_names.entry(name.clone()).or_insert(0);
+        let n = self.used_names.entry(name.clone()).or_insert(0);
         *n += 1;
         if *n > 1 {
             name = format!("{name}_{n}");
@@ -260,21 +265,32 @@ fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
                 t.data.clone(),
             )
         });
-        mats.list.push(ExportMaterial {
+        self.list.push(ExportMaterial {
             name,
             color,
             opacity: opacity.clamp(0.0, 1.0),
             texture,
         });
-        mats.slots.insert(key, mats.list.len() - 1);
-        mats.list.len() - 1
-    };
+        self.slots.insert(key, self.list.len() - 1);
+        self.list.len() - 1
+    }
+}
+
+/// Export sides of `tris` (both sides of each triangle with `two_sided`, the back one
+/// reversed), their materials added to `mats`. `base` prefixes texture file names.
+pub(crate) fn tri_sides(
+    model: &Model,
+    tris: Vec<Triangle>,
+    two_sided: bool,
+    base: &str,
+    mats: &mut Materials,
+) -> Vec<Side> {
     let mut out = Vec::new();
-    for t in triangles(model) {
+    for t in tris {
         out.push(Side {
             points: t.points,
             normal: t.normal,
-            slot: slot(t.material, false, &mut mats),
+            slot: mats.slot(model, t.material, false, base),
             uv: t.uv,
         });
         if two_sided {
@@ -282,11 +298,19 @@ fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
             out.push(Side {
                 points: [a, c, b],
                 normal: -t.normal,
-                slot: slot(t.back_material, true, &mut mats),
+                slot: mats.slot(model, t.back_material, true, base),
                 uv: t.back_uv.map(|[x, y, z]| [x, z, y]),
             });
         }
     }
+    out
+}
+
+/// The sides to export (both sides of each triangle with `two_sided`, the back one
+/// reversed), with their materials. `base` prefixes texture file names.
+pub(crate) fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
+    let mut mats = Materials::new();
+    let out = tri_sides(model, triangles(model), two_sided, base, &mut mats);
     (out, mats)
 }
 

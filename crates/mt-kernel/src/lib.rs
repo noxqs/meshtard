@@ -13,6 +13,7 @@ pub mod entities;
 pub mod entity_edit;
 pub mod export;
 pub mod follow_me;
+pub mod formats;
 pub mod geom;
 pub mod group;
 pub mod import;

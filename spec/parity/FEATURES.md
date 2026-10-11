@@ -201,6 +201,18 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
 
 71. [x] **Deterministic kernel operations** M. Done: every kernel map or set whose iteration order reaches a result is now a `BTreeMap`/`BTreeSet` (arrangement half-edge walk, Move/Rotate rebuild and folds, solid booleans, Follow Me, Offset, curves, orient, group copy, mesh import, purge, sandbox; `CoEdge` is `Ord`); the hash maps left (spatial index with a fixed Fx hasher and sorted query results, `.skp`/mesh import and export) are only looked up. The saved `random_modify` sequence gave different entities from its first push/pull on (face loops and ids followed `HashMap` order, and failed about one run in 300); it is now identical on every run and valid (`saved_sequence_is_deterministic`; `booleans_are_deterministic` in tests/solid.rs). Long runs (PROPTEST_CASES=20000, repeated) on the now reproducible kernel found bugs that hash order had made look random, fixed: `arrangement::interior_point` could return a point outside a region whose hole loop runs along a bridge edge twice (`bridged_blocks_inside_a_rectangle`); `insert_line` checks each piece between snapped vertices again (pieces run up to TOL off the line and grazed edges: `tolerance_sliver_fan`, `copy_passing_next_to_a_vertex`); `update_faces` counts a face as in a plane when all its vertices are within TOL of it, and never makes a second face on the same edges (`rectangle_through_a_vertex_just_off_its_plane`, `sliver_split_in_two_planes`); `validate` now reports two faces on the same edges (geometry checks only: SketchUp files have such pairs). Left: `move_leaves_an_edge_grazing_another` (ignored), about one sequence in 140,000. Spatial bench (51k edges): Push/Pull 3.5-4.4 ms, Move 5.3-6.5 ms, add_line unchanged; before, the same bench gave Push/Pull ~3 ms and Move 3.0-6.5 ms depending on the run (the face sets it moved differed per run, and differ now from both), so per-operation cost is not comparable exactly.
 
+## Other 3D formats (requested 2026-10-11)
+
+72. [x] **Other 3D formats: FBX, PLY, 3MF, 3DS, VRML, KMZ** L. Research and per-format notes in `spec/parity/FORMATS.md`; code in `crates/mt-kernel/src/formats/` (own readers/writers, the `zip` and `flate2` crates), dialogs in `mt-app/src/import.rs` / `export.rs`, round-trip tool `cargo run -p mt-kernel --example formats_check`.
+    - [x] FBX import: binary and ASCII (6.x/7.x), model transforms, axes and units from GlobalSettings, materials, diffuse textures (embedded or file), UVs.
+    - [x] FBX export: binary 7.4, one mesh with per-polygon materials, normals, UVs, texture files; options two-sided, texture maps, Y up, units. Read back by assimp 5.3.
+    - [x] PLY import (ASCII, binary LE/BE, colors as materials, TextureFile UVs) and export (binary, vertex colors).
+    - [x] 3MF import (components, Production Extension parts, base materials, color groups, texture groups, units) and export (base materials, textures).
+    - [x] 3DS import (meshes, materials, transparency, texture maps, UVs, master scale).
+    - [x] KMZ export (KML + COLLADA + textures), VRML 2.0 export (materials, textures, SketchUp's options).
+    - [x] OBJ import reads texture coordinates and `map_Kd` textures; polygons that visit a vertex twice (hole joined by a bridge) and non-planar polygons are ear-clipped instead of dropped / fanned.
+    - [ ] Left: FBX node hierarchy as groups (import and export), 3DS export, USDZ and XSI export, "Export only current selection", PLY UV export, STL ASCII export, IFC.
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)
