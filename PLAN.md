@@ -146,7 +146,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Curves in the kernel: arcs, circles and freehand curves select, erase and report (Entity Info) as one entity.
 - [x] Shapes lie on the clicked face's plane or the ground; arrow keys lock the plane. Typed values: rectangle `w,h`, radius, `24s` sides/segments, arc bulge, arc angle.
 - [x] Eraser: click or drag; Shift hides, Ctrl softens/smooths, Ctrl+Shift unsoftens.
-- [ ] Not yet: rectangle orientation on tilted faces as SketchUp does it.
+- [x] Shapes on tilted faces: sides along the level line and up the slope (unverified against SketchUp on diagonal slopes); arrow keys re-orient after the first point.
 
 ### M6: Modeling tools
 - [x] Undo/Redo (snapshot per edit, 100 steps).

@@ -4,7 +4,10 @@
 //! release) and typed values from the Measurements box, and shows a preview.
 //!
 //! Shapes lie in the plane of the face clicked first, else on the ground; arrow keys
-//! lock the plane (right: red normal, left: green, up: blue). Behaviors are drafts from
+//! lock the plane (right: red normal, left: green, up: blue), also after the first point
+//! of a Rectangle, Circle or Polygon. Rectangle sides and the default start angle follow
+//! [`plane_axes`]: red/green on level planes, else the level line and the fall line
+//! (horizontal and vertical on walls). Behaviors are drafts from
 //! memory of SketchUp (`spec/parity/STATUS.md`).
 
 use std::f64::consts::TAU;
@@ -101,25 +104,47 @@ fn plane_normal(lock: Option<DVec3>, inf: &Inference) -> DVec3 {
     lock.or(inf.normal).unwrap_or(DVec3::Z).normalize()
 }
 
-/// In-plane axes: red projected onto the plane (green if red is the normal), and the
-/// normal crossed with it.
+/// In-plane axes `(u, v)` of a drawing plane, with `u x v = normal`.
+///
+/// SketchUp orients shapes on a face by the model axes: on a horizontal plane `u` is
+/// red and `v` green (`-green` facing down); on any other plane `u` is the plane's
+/// level line (`blue x normal`, horizontal) and `v` runs up the slope (straight up on
+/// a vertical wall). So a rectangle on a pitched roof has two level sides and two
+/// sides down the fall line, and on a wall facing red its sides run green and blue.
+/// This matches the Ruby API's `Vector3d#axes` (the "arbitrary axis" algorithm) up to
+/// its near-vertical threshold; that the Rectangle tool uses exactly these axes on
+/// skewed slopes is from memory of SketchUp (unverified).
 pub fn plane_axes(normal: DVec3) -> (DVec3, DVec3) {
-    let mut u = DVec3::X - normal * DVec3::X.dot(normal);
-    if u.length() < 1e-6 {
-        u = DVec3::Y - normal * DVec3::Y.dot(normal);
-    }
-    let u = u.normalize();
-    (u, normal.cross(u))
+    let n = normal.normalize_or_zero();
+    let level = DVec3::Z.cross(n);
+    let u = if level.length() < 1e-6 {
+        // Horizontal plane (or a degenerate normal): red.
+        (DVec3::X - n * DVec3::X.dot(n)).normalize_or(DVec3::X)
+    } else {
+        level.normalize()
+    };
+    (u, n.cross(u))
 }
 
-/// Corners of an axis-aligned rectangle with opposite corners `a` and `b`. When `b` is
-/// off the plane (inferred straight up), the rectangle stands vertical through `a`.
+/// Whether the plane is horizontal or vertical, where rectangles may stand up off it.
+fn is_level_or_plumb(normal: DVec3) -> bool {
+    let z = normal.normalize_or_zero().z.abs();
+    z < 1e-6 || z > 1.0 - 1e-9
+}
+
+/// Corners of an axis-aligned rectangle with opposite corners `a` and `b`, its sides
+/// along [`plane_axes`]. When `b` is off a horizontal or vertical plane (inferred
+/// straight up, or out of a wall), the rectangle stands perpendicular to the plane
+/// through `a`, as in SketchUp; off a sloped plane `b` is projected onto it, so the
+/// rectangle keeps the roof's orientation.
 pub fn rectangle_corners(a: DVec3, b: DVec3, normal: DVec3) -> [DVec3; 4] {
-    let d = b - a;
+    let mut d = b - a;
     let off_plane = d.dot(normal);
     if off_plane.abs() > mt_kernel::TOL {
         let along = d - normal * off_plane;
-        if along.length() > mt_kernel::TOL {
+        if !is_level_or_plumb(normal) {
+            d = along;
+        } else if along.length() > mt_kernel::TOL {
             return [a, a + along, b, a + normal * off_plane];
         }
     }
@@ -219,13 +244,21 @@ impl DrawTool for LineTool {
 
 #[derive(Debug, Default)]
 pub struct Rectangle {
+    /// First corner and the normal of the face it was placed on (up off faces).
     first: Option<(DVec3, DVec3)>,
     lock: Option<DVec3>,
 }
 
 impl Rectangle {
-    fn corners(&self, b: DVec3) -> Option<[DVec3; 4]> {
+    /// First corner and the drawing plane's normal: the locked axis, else the face's.
+    /// An arrow key pressed after the first corner re-orients the rectangle.
+    fn plane(&self) -> Option<(DVec3, DVec3)> {
         let (a, n) = self.first?;
+        Some((a, self.lock.unwrap_or(n).normalize()))
+    }
+
+    fn corners(&self, b: DVec3) -> Option<[DVec3; 4]> {
+        let (a, n) = self.plane()?;
         Some(rectangle_corners(a, b, n))
     }
 
@@ -244,7 +277,7 @@ impl Rectangle {
 
 impl DrawTool for Rectangle {
     fn hint(&self, cur: &Inference) -> Option<Inference> {
-        let (a, n) = self.first?;
+        let (a, n) = self.plane()?;
         let (u, v) = plane_axes(n);
         mt_infer::hints::rectangle(cur, a, u, v)
     }
@@ -276,7 +309,7 @@ impl DrawTool for Rectangle {
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         match self.corners(inf.point) {
             None => {
-                self.first = Some((inf.point, plane_normal(self.lock, inf)));
+                self.first = Some((inf.point, plane_normal(None, inf)));
                 false
             }
             Some(c) => self.make(ents, c),
@@ -290,15 +323,19 @@ impl DrawTool for Rectangle {
         text: &str,
         units: LengthUnit,
     ) -> bool {
-        let (Some((a, n)), Some((w, h))) = (self.first, parse_pair(text, units)) else {
+        let (Some((a, n)), Some((w, h))) = (self.plane(), parse_pair(text, units)) else {
             return false;
         };
-        // Signs follow the side the cursor is on, as in SketchUp.
+        // `w` runs along the plane's first axis (red, or the level line on a slope) and
+        // `h` along the second, or along the sides of the rectangle standing up off the
+        // plane; signs follow the side the cursor is on, as in SketchUp.
         let (u, v) = plane_axes(n);
-        let d = cur.map_or(u + v, |c| c.point - a);
-        let su = if d.dot(u) < 0.0 { -1.0 } else { 1.0 };
-        let sv = if d.dot(v) < 0.0 { -1.0 } else { 1.0 };
-        self.make(ents, rectangle_corners(a, a + u * w * su + v * h * sv, n))
+        let (mut e1, mut e2) = (u, v);
+        if let Some(k) = cur.map(|c| rectangle_corners(a, c.point, n)) {
+            e1 = (k[1] - k[0]).normalize_or(u);
+            e2 = (k[3] - k[0]).normalize_or(v);
+        }
+        self.make(ents, [a, a + e1 * w, a + e1 * w + e2 * h, a + e2 * h])
     }
 
     fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
@@ -443,6 +480,7 @@ impl DrawTool for RotatedRectangle {
 pub struct Polygon {
     is_circle: bool,
     sides: usize,
+    /// Center and the normal of the face it was placed on (up off faces).
     center: Option<(DVec3, DVec3)>,
     lock: Option<DVec3>,
 }
@@ -466,8 +504,12 @@ impl Polygon {
         }
     }
 
+    /// The start angle follows the cursor (the first vertex points at it); with the
+    /// cursor on the center it is the plane's first axis (`plane_axes`).
     fn arc(&self, toward: DVec3, radius: Option<f64>) -> Option<Arc> {
         let (c, n) = self.center?;
+        // An arrow key pressed after the center re-orients the shape.
+        let n = self.lock.unwrap_or(n).normalize();
         let d = toward - c;
         let x = (d - n * d.dot(n)).normalize_or_zero();
         let x = if x == DVec3::ZERO { plane_axes(n).0 } else { x };
@@ -513,7 +555,7 @@ impl DrawTool for Polygon {
 
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         if self.center.is_none() {
-            self.center = Some((inf.point, plane_normal(self.lock, inf)));
+            self.center = Some((inf.point, plane_normal(None, inf)));
             return false;
         }
         match self.arc(inf.point, None) {
@@ -1823,6 +1865,177 @@ mod tests {
                 v(0.0, 0.0, 7.0)
             ]
         );
+    }
+
+    fn on_face(p: DVec3, n: DVec3) -> Inference {
+        Inference {
+            kind: Kind::OnFace,
+            normal: Some(n),
+            ..inf(p)
+        }
+    }
+
+    /// Outward normal of a roof pitched 30 degrees whose fall line points `azimuth`
+    /// degrees from red, with its level line and up-slope direction.
+    fn roof(azimuth: f64) -> (DVec3, DVec3, DVec3) {
+        let (p, a) = (30f64.to_radians(), azimuth.to_radians());
+        let fall = v(a.cos(), a.sin(), 0.0);
+        let n = fall * p.sin() + DVec3::Z * p.cos();
+        let level = DVec3::Z.cross(fall);
+        (n, level, n.cross(level))
+    }
+
+    /// The four edges of the last rectangle drawn, as corner pairs.
+    fn rect_edges(e: &Entities) -> Vec<(DVec3, DVec3)> {
+        e.edges
+            .values()
+            .map(|ed| (e.vertices[ed.start].pos, e.vertices[ed.end].pos))
+            .collect()
+    }
+
+    #[test]
+    fn plane_axes_follow_model_axes_and_level_lines() {
+        let close = |a: DVec3, b: DVec3| (a - b).length() < 1e-9;
+        assert_eq!(plane_axes(DVec3::Z), (DVec3::X, DVec3::Y));
+        assert_eq!(plane_axes(-DVec3::Z), (DVec3::X, -DVec3::Y));
+        let (u, w) = plane_axes(DVec3::X);
+        assert!(close(u, DVec3::Y) && close(w, DVec3::Z));
+        let (u, w) = plane_axes(-DVec3::Y);
+        assert!(close(u, DVec3::X) && close(w, DVec3::Z));
+        for az in [0.0, 30.0, 90.0, 137.0, 200.0, 315.0] {
+            let (n, level, up) = roof(az);
+            let (u, w) = plane_axes(n);
+            assert!(close(u, level) && close(w, up), "azimuth {az}");
+            assert!(u.z.abs() < 1e-12 && w.z > 0.0);
+            assert!(close(u.cross(w), n));
+        }
+        // Facing down (an overhang's soffit): still level and right-handed.
+        let (u, w) = plane_axes(-roof(40.0).0);
+        assert!(u.z.abs() < 1e-12 && close(u.cross(w), -roof(40.0).0));
+    }
+
+    #[test]
+    fn rectangle_on_a_roof_has_level_sides_and_sides_down_the_slope() {
+        for az in [0.0, 35.0, 90.0, 250.0] {
+            let (n, level, up) = roof(az);
+            let a = v(3.0, -2.0, 5.0);
+            let mut e = Entities::new();
+            let mut t = Rectangle::default();
+            t.click(&mut e, &on_face(a, n));
+            assert!(t.click(&mut e, &on_face(a + level * 10.0 - up * 6.0, n)));
+            assert_eq!(e.faces.len(), 1);
+            let edges = rect_edges(&e);
+            assert_eq!(edges.len(), 4);
+            let flat = edges.iter().filter(|(p, q)| (p.z - q.z).abs() < 1e-9);
+            let sloped = edges
+                .iter()
+                .filter(|(p, q)| (q - p).normalize().cross(up).length() < 1e-9);
+            assert_eq!(flat.clone().count(), 2, "azimuth {az}");
+            assert_eq!(sloped.clone().count(), 2, "azimuth {az}");
+            assert!(
+                flat.map(|(p, q)| p.distance(*q))
+                    .all(|l| (l - 10.0).abs() < 1e-9)
+            );
+            assert!(
+                sloped
+                    .map(|(p, q)| p.distance(*q))
+                    .all(|l| (l - 6.0).abs() < 1e-9)
+            );
+            // Every corner stays on the roof.
+            assert!(e.vertices.values().all(|x| (x.pos - a).dot(n).abs() < 1e-9));
+        }
+    }
+
+    #[test]
+    fn rectangle_on_a_roof_projects_an_off_roof_cursor() {
+        let (n, level, up) = roof(20.0);
+        let a = v(0.0, 0.0, 10.0);
+        let c = rectangle_corners(a, a + level * 4.0 + up * 3.0 + v(0.0, 0.0, -50.0), n);
+        assert!(c.iter().all(|p| (p - a).dot(n).abs() < 1e-9));
+        assert!((c[1].z - c[0].z).abs() < 1e-9 && (c[2].z - c[3].z).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rectangle_on_a_wall_runs_horizontal_and_vertical() {
+        let mut e = Entities::new();
+        let mut t = Rectangle::default();
+        t.click(&mut e, &on_face(v(5.0, 0.0, 0.0), DVec3::X));
+        assert!(t.click(&mut e, &on_face(v(5.0, -4.0, 3.0), DVec3::X)));
+        for (p, q) in rect_edges(&e) {
+            let d = (q - p).normalize();
+            assert!(d.cross(DVec3::Y).length() < 1e-9 || d.cross(DVec3::Z).length() < 1e-9);
+        }
+        assert!(e.vertices.values().any(|x| x.pos == v(5.0, -4.0, 3.0)));
+        // A skewed wall: one side level, the other plumb.
+        let n = v(1.0, 1.0, 0.0).normalize();
+        let c = rectangle_corners(v(0.0, 0.0, 0.0), v(-3.0, 3.0, 2.0), n);
+        assert!((c[1].z - c[0].z).abs() < 1e-9);
+        assert!((c[3] - c[0]).normalize().distance(DVec3::Z) < 1e-9);
+    }
+
+    #[test]
+    fn typed_rectangle_on_a_roof_follows_the_cursor_quadrant() {
+        let (n, level, up) = roof(60.0);
+        let a = v(1.0, 2.0, 3.0);
+        for (sl, su) in [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)] {
+            let mut e = Entities::new();
+            let mut t = Rectangle::default();
+            t.click(&mut e, &on_face(a, n));
+            let cur = on_face(a + level * 2.0 * sl + up * 0.5 * su, n);
+            assert!(t.typed(&mut e, Some(&cur), "8,5", LengthUnit::Inch));
+            let far = a + level * 8.0 * sl + up * 5.0 * su;
+            assert!(e.vertices.values().any(|x| x.pos.distance(far) < 1e-9));
+            assert!(
+                e.vertices
+                    .values()
+                    .any(|x| x.pos.distance(a + level * 8.0 * sl) < 1e-9)
+            );
+        }
+        // On a wall facing red, `w` runs green and `h` blue.
+        let mut e = Entities::new();
+        let mut t = Rectangle::default();
+        t.click(&mut e, &on_face(v(0.0, 0.0, 0.0), DVec3::X));
+        let cur = on_face(v(0.0, -1.0, 1.0), DVec3::X);
+        assert!(t.typed(&mut e, Some(&cur), "8,5", LengthUnit::Inch));
+        assert!(e.vertices.values().any(|x| x.pos == v(0.0, -8.0, 5.0)));
+        assert!(e.vertices.values().any(|x| x.pos == v(0.0, -8.0, 0.0)));
+    }
+
+    #[test]
+    fn arrow_keys_lock_the_rectangle_plane_before_and_after_the_first_corner() {
+        let (n, _, _) = roof(45.0);
+        // Locked before: blue keeps the rectangle flat on a roof.
+        let mut e = Entities::new();
+        let mut t = Rectangle::default();
+        t.lock_plane(Axis::Blue);
+        t.click(&mut e, &on_face(v(0.0, 0.0, 0.0), n));
+        assert!(t.click(&mut e, &on_face(v(4.0, 3.0, 0.0), n)));
+        assert!(e.vertices.values().all(|x| x.pos.z == 0.0));
+        // Locked after: red stands it on the green-blue plane; pressed again, unlocked.
+        let mut e = Entities::new();
+        let mut t = Rectangle::default();
+        t.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        t.lock_plane(Axis::Red);
+        let c = t.corners(v(0.0, 4.0, 3.0)).unwrap();
+        assert_eq!(c[1], v(0.0, 4.0, 0.0));
+        t.lock_plane(Axis::Red);
+        assert!(t.click(&mut e, &inf(v(4.0, 3.0, 0.0))));
+        assert!(e.vertices.values().all(|x| x.pos.z == 0.0));
+    }
+
+    #[test]
+    fn circle_on_a_roof_lies_in_it_and_relocks() {
+        let (n, level, _) = roof(110.0);
+        let mut t = Polygon::circle();
+        let mut e = Entities::new();
+        t.click(&mut e, &on_face(v(0.0, 0.0, 0.0), n));
+        let arc = t.arc(v(0.0, 0.0, 0.0), Some(5.0)).unwrap();
+        assert!((arc.x_axis - level).length() < 1e-9);
+        assert!(arc.points().iter().all(|p| p.dot(n).abs() < 1e-9));
+        t.lock_plane(Axis::Blue);
+        let arc = t.arc(v(3.0, 4.0, 9.0), None).unwrap();
+        assert!(arc.points().iter().all(|p| p.z.abs() < 1e-9));
+        assert_eq!(arc.radius, 5.0);
     }
 
     #[test]
