@@ -62,7 +62,7 @@
 //! | Components | Select tab: "In Model" list of [`TrayData::components`] (icon, name, instance count; groups are not definitions and not listed), Details menu with Purge Unused; header and Edit tab (name, description) for [`TrayData::current_component`] | [`Event::ComponentPick`], [`Event::ComponentEdit`], [`Event::ComponentPurge`] |
 //! | Outliner  | [`TrayData::outliner`] tree under [`TrayData::outliner_root`], filter field | [`Event::OutlinerSelect`] |
 //! | Scenes    | [`TrayData::scenes`], [`TrayData::active_scene`] | [`Event::SceneAdd`], [`Event::SceneDelete`], [`Event::SceneUpdate`], [`Event::SceneActivate`] |
-//! | Styles    | [`TrayData::style`]: edges, back edges, profiles, depth cue, extension, section cut width, face style, X-ray | [`Event::StyleChanged`] |
+//! | Styles    | [`TrayData::style`]: edges, back edges, profiles, depth cue, extension, section cut width, face style, X-ray; [`TrayData::style_extras`] and [`TrayData::watermarks`]: edge color, endpoints, jitter, face colors, transparency, ambient occlusion, background, watermarks, modeling colors | [`Event::StyleChanged`], [`Event::StyleExtrasChanged`], [`Event::WatermarkAdd`], [`Event::WatermarkRemove`], [`Event::WatermarkChanged`] |
 //! | Shadows   | [`TrayData::shadows`]: on/off, time, date, light, dark, on faces/ground | [`Event::ShadowsChanged`] |
 //! | Fog       | [`TrayData::fog`]: on/off, start and end distance, background or own color | [`Event::FogChanged`] |
 //! | Soften Edges | [`TrayData::soften`]: angle between normals, smooth normals, soften coplanar | [`Event::SoftenChanged`] |
@@ -125,6 +125,7 @@ mod menu;
 mod panels;
 mod panels2;
 mod status;
+mod style_panel;
 mod theme;
 mod toolbar;
 mod tray;
@@ -138,6 +139,9 @@ use mt_spec::Spec;
 pub use dialog::{Dialog, DialogResponse};
 pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use menu::menu_list;
+pub use style_panel::{
+    EDGE_COLOR_MODES, StyleExtras, WATERMARK_ANCHORS, WATERMARK_MODES, WatermarkRow,
+};
 pub use theme::apply as apply_theme;
 pub use tray_data::{
     ComponentBehavior, ComponentRow, DASH_NAMES, FaceStyle, FogSettings, GLUE_NAMES, MaterialRow,
@@ -315,6 +319,16 @@ pub enum Event {
 
     /// Styles: any setting changed; the complete new settings.
     StyleChanged(StyleSettings),
+    /// Styles Edit tab extras changed (edge color, endpoints, jitter, face colors,
+    /// transparency, ambient occlusion, background, modeling colors); the complete
+    /// new settings.
+    StyleExtrasChanged(StyleExtras),
+    /// Styles > Watermark > Add: the app asks for an image.
+    WatermarkAdd,
+    /// Styles > Watermark > Remove this watermark.
+    WatermarkRemove(usize),
+    /// Styles > Watermark: this watermark's settings changed.
+    WatermarkChanged(usize, WatermarkRow),
     /// Shadows: any setting changed; the complete new settings.
     ShadowsChanged(ShadowSettings),
     /// Fog: any setting changed; the complete new settings.

@@ -94,6 +94,50 @@ pub fn style_items(s: &StyleSettings) -> Vec<(i32, OptionValue)> {
         (7015, Bool(s.section_fill)),
         (7016, Int(i32::from_le_bytes([r, g, b, 0xff]))),
     ];
+    // Styles panel extras (style_extras): edge color, endpoints, jitter, transparency,
+    // background, modeling colors, ambient occlusion on/off, distance and intensity.
+    use crate::style_extras::{TransparencyQuality, color_item};
+    let e = &s.edge_look;
+    let bg = &s.background;
+    let mc = &s.modeling_colors;
+    let ao = &s.ambient_occlusion;
+    items.extend([
+        (1002, Int(e.color_mode.item())),
+        (1010, Bool(e.endpoints)),
+        (1011, px(e.endpoint_length)),
+        (1012, Bool(e.jitter)),
+        (1014, Int(color_item(e.color))),
+        (2005, Bool(!s.face_look.transparency_off)),
+        (
+            2006,
+            Int(match s.face_look.quality {
+                TransparencyQuality::Faster => 0,
+                TransparencyQuality::Nicer => 2,
+            }),
+        ),
+        (4000, Int(color_item(bg.color))),
+        (4001, Int(color_item(bg.sky_color))),
+        (4002, Bool(bg.sky)),
+        (4003, Int(color_item(bg.ground_color))),
+        (4004, Bool(bg.ground)),
+        // GroundTransparency as a percentage (unverified scale).
+        (
+            4005,
+            Int((bg.ground_transparency.clamp(0.0, 1.0) * 100.0).round() as i32),
+        ),
+        (4006, Bool(bg.ground_from_below)),
+        (4007, Int(color_item(bg.horizon_color))),
+        (5000, Bool(!s.watermarks.is_empty())),
+        (7000, Int(color_item(mc.selected))),
+        (7001, Int(color_item(mc.locked))),
+        (7002, Int(color_item(mc.guides))),
+        (7003, Int(color_item(mc.section_active))),
+        (7004, Int(color_item(mc.section_inactive))),
+        (7005, Int(color_item(mc.section_cut))),
+        (8100, Bool(ao.enabled)),
+        (8102, OptionValue::Double(f64::from(ao.distance))),
+        (8103, OptionValue::Double(f64::from(ao.intensity))),
+    ]);
     let render = match s.face_style {
         FaceStyle::Wireframe => Some((0, false)),
         FaceStyle::HiddenLine => Some((1, false)),

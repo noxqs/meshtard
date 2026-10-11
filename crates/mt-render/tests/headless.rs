@@ -204,11 +204,13 @@ fn cube_edges() -> Vec<(DVec3, DVec3, [DVec3; 2])> {
     out
 }
 
-/// Spec style without axes, so they do not cross the test geometry.
+/// Spec style without axes, so they do not cross the test geometry, and without the
+/// ground, which hides the lower half of the test cubes (they straddle z = 0).
 fn face_style() -> Style {
     let spec = Spec::builtin().unwrap().default_model;
     Style {
         axes: None,
+        ground: None,
         ..Style::from_spec(&spec)
     }
 }
@@ -322,7 +324,16 @@ fn check_edges(camera: &Camera, name: &str) {
         eprintln!("SKIPPED: no wgpu adapter");
         return;
     };
-    let mut viewport = Viewport::new(&device, face_style());
+    // The ground color behind the cube (as when the ground was drawn behind
+    // everything): edges against the lighter sky are too little contrast for the
+    // half-coverage check.
+    let ground = Spec::builtin().unwrap().default_model.ground.color;
+    let style = Style {
+        sky: None,
+        background: ground,
+        ..face_style()
+    };
+    let mut viewport = Viewport::new(&device, style);
     // Red back sides: they must never show from outside, not even along silhouettes.
     let gray = [0.85, 0.85, 0.85, 1.0];
     let (vertices, indices) = quads_mesh(&cube_quads(), gray, [1.0, 0.0, 0.0, 1.0]);
@@ -1418,4 +1429,354 @@ fn render_image_keeps_screen_targets_and_can_be_transparent() {
     // The on-screen frame is untouched.
     let view = viewport.color_view().unwrap();
     assert_eq!(view.texture().width(), SIZE[0]);
+}
+
+// ---------------------------------------------------------------- Styles extras
+
+/// Plain white background, no axes or ground.
+fn plain_style() -> Style {
+    Style {
+        sky: None,
+        background: [1.0, 1.0, 1.0],
+        ..face_style()
+    }
+}
+
+/// Horizontal quad from (x0, y0) to (x1, y1) at height z, facing up.
+fn flat_quad(x0: f64, y0: f64, x1: f64, y1: f64, z: f64) -> (DVec3, [DVec3; 4]) {
+    let c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    (DVec3::Z, c.map(|(x, y)| DVec3::new(x, y, z)))
+}
+
+/// Pixels darker than `max_luma` in the rectangle (inclusive).
+fn dark_in(img: &image::RgbaImage, x: [u32; 2], y: [u32; 2], max_luma: i32) -> usize {
+    let mut n = 0;
+    for yy in y[0]..=y[1] {
+        for xx in x[0]..=x[1] {
+            if luma(img.get_pixel(xx, yy)) < max_luma {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn endpoints_widen_line_ends_and_jitter_adds_a_stroke() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let camera = top_down();
+    let mut style = plain_style();
+    let mut viewport = Viewport::new(&device, style.clone());
+    viewport.set_edges(&device, &[flat_line([-50.0, 0.0, 0.0], [50.0, 0.0, 0.0])]);
+    let a = camera
+        .project(DVec3::new(-50.0, 0.0, 0.0), viewport_px())
+        .unwrap();
+    let b = camera
+        .project(DVec3::new(50.0, 0.0, 0.0), viewport_px())
+        .unwrap();
+    let y = a.y.round() as u32;
+    let rows = [y - 6, y + 6];
+    let near_end =
+        |img: &image::RgbaImage| dark_in(img, [b.x as u32 - 4, b.x as u32 - 2], rows, 200);
+    let middle = |img: &image::RgbaImage| {
+        let m = ((a.x + b.x) / 2.0) as u32;
+        dark_in(img, [m - 1, m + 1], rows, 200)
+    };
+    let plain = render(&device, &queue, &mut viewport, &camera, "endpoints_off");
+    assert_eq!(near_end(&plain), middle(&plain), "uniform line");
+    style.endpoints = Some(8.0);
+    viewport.set_style(&device, style.clone());
+    let ends = render(&device, &queue, &mut viewport, &camera, "endpoints_on");
+    assert!(
+        near_end(&ends) > middle(&ends),
+        "ends wider: {} vs {}",
+        near_end(&ends),
+        middle(&ends)
+    );
+    assert_eq!(middle(&ends), middle(&plain), "the middle stays");
+
+    style.endpoints = None;
+    style.jitter = true;
+    viewport.set_style(&device, style);
+    let jitter = render(&device, &queue, &mut viewport, &camera, "jitter_on");
+    // Ink: how much darker than white the line's surroundings are.
+    let ink = |img: &image::RgbaImage| {
+        let mut sum = 0;
+        for yy in y - 8..=y + 8 {
+            for xx in a.x as u32 - 8..=b.x as u32 + 8 {
+                sum += 255 - luma(img.get_pixel(xx, yy));
+            }
+        }
+        sum
+    };
+    // Two offset strokes put down more ink than one.
+    assert!(
+        ink(&jitter) * 10 > ink(&plain) * 12,
+        "{} vs {}",
+        ink(&jitter),
+        ink(&plain)
+    );
+}
+
+#[test]
+fn ground_hides_what_is_below_it_unless_transparent() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let spec = Spec::builtin().unwrap().default_model;
+    let mut style = Style {
+        axes: None,
+        ..Style::from_spec(&spec)
+    };
+    let camera = Camera {
+        eye: DVec3::new(0.0, -100.0, 500.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+        two_point: false,
+    };
+    let mut viewport = Viewport::new(&device, style.clone());
+    // Red below the ground, green on it.
+    let (mut vertices, mut indices) =
+        quads_mesh(&[flat_quad(-100.0, -40.0, -20.0, 40.0, -10.0)], RED, RED);
+    let green = [0.2, 0.8, 0.2, 1.0];
+    let (gv, gi) = quads_mesh(&[flat_quad(20.0, -40.0, 100.0, 40.0, 0.0)], green, green);
+    let base = vertices.len() as u32;
+    vertices.extend(gv);
+    indices.extend(gi.iter().map(|i| i + base));
+    viewport.set_faces(&device, &vertices, &indices);
+    let img = render(&device, &queue, &mut viewport, &camera, "ground_opaque");
+    let below = pixel_at(&img, &camera, DVec3::new(-60.0, 0.0, -10.0));
+    let on = pixel_at(&img, &camera, DVec3::new(60.0, 0.0, 0.0));
+    assert!(
+        close(&below, spec.ground.color, 6),
+        "ground hides red: {below:?}"
+    );
+    assert!(on[1] > on[0] + 60, "a face on the ground shows: {on:?}");
+    style.ground_opacity = 0.5;
+    viewport.set_style(&device, style);
+    let img = render(&device, &queue, &mut viewport, &camera, "ground_half");
+    let below = pixel_at(&img, &camera, DVec3::new(-60.0, 0.0, -10.0));
+    assert!(
+        below[0] > below[1] + 40,
+        "red shows through the translucent ground: {below:?}"
+    );
+}
+
+#[test]
+fn transparency_off_draws_translucent_faces_opaque() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = plain_style();
+    let mut viewport = Viewport::new(&device, style.clone());
+    let blue = [0.1, 0.1, 0.9, 0.3];
+    let (v, i) = quads_mesh(&[flat_quad(-50.0, -50.0, 50.0, 50.0, 0.0)], blue, blue);
+    viewport.set_faces(&device, &v, &i);
+    let camera = top_down();
+    let img = render(&device, &queue, &mut viewport, &camera, "transparency_on");
+    let on = pixel_at(&img, &camera, DVec3::ZERO);
+    style.transparency = mt_render::Transparency::Off;
+    viewport.set_style(&device, style.clone());
+    let img = render(&device, &queue, &mut viewport, &camera, "transparency_off");
+    let off = pixel_at(&img, &camera, DVec3::ZERO);
+    assert!(on[0] > 150, "mostly white through 30% blue: {on:?}");
+    assert!(off[0] < 60 && off[2] > 150, "opaque blue: {off:?}");
+    // Faster draws them unsorted, still blended.
+    style.transparency = mt_render::Transparency::Faster;
+    viewport.set_style(&device, style);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        "transparency_faster",
+    );
+    assert_eq!(pixel_at(&img, &camera, DVec3::ZERO), on);
+}
+
+#[test]
+fn ambient_occlusion_darkens_inside_corners() {
+    ambient_occlusion_corner(4);
+}
+
+/// The occlusion pass reads a plain (not multisampled) depth texture and draws into
+/// the result directly.
+#[test]
+fn ambient_occlusion_without_multisampling() {
+    ambient_occlusion_corner(1);
+}
+
+fn ambient_occlusion_corner(samples: u32) {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = plain_style();
+    let mut viewport = Viewport::with_samples(&device, style.clone(), samples);
+    let gray = [0.8, 0.8, 0.8, 1.0];
+    // A floor and a wall meeting along x = 0.
+    let wall = (
+        DVec3::NEG_X,
+        [
+            DVec3::new(0.0, -100.0, 0.0),
+            DVec3::new(0.0, -100.0, 100.0),
+            DVec3::new(0.0, 100.0, 100.0),
+            DVec3::new(0.0, 100.0, 0.0),
+        ],
+    );
+    let (v, i) = quads_mesh(
+        &[flat_quad(-200.0, -100.0, 0.0, 100.0, 0.0), wall],
+        gray,
+        gray,
+    );
+    viewport.set_faces(&device, &v, &i);
+    let camera = Camera {
+        eye: DVec3::new(-300.0, -60.0, 250.0),
+        target: DVec3::new(-40.0, 0.0, 0.0),
+        fov_deg: 35.0,
+        perspective: true,
+        two_point: false,
+    };
+    let corner = DVec3::new(-2.0, 0.0, 0.0);
+    let open = DVec3::new(-120.0, 0.0, 0.0);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        &format!("ao_off_{samples}x"),
+    );
+    let (c0, o0) = (
+        pixel_at(&img, &camera, corner),
+        pixel_at(&img, &camera, open),
+    );
+    style.ambient_occlusion = Some(mt_render::AmbientOcclusion {
+        intensity: 1.0,
+        distance: 20.0,
+        color: [0.0; 3],
+    });
+    viewport.set_style(&device, style);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        &format!("ao_on_{samples}x"),
+    );
+    let (c1, o1) = (
+        pixel_at(&img, &camera, corner),
+        pixel_at(&img, &camera, open),
+    );
+    eprintln!("corner {c0:?} -> {c1:?}, open floor {o0:?} -> {o1:?}");
+    assert!(luma(&c1) + 15 < luma(&c0), "the corner darkens");
+    assert!((luma(&o1) - luma(&o0)).abs() <= 4, "open floor stays");
+}
+
+fn red_png() -> Vec<u8> {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([230, 20, 20, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png
+}
+
+#[test]
+fn watermarks_draw_under_and_over_the_model() {
+    watermarks_under_and_over(4);
+}
+
+#[test]
+fn watermarks_without_multisampling() {
+    watermarks_under_and_over(1);
+}
+
+fn watermarks_under_and_over(samples: u32) {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let image: std::sync::Arc<[u8]> = red_png().into();
+    let mark = |overlay: bool, opacity: f32| mt_render::Watermark {
+        image: image.clone(),
+        overlay,
+        opacity,
+        placement: mt_render::WatermarkPlacement::Stretched { lock_aspect: false },
+    };
+    let mut style = plain_style();
+    style.watermarks = vec![mark(false, 1.0)];
+    let mut viewport = Viewport::with_samples(&device, style.clone(), samples);
+    let gray = [0.6, 0.6, 0.6, 1.0];
+    let (v, i) = quads_mesh(&[flat_quad(-50.0, -50.0, 50.0, 50.0, 0.0)], gray, gray);
+    viewport.set_faces(&device, &v, &i);
+    let camera = top_down();
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        &format!("watermark_under_{samples}x"),
+    );
+    let face = pixel_at(&img, &camera, DVec3::ZERO);
+    let outside = *img.get_pixel(5, 5);
+    assert!(
+        close(&outside, [230.0 / 255.0, 20.0 / 255.0, 20.0 / 255.0], 3),
+        "{outside:?}"
+    );
+    assert!(
+        face[0].abs_diff(face[1]) < 5,
+        "the face covers it: {face:?}"
+    );
+    style.watermarks = vec![mark(true, 0.5)];
+    viewport.set_style(&device, style);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        &format!("watermark_over_{samples}x"),
+    );
+    let face = pixel_at(&img, &camera, DVec3::ZERO);
+    assert!(face[0] > face[1] + 50, "red half over the face: {face:?}");
+    assert!(img.get_pixel(5, 5)[1] > 100, "half over white");
+}
+
+#[test]
+fn selection_dots_use_the_selection_color() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = plain_style();
+    style.selection_color = [0.0, 1.0, 0.0];
+    let mut viewport = Viewport::new(&device, style);
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let (v, i) = quads_mesh(&[flat_quad(-50.0, -50.0, 50.0, 50.0, 0.0)], white, white);
+    viewport.set_faces(&device, &v, &i);
+    viewport.set_selected_faces(&device, &v, &i);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera_for_dots(),
+        "selection_green",
+    );
+    let green = img
+        .pixels()
+        .filter(|p| p[1] > 200 && p[0] < 60 && p[2] < 60)
+        .count();
+    let blue = img
+        .pixels()
+        .filter(|p| p[2] > 200 && p[0] < 60 && p[1] < 60)
+        .count();
+    assert!(green > 100 && blue == 0, "green {green}, blue {blue}");
+}
+
+fn camera_for_dots() -> Camera {
+    top_down()
 }

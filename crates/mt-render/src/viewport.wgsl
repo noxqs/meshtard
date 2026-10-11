@@ -47,6 +47,13 @@ struct Globals {
     depth_range: vec4<f32>,
     // rgb: fog color, w: 1 to fade towards the background instead.
     fog_color: vec4<f32>,
+    // x: endpoint length in points (0 = off), y: 1 for jitter, z: 1 when transparency
+    // is off (faces opaque), w: ground opacity.
+    extra: vec4<f32>,
+    // x: sky gradient exponent (horizon blend).
+    extra2: vec4<f32>,
+    // Selected faces' dot color.
+    select_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -144,31 +151,71 @@ fn background_color(origin: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
     let hits_ground = (origin.z > 0.0 && dir.z < 0.0) || (from_below && origin.z < 0.0 && dir.z > 0.0);
     var color = g.background.rgb;
     if (ground_on && hits_ground) {
-        color = g.ground.rgb;
-    } else if (g.sky_horizon.w > 0.5) {
-        let t = pow(clamp(dir.z, 0.0, 1.0), 0.5);
-        color = mix(g.sky_horizon.rgb, g.sky_zenith.rgb, t);
+        color = mix(color, g.ground.rgb, g.extra.w);
+    } else {
+        color = sky_color(dir);
     }
     return color;
 }
 
+// The sky (or background color without one) along `dir`, ignoring the ground.
+fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+    if (g.sky_horizon.w > 0.5) {
+        let t = pow(clamp(dir.z, 0.0, 1.0), max(g.extra2.x, 0.01));
+        return mix(g.sky_horizon.rgb, g.sky_zenith.rgb, t);
+    }
+    return g.background.rgb;
+}
+
+// Whether the ray `origin` + t `dir` hits the drawn ground plane z = 0.
+fn ray_hits_ground(origin: vec3<f32>, dir: vec3<f32>) -> bool {
+    let from_below = g.background.w > 0.5;
+    return g.ground.w > 0.5
+        && ((origin.z > 0.0 && dir.z < 0.0) || (from_below && origin.z < 0.0 && dir.z > 0.0));
+}
+
+// Sky and background color. The ground is drawn by `ground_fs` after the opaque
+// faces, so it can hide what is below it.
 @fragment
 fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
     let origin = unproject(in.ndc, 1.0);
     let dir = normalize(unproject(in.ndc, 0.5) - origin);
-    var color = background_color(origin, dir);
+    if (ray_hits_ground(origin, dir)) {
+        return vec4<f32>(g.background.rgb, 1.0);
+    }
+    return vec4<f32>(sky_color(dir), 1.0);
+}
 
-    // Shadows on the ground plane z = 0, seen from above. Unshadowed ground keeps its
-    // color; shadowed ground is scaled by dark / (dark + light * sun.z), the ratio the
-    // face shading would give a horizontal face.
-    if (g.shadow.w > 0.5 && origin.z > 0.0 && dir.z < 0.0) {
-        let p = origin + dir * (-origin.z / dir.z);
+struct GroundOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+// The ground plane z = 0 at its own depth (a hair farther, so faces lying on it win),
+// blended with the ground opacity over the background and over geometry below it.
+// Shadows on the ground, seen from above: unshadowed ground keeps its color; shadowed
+// ground is scaled by dark / (dark + light * sun.z), the ratio the face shading would
+// give a horizontal face.
+@fragment
+fn ground_fs(in: BgOut) -> GroundOut {
+    let origin = unproject(in.ndc, 1.0);
+    let dir = normalize(unproject(in.ndc, 0.5) - origin);
+    if (!ray_hits_ground(origin, dir)) {
+        discard;
+    }
+    let p = origin + dir * (-origin.z / dir.z);
+    var color = g.ground.rgb;
+    if (g.shadow.w > 0.5 && origin.z > 0.0) {
         let lit = min(g.shadow.y + g.shadow.x * g.sun.z, 1.0);
         let dark = min(g.shadow.y, lit);
         let v = sun_visibility(p, vec3<f32>(0.0, 0.0, 1.0));
         color *= mix(dark / max(lit, 1e-4), 1.0, v);
     }
-    return vec4<f32>(color, 1.0);
+    let c = g.view_proj * vec4<f32>(p, 1.0);
+    var out: GroundOut;
+    out.color = vec4<f32>(apply_fog(color, p, in.pos.xy), g.extra.w);
+    out.depth = clamp(c.z / c.w * (1.0 - 1e-5), 0.0, 1.0);
+    return out;
 }
 
 // ---------------------------------------------------------------- faces
@@ -235,6 +282,10 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         }
         color = vec4<f32>(texel.rgb, select(color.a * texel.a, 1.0, color.a >= 1.0));
     }
+    // Face Settings > Enable transparency off: materials draw opaque.
+    if (g.extra.z > 0.5) {
+        color.a = 1.0;
+    }
     color.a = min(color.a, g.face_style.y);
     if (g.face_style.x > 1.5) {
         color = vec4<f32>(select(g.mono_back.rgb, g.mono_front.rgb, front), color.a);
@@ -275,7 +326,7 @@ fn select_fs(in: FaceOut) -> @location(0) vec4<f32> {
     if (p.x % 3u != 0u || p.y % 3u != 0u) {
         discard;
     }
-    return vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return vec4<f32>(g.select_color.rgb, 1.0);
 }
 
 // ---------------------------------------------------------------- shadow map
@@ -355,8 +406,9 @@ struct LineOut {
     @location(0) color: vec4<f32>,
     // Segment start in framebuffer pixels (y down) and unit direction.
     @location(1) @interpolate(flat) start_dir: vec4<f32>,
-    // x: width in pixels, y: dash length in pixels, z: 1 for a model edge.
-    @location(2) @interpolate(flat) style: vec3<f32>,
+    // x: width in pixels, y: dash length in pixels, z: 1 for a model edge, w: segment
+    // length in pixels.
+    @location(2) @interpolate(flat) style: vec4<f32>,
     // World position along the segment, for the section plane.
     @location(3) world: vec3<f32>,
 };
@@ -401,15 +453,26 @@ fn back_line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     return line_vertex(vi, s, true);
 }
 
-fn line_vertex(vi: u32, s: Segment, back: bool) -> LineOut {
+// A pseudo-random number in 0..1 from a segment and a seed (Jitter).
+fn hash(s: Segment, seed: f32) -> f32 {
+    let k = dot(s.a + s.b * 1.37, vec3<f32>(12.9898, 78.233, 37.719)) + seed * 19.19;
+    return fract(sin(k) * 43758.5453);
+}
+
+// Vertices 0..5 draw the segment's quad; 6..11 a second, jittered stroke of model
+// edges when Jitter is on (else nothing).
+fn line_vertex(vi_all: u32, s: Segment, back: bool) -> LineOut {
     var out: LineOut;
+    let stroke = vi_all / 6u;
+    let vi = vi_all % 6u;
     var ca = g.view_proj * vec4<f32>(s.a, 1.0);
     var cb = g.view_proj * vec4<f32>(s.b, 1.0);
     let model = s.flags == 1u;
     let profile = is_profile(s);
     // Behind the camera, or Edges off and not a profile.
     let hidden = model && g.edge_style.x < 0.5 && !profile;
-    if ((ca.w < g.viewport.w && cb.w < g.viewport.w) || hidden) {
+    let jitter = model && g.extra.y > 0.5 && !back;
+    if ((ca.w < g.viewport.w && cb.w < g.viewport.w) || hidden || (stroke > 0u && !jitter)) {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
@@ -432,6 +495,18 @@ fn line_vertex(vi: u32, s: Segment, back: bool) -> LineOut {
         sa -= d * ext;
         sb += d * ext;
     }
+    // Jitter: each stroke's ends moved a little across and along the line.
+    if (jitter) {
+        let d0 = sb - sa;
+        if (length(d0) > 1e-6) {
+            let d = normalize(d0);
+            let n = vec2<f32>(-d.y, d.x);
+            let amount = 1.5 * ppp;
+            let k = f32(stroke) * 4.0;
+            sa += (n * (hash(s, k) - 0.5) * 2.0 + d * (hash(s, k + 1.0) - 0.5) * 2.0) * amount;
+            sb += (n * (hash(s, k + 2.0) - 0.5) * 2.0 + d * (hash(s, k + 3.0) - 0.5) * 2.0) * amount;
+        }
+    }
     var along = sb - sa;
     let len = length(along);
     var dir = vec2<f32>(1.0, 0.0);
@@ -448,7 +523,9 @@ fn line_vertex(vi: u32, s: Segment, back: bool) -> LineOut {
 
     // Half width plus one pixel of feather for antialiasing.
     let width = line_width(s, profile && !back);
-    let half = width * ppp * 0.5 + 1.0;
+    // Endpoints: model edge ends are drawn ENDPOINT_EXTRA points wider.
+    let ends_on = model && g.extra.x > 0.0 && !back;
+    let half = (width + select(0.0, ENDPOINT_EXTRA, ends_on)) * ppp * 0.5 + 1.0;
     let c = select(ca, cb, end > 0.5);
     let base = select(sa, sb, end > 0.5);
     let extend = select(-half, half, end > 0.5);
@@ -459,9 +536,12 @@ fn line_vertex(vi: u32, s: Segment, back: bool) -> LineOut {
     out.world = select(wa, wb, end > 0.5);
     // Framebuffer y runs down; everything above uses y up.
     out.start_dir = vec4<f32>(sa.x, size.y - sa.y, dir.x, -dir.y);
-    out.style = vec3<f32>(width * ppp, s.style.y * ppp, select(0.0, 1.0, model));
+    out.style = vec4<f32>(width * ppp, s.style.y * ppp, select(0.0, 1.0, model), len);
     return out;
 }
+
+// How much wider (points) Endpoints draws the ends of model edges (unverified).
+const ENDPOINT_EXTRA: f32 = 2.0;
 
 // Model edges: clipped by the section plane.
 @fragment
@@ -497,10 +577,14 @@ fn fogged_line(in: LineOut, c: vec4<f32>) -> vec4<f32> {
 }
 
 fn line_color(in: LineOut, dash: f32) -> vec4<f32> {
-    let width = in.style.x;
+    var width = in.style.x;
     let rel = in.pos.xy - in.start_dir.xy;
     let dir = in.start_dir.zw;
     let along = dot(rel, dir);
+    let ends = g.extra.x * g.viewport.z;
+    if (in.style.z > 0.5 && ends > 0.0 && (along < ends || along > in.style.w - ends)) {
+        width += ENDPOINT_EXTRA * g.viewport.z;
+    }
     let across = dot(rel, vec2<f32>(-dir.y, dir.x));
     if (dash > 0.0 && fract(along / (2.0 * dash)) > 0.5) {
         discard;

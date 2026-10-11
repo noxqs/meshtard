@@ -193,6 +193,14 @@ pub struct StyleSettings {
     /// View > Component Edit > Hide Similar Components: while a component is open,
     /// its other instances are not drawn.
     pub hide_similar_components: bool,
+    /// Styles panel Edit tab extras (see [`crate::style_extras`]).
+    pub edge_look: crate::style_extras::EdgeLook,
+    pub face_look: crate::style_extras::FaceLook,
+    pub ambient_occlusion: crate::style_extras::AmbientOcclusion,
+    pub background: crate::style_extras::Background,
+    /// Overlays and underlays, bottom first. Model-only.
+    pub watermarks: Vec<crate::style_extras::Watermark>,
+    pub modeling_colors: crate::style_extras::ModelingColors,
 }
 
 /// Window > Fog. Distances are fractions of the model's depth as seen from the camera
@@ -247,6 +255,12 @@ impl Default for StyleSettings {
             // Both off by default (unverified).
             hide_rest_of_model: false,
             hide_similar_components: false,
+            edge_look: Default::default(),
+            face_look: Default::default(),
+            ambient_occlusion: Default::default(),
+            background: Default::default(),
+            watermarks: Vec::new(),
+            modeling_colors: Default::default(),
         }
     }
 }

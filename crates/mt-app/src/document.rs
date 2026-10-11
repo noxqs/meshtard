@@ -10,8 +10,8 @@ use mt_kernel::{
 };
 use mt_render::{Camera, FaceVertex, Segment};
 
-/// Edge color and width of the default style. Draft; check against SketchUp 2026.
-const EDGE_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// Edge width of the default style (the color is the style's, see `style_view`).
+/// Draft; check against SketchUp 2026.
 const EDGE_WIDTH: f32 = 1.0;
 
 pub struct Document {
@@ -188,14 +188,8 @@ const HIDDEN_DASH: f32 = 4.0;
 const HIDDEN_MESH_DASH: f32 = 2.0;
 const HIDDEN_FACE_ALPHA: f32 = 0.35;
 
-/// Section plane outline colors (drafts; SketchUp's are unverified).
-const SECTION_COLOR: [f32; 4] = [0.85, 0.55, 0.2, 1.0];
-const SECTION_ACTIVE: [f32; 4] = [0.95, 0.4, 0.05, 1.0];
-
 /// Half-length of drawn guide lines, in inches.
 const GUIDE_EXTENT: f64 = 1e5;
-/// Guide color and dash length (draft).
-const GUIDE_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 
 /// SketchUp's `UnitsOptions` codes (Ruby `Length::Inches` ... `Length::Meter`,
 /// `Length::Decimal` ... `Length::Fractional`; the scaffold's Architectural inches
@@ -660,12 +654,13 @@ impl Document {
         } else {
             &[]
         };
+        let guide_color = crate::style_view::rgba(self.model.style.modeling_colors.guides);
         for g in guides {
             match g.dir {
                 Some(d) => scene.guides.push(Segment::line(
                     f(g.point - d * GUIDE_EXTENT),
                     f(g.point + d * GUIDE_EXTENT),
-                    GUIDE_COLOR,
+                    guide_color,
                     [1.0, 3.0],
                 )),
                 None => {
@@ -674,7 +669,7 @@ impl Document {
                         scene.guides.push(Segment::line(
                             f(g.point - axis * 0.5),
                             f(g.point + axis * 0.5),
-                            GUIDE_COLOR,
+                            guide_color,
                             [1.0, 0.0],
                         ));
                     }
@@ -761,11 +756,13 @@ impl Document {
                 corner(-1.0, 1.0),
             ];
             let active = ents.active_section == Some(i);
-            let color = if active {
-                SECTION_ACTIVE
+            // Styles > Modeling colors.
+            let mc = &self.model.style.modeling_colors;
+            let color = crate::style_view::rgba(if active {
+                mc.section_active
             } else {
-                SECTION_COLOR
-            };
+                mc.section_inactive
+            });
             let mut lines: Vec<(DVec3, DVec3)> =
                 (0..4).map(|k| (pts[k], pts[(k + 1) % 4])).collect();
             // Arrows at two corners pointing to the kept side (the removed side would
@@ -863,10 +860,18 @@ impl Document {
             Level::Inside(o) => Some(o),
             _ => None,
         };
-        let edge_color = if faded {
-            fade_by(EDGE_COLOR, fade_amount * EDGE_FADE)
-        } else {
-            EDGE_COLOR
+        // Styles > Edge > Color (All same / By material / By axis).
+        let edge_color = |dir: DVec3, faces: &[FaceId]| {
+            let material = faces
+                .first()
+                .and_then(|&f| ents.faces[f].attrs.material.or(inherited))
+                .map(|m| self.color(Some(m), self.model.front_color));
+            let c = crate::style_view::edge_color(&self.model, dir, material);
+            if faded {
+                fade_by(c, fade_amount * EDGE_FADE)
+            } else {
+                c
+            }
         };
         let world = |p: DVec3| {
             let q = xf.transform_point3(p);
@@ -894,7 +899,10 @@ impl Document {
             let color = match self.tag_color(tag) {
                 Some(c) if faded => fade_by(c, fade_amount * EDGE_FADE),
                 Some(c) => c,
-                None => edge_color,
+                None => edge_color(
+                    xf.transform_vector3(ents.pos(e.end) - ents.pos(e.start)),
+                    &e.faces,
+                ),
             };
             let mut seg = Segment::line(
                 world(ents.pos(e.start)),

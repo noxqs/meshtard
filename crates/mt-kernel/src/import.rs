@@ -227,6 +227,57 @@ fn read_style(style: &skp::Style, out: &mut crate::model::StyleSettings) {
         let [r, g, b, _] = (c as i32).to_le_bytes();
         out.section_fill_color = [r, g, b];
     }
+    // Styles panel extras (see `crate::export::style_items`).
+    use crate::style_extras::{EdgeColorMode, TransparencyQuality, item_color};
+    let color = |id: i32| int(id).map(item_color);
+    let set_c = |v: &mut [u8; 3], x: Option<[u8; 3]>| {
+        if let Some(x) = x {
+            *v = x;
+        }
+    };
+    let float = |id: i32| item(id).and_then(|v| v.parse::<f32>().ok());
+    let e = &mut out.edge_look;
+    if let Some(m) = int(1002).and_then(EdgeColorMode::from_item) {
+        e.color_mode = m;
+    }
+    set(&mut e.endpoints, bool_(1010));
+    set_w(&mut e.endpoint_length, width(1011));
+    set(&mut e.jitter, bool_(1012));
+    set_c(&mut e.color, color(1014));
+    if let Some(on) = bool_(2005) {
+        out.face_look.transparency_off = !on;
+    }
+    match int(2006) {
+        Some(0) => out.face_look.quality = TransparencyQuality::Faster,
+        Some(1 | 2) => out.face_look.quality = TransparencyQuality::Nicer,
+        _ => {}
+    }
+    let bg = &mut out.background;
+    set_c(&mut bg.color, color(4000));
+    set_c(&mut bg.sky_color, color(4001));
+    set(&mut bg.sky, bool_(4002));
+    set_c(&mut bg.ground_color, color(4003));
+    set(&mut bg.ground, bool_(4004));
+    if let Some(t) = int(4005) {
+        bg.ground_transparency = (t as f32 / 100.0).clamp(0.0, 1.0);
+    }
+    set(&mut bg.ground_from_below, bool_(4006));
+    set_c(&mut bg.horizon_color, color(4007));
+    let mc = &mut out.modeling_colors;
+    set_c(&mut mc.selected, color(7000));
+    set_c(&mut mc.locked, color(7001));
+    set_c(&mut mc.guides, color(7002));
+    set_c(&mut mc.section_active, color(7003));
+    set_c(&mut mc.section_inactive, color(7004));
+    set_c(&mut mc.section_cut, color(7005));
+    let ao = &mut out.ambient_occlusion;
+    set(&mut ao.enabled, bool_(8100));
+    if let Some(d) = float(8102).filter(|d| *d > 0.0) {
+        ao.distance = d;
+    }
+    if let Some(i) = float(8103).filter(|i| (0.0..=1.0).contains(i)) {
+        ao.intensity = i;
+    }
     let texture = bool_(2007).unwrap_or(true);
     match int(2001) {
         Some(0) => out.face_style = FaceStyle::Wireframe,

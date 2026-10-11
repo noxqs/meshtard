@@ -365,6 +365,31 @@ mod tests {
         assert!(dxf.contains("254.000000"), "10 in = 254 mm");
         assert!(dxf.contains("508.000000"), "20 in = 508 mm");
         assert!(dxf.trim_end().ends_with("EOF"));
+        // It reads back through File > Import's DXF reader as a closed 10 x 20 loop.
+        let d = mt_kernel::dxf::parse(dxf.as_bytes()).unwrap();
+        assert_eq!(d.shapes.len(), 4);
+        let m = mt_kernel::dxf::to_model(
+            &d,
+            &mt_kernel::dxf::DxfOptions {
+                inches_per_unit: Some(1.0 / 25.4),
+                ..Default::default()
+            },
+        );
+        let ents = &m.definitions[m.root.instances[0].definition].entities;
+        assert_eq!(ents.faces.len(), 1);
+        let ymax = ents
+            .vertices
+            .values()
+            .map(|v| v.pos.y)
+            .fold(f64::MIN, f64::max);
+        let ymin = ents
+            .vertices
+            .values()
+            .map(|v| v.pos.y)
+            .fold(f64::MAX, f64::min);
+        assert!(
+            ((ymax - ymin).abs() - 20.0).abs() < 1e-6 || ((ymax - ymin).abs() - 10.0).abs() < 1e-6
+        );
         // Group codes and values alternate on their own lines.
         let lines: Vec<&str> = dxf.lines().collect();
         assert_eq!(lines.len() % 2, 0);

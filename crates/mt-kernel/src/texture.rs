@@ -312,6 +312,42 @@ pub fn pin_action(pins: &[DVec2; 4], action: PinAction) -> [DVec2; 4] {
     }
 }
 
+/// File > Import of an image "as texture": paints one side of `face` (the back with
+/// `back`) with the new `material` (holding the image as its texture), sized to the
+/// clicked rectangle `origin + s * u + t * v` (`s`, `t` in 0..1) and positioned so
+/// one tile covers it; the image repeats beyond it. The texture's width and height
+/// are set to the rectangle's. Returns the new material, `None` (nothing changed)
+/// without a texture, face or rectangle.
+pub fn paint_image_texture(
+    materials: &mut Vec<Material>,
+    ents: &mut crate::entities::Entities,
+    face: crate::entities::FaceId,
+    back: bool,
+    mut material: Material,
+    (origin, u, v): (DVec3, DVec3, DVec3),
+) -> Option<crate::entities::MaterialId> {
+    let f = ents.faces.get_mut(face)?;
+    let (w, h) = (u.length(), v.length());
+    let texture = material.texture.as_mut()?;
+    if w < 1e-9 || h < 1e-9 {
+        return None;
+    }
+    texture.width = w;
+    texture.height = h;
+    let m = fit_uv(f.normal, origin, u, v, [w, h]);
+    materials.push(material);
+    let id = materials.len() - 1;
+    let uv = f.attrs.uv.as_deref().cloned().unwrap_or_default();
+    if back {
+        f.attrs.back_material = Some(id);
+        f.attrs.uv = FaceUv::boxed(uv.front, Some(m));
+    } else {
+        f.attrs.material = Some(id);
+        f.attrs.uv = FaceUv::boxed(Some(m), uv.back);
+    }
+    Some(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +475,63 @@ mod tests {
             let got = uv_at(&map2, xf.transform_point3(p));
             assert!(got.abs_diff_eq(uv, 1e-9), "{p} -> {got}");
         }
+    }
+
+    #[test]
+    fn image_as_texture_tiles_from_the_clicked_rectangle() {
+        let mut m = crate::Model::default();
+        // A wall facing -Y, 100 wide and 50 high.
+        let c = [
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(100.0, 0.0, 0.0),
+            DVec3::new(100.0, 0.0, 50.0),
+            DVec3::new(0.0, 0.0, 50.0),
+        ];
+        for i in 0..4 {
+            crate::add_line(&mut m.root, c[i], c[(i + 1) % 4]);
+        }
+        let f = m.root.faces.keys().next().unwrap();
+        let tex = Texture {
+            filename: "brick.png".into(),
+            data: std::sync::Arc::from(&b"x"[..]),
+            width: 0.0,
+            height: 0.0,
+            colorize: false,
+        };
+        // Clicked rectangle: from (10, 0, 5), 20 along X and 10 up.
+        let rect = (DVec3::new(10.0, 0.0, 5.0), DVec3::X * 20.0, DVec3::Z * 10.0);
+        let id = paint_image_texture(
+            &mut m.materials,
+            &mut m.root,
+            f,
+            false,
+            Material {
+                name: "brick".into(),
+                color: [150, 60, 40],
+                opacity: 1.0,
+                texture: Some(tex),
+            },
+            rect,
+        )
+        .unwrap();
+        let face = &m.root.faces[f];
+        assert_eq!(face.attrs.material, Some(id));
+        let mat = &m.materials[id];
+        let t = mat.texture.as_ref().unwrap();
+        assert_eq!((t.width, t.height), (20.0, 10.0));
+        let map = face_mapping(face, false, mat).unwrap();
+        let uv = |p: DVec3| uv_at(&map, p);
+        // The rectangle is one tile; the texture repeats past it.
+        assert!(
+            close(uv(DVec3::new(10.0, 0.0, 5.0)), DVec2::ZERO),
+            "{}",
+            uv(DVec3::new(10.0, 0.0, 5.0))
+        );
+        assert!(close(uv(DVec3::new(30.0, 0.0, 15.0)), DVec2::ONE));
+        assert!(close(uv(DVec3::new(50.0, 0.0, 25.0)), DVec2::splat(2.0)));
+        assert!(close(uv(DVec3::new(0.0, 0.0, 0.0)), DVec2::new(-0.5, -0.5)));
+        // The back side is untouched.
+        assert_eq!(face.attrs.back_material, None);
+        assert!(face.attrs.uv.as_ref().unwrap().back.is_none());
     }
 }

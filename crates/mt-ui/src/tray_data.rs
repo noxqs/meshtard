@@ -57,6 +57,9 @@ pub struct TrayData {
     pub active_style: Option<usize>,
     /// The selection holds groups or components (Components > Replace Selected).
     pub can_replace_component: bool,
+    /// Styles panel Edit tab extras and watermarks (bottom first).
+    pub style_extras: crate::StyleExtras,
+    pub watermarks: Vec<crate::WatermarkRow>,
 }
 
 impl Default for TrayData {
@@ -90,6 +93,8 @@ impl Default for TrayData {
             styles: Vec::new(),
             active_style: None,
             can_replace_component: false,
+            style_extras: Default::default(),
+            watermarks: Vec::new(),
         }
     }
 }

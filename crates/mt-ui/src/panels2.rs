@@ -28,6 +28,8 @@ use crate::{Event, Shell};
 /// State of the panels in this module.
 #[derive(Debug, Default)]
 pub(crate) struct MoreUi {
+    /// Styles Edit tab, Watermark page: the selected watermark.
+    pub(crate) watermark_selected: Option<usize>,
     tag_filter: String,
     /// Row selected in the Tags list (target of Delete and Add Folder).
     tag_selected: Option<TagTreeItem>,

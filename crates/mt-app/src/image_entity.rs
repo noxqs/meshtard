@@ -32,6 +32,10 @@ pub struct PlaceImage {
     pub color: [u8; 3],
     /// First corner and the plane's normal.
     corner: Option<(DVec3, DVec3)>,
+    /// "Use as texture": the picture paints the clicked face (its back side when
+    /// `.1`) instead of becoming an image entity.
+    as_texture: bool,
+    face: Option<(mt_kernel::FaceId, bool)>,
     edit: Option<ModelEdit>,
     done: bool,
 }
@@ -45,9 +49,18 @@ impl PlaceImage {
             aspect: f64::from(height_px.max(1)) / f64::from(width_px.max(1)),
             color: [255, 255, 255],
             corner: None,
+            as_texture: false,
+            face: None,
             edit: None,
             done: false,
         }
+    }
+
+    /// File > Import's "Use as texture": two clicks on a face set the size and
+    /// position of one tile of the picture; the face gets a new material with it.
+    pub fn with_texture_mode(mut self) -> Self {
+        self.as_texture = true;
+        self
     }
 
     /// Lower left corner, width and height vectors of the picture from the first
@@ -80,6 +93,40 @@ impl PlaceImage {
     fn place(&mut self, (origin, wv, hv): (DVec3, DVec3, DVec3)) {
         let (name, path, data) = (self.name.clone(), self.path.clone(), self.data.clone());
         let color = self.color;
+        if self.as_texture {
+            let Some((face, back)) = self.face else {
+                return;
+            };
+            self.edit = Some(Box::new(move |model, active| {
+                let material = mt_kernel::Material {
+                    name: name.clone(),
+                    color,
+                    opacity: 1.0,
+                    texture: Some(mt_kernel::Texture {
+                        filename: path,
+                        data,
+                        width: 1.0,
+                        height: 1.0,
+                        colorize: false,
+                    }),
+                };
+                let rect = (origin, wv, hv);
+                match mt_kernel::texture::paint_image_texture(
+                    &mut model.materials,
+                    active,
+                    face,
+                    back,
+                    material,
+                    rect,
+                ) {
+                    Some(_) => vec![Owner::Face(face)],
+                    None => Vec::new(),
+                }
+            }));
+            self.corner = None;
+            self.done = true;
+            return;
+        }
         self.edit = Some(Box::new(move |model, active| {
             let (w, h) = (wv.length(), hv.length());
             model.materials.push(mt_kernel::Material {
@@ -159,6 +206,14 @@ pub fn image_face(w: f64, h: f64, material: usize) -> Entities {
 impl ModifyTool for PlaceImage {
     fn status(&self) -> String {
         // Draft wording (unverified).
+        if self.as_texture {
+            return if self.corner.is_some() {
+                "Select the opposite corner of one tile of the texture."
+            } else {
+                "Click a face to place a corner of the texture."
+            }
+            .into();
+        }
         if self.corner.is_some() {
             "Select the opposite corner or enter the width."
         } else {
@@ -186,8 +241,19 @@ impl ModifyTool for PlaceImage {
         self.corner.map(|c| c.0)
     }
 
-    fn click(&mut self, _ctx: &mut Ctx, inf: &Inference) -> bool {
+    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
         match self.corner {
+            None if self.as_texture => {
+                // Only a face of the open context takes the texture.
+                if let Some(Owner::Face(f)) = ctx.picked
+                    && let Some(face) = ctx.ents.faces.get(f)
+                {
+                    let n = face.normal;
+                    let back = (ctx.eye - inf.point).dot(n) < 0.0;
+                    self.face = Some((f, back));
+                    self.corner = Some((inf.point, if back { -n } else { n }));
+                }
+            }
             None => self.corner = Some((inf.point, inf.normal.unwrap_or(DVec3::Z).normalize())),
             Some((c, n)) => {
                 if let Some(r) = self.rect(c, n, inf.point) {
@@ -253,8 +319,9 @@ pub fn average_color(img: &image::RgbImage) -> [u8; 3] {
 }
 
 impl App {
-    /// File > Import of a PNG or JPEG: starts placing it.
-    pub(crate) fn import_image(&mut self, path: &Path) {
+    /// File > Import of a PNG or JPEG: starts placing it as an image entity, or with
+    /// `as_texture` as a texture on a face.
+    pub(crate) fn import_image(&mut self, path: &Path, as_texture: bool) {
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
@@ -286,9 +353,16 @@ impl App {
             h,
         );
         tool.color = average_color(&img);
+        if as_texture {
+            tool = tool.with_texture_mode();
+        }
         self.modify = Some(Box::new(tool));
         self.selection.clear();
-        self.message = Some(format!("Imported {name}: click a corner, then the size."));
+        self.message = Some(if as_texture {
+            format!("Imported {name}: click a face for a corner of the texture, then the size.")
+        } else {
+            format!("Imported {name}: click a corner, then the size.")
+        });
     }
 }
 
@@ -418,5 +492,66 @@ mod tests {
         let uv = |p| mt_kernel::texture::uv_at(&map, world(p));
         assert!(uv(DVec3::new(5.0, 0.0, 0.0)).abs_diff_eq(glam::DVec2::ZERO, 1e-6));
         assert!(uv(DVec3::new(45.0, 20.0, 0.0)).abs_diff_eq(glam::DVec2::ONE, 1e-6));
+    }
+
+    #[test]
+    fn use_as_texture_paints_the_clicked_face() {
+        let mut model = mt_kernel::Model::default();
+        let c =
+            [(0., 0.), (100., 0.), (100., 100.), (0., 100.)].map(|(x, y)| DVec3::new(x, y, 0.0));
+        for i in 0..4 {
+            mt_kernel::add_line(&mut model.root, c[i], c[(i + 1) % 4]);
+        }
+        let f = model.root.faces.keys().next().unwrap();
+        let up = model.root.faces[f].normal.z > 0.0;
+        let mut t = PlaceImage::new(
+            "tile.png".into(),
+            "tile.png".into(),
+            Arc::from(&b"x"[..]),
+            200,
+            100,
+        )
+        .with_texture_mode();
+        let mut root = std::mem::take(&mut model.root);
+        {
+            let mut ctx = Ctx {
+                ents: &mut root,
+                picked: None,
+                selection: &[],
+                ctrl: false,
+                eye: DVec3::new(50.0, 50.0, 100.0),
+            };
+            // Not on a face: nothing happens.
+            t.click(&mut ctx, &at(DVec3::new(10.0, 10.0, 0.0)));
+            assert!(t.anchor().is_none());
+            ctx.picked = Some(Owner::Face(f));
+            t.click(&mut ctx, &at(DVec3::new(10.0, 10.0, 0.0)));
+            t.click(&mut ctx, &at(DVec3::new(50.0, 20.0, 0.0)));
+        }
+        let edit = t.take_model_edit().unwrap();
+        assert_eq!(edit(&mut model, &mut root), vec![Owner::Face(f)]);
+        assert!(root.instances.is_empty());
+        let face = &root.faces[f];
+        // Seen from above: the side facing up is painted.
+        let (mat, back) = if up {
+            (face.attrs.material, false)
+        } else {
+            (face.attrs.back_material, true)
+        };
+        let mat = &model.materials[mat.unwrap()];
+        let tex = mat.texture.as_ref().unwrap();
+        // 40 wide, the picture's 2:1 aspect.
+        assert_eq!((tex.width, tex.height), (40.0, 20.0));
+        let map = mt_kernel::texture::face_mapping(face, back, mat).unwrap();
+        let uv = |p| mt_kernel::texture::uv_at(&map, p);
+        let (o, far) = (
+            uv(DVec3::new(10.0, 10.0, 0.0)),
+            uv(DVec3::new(50.0, 30.0, 0.0)),
+        );
+        assert!(
+            (far - o).abs().abs_diff_eq(glam::DVec2::ONE, 1e-9),
+            "{o} {far}"
+        );
+        assert!((o - o.round()).length() < 1e-9);
     }
 }
