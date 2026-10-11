@@ -1491,6 +1491,7 @@ dependencies = [
  "egui-wgpu",
  "env_logger",
  "glam",
+ "image",
  "log",
  "mt-cuda",
  "mt-infer",

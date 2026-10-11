@@ -10,6 +10,7 @@ mod modify;
 mod nav;
 mod overlay;
 mod selection;
+mod splash;
 mod tools;
 mod tray;
 
@@ -127,9 +128,9 @@ fn main() -> eframe::Result {
             // SketchUp on Windows uses the light system theme; full styling comes in M3.
             cc.egui_ctx.set_theme(egui::Theme::Light);
             let mut app = App::new(spec, render_state);
-            if let Some(path) = open_path {
-                app.open(&cc.egui_ctx, &render_state.device, &path);
-            }
+            // A model given on the command line opens in the background behind the
+            // splash screen.
+            app.loading = open_path.map(splash::Loading::start);
             Ok(Box::new(app))
         }),
     )
@@ -174,6 +175,10 @@ struct App {
     pending: Option<confirm::Pending>,
     /// The window may close (the question was answered or not needed).
     closing: bool,
+    /// The splash screen while the app starts.
+    splash: splash::Splash,
+    /// A model opening on a background thread (the command-line file).
+    loading: Option<splash::Loading>,
     /// Window title last sent (it changes when the model gets unsaved changes).
     last_title: String,
     /// Tray state the model does not hold.
@@ -259,6 +264,8 @@ impl App {
             ctx_xf: glam::DMat4::IDENTITY,
             active_tag: 0,
             last_title: String::new(),
+            splash: splash::Splash::new(),
+            loading: None,
             pending: None,
             make_component: None,
             ctrl_was_down: false,
@@ -625,7 +632,24 @@ impl App {
 
     fn open(&mut self, ctx: &egui::Context, device: &wgpu::Device, path: &std::path::Path) {
         match Document::open(path) {
-            Ok(doc) => {
+            Ok(doc) => self.install(ctx, device, path, doc),
+            Err(e) => {
+                log::warn!("could not open {}: {e}", path.display());
+                self.message = Some(format!("Could not open {}: {e}", path.display()));
+            }
+        }
+    }
+
+    /// Makes an opened document the current one.
+    fn install(
+        &mut self,
+        ctx: &egui::Context,
+        device: &wgpu::Device,
+        path: &std::path::Path,
+        doc: Document,
+    ) {
+        {
+            {
                 if let Some(camera) = doc
                     .saved_camera()
                     .or_else(|| doc.extents_camera(self.camera.fov_deg))
@@ -644,10 +668,6 @@ impl App {
                     self.scene.edges.len()
                 );
                 self.message = None;
-            }
-            Err(e) => {
-                log::warn!("could not open {}: {e}", path.display());
-                self.message = Some(format!("Could not open {}: {e}", path.display()));
             }
         }
     }
@@ -1882,6 +1902,8 @@ impl eframe::App for App {
             self.run_command(ui.ctx(), frame, &id);
         }
         self.shell = Some(shell);
+        self.poll_loading(ui.ctx(), frame);
+        self.splash_ui(ui.ctx());
         self.confirm_ui(ui.ctx(), frame);
         self.make_component_ui(ui.ctx(), frame);
         for event in events {
