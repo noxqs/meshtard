@@ -85,6 +85,7 @@ impl App {
         draw.hover(&crate::tools::DrawHover {
             instance_name,
             units,
+            alt: ui.input(|i| i.modifiers.alt),
         });
     }
 
@@ -482,6 +483,7 @@ mod tests {
         text.hover(&DrawHover {
             instance_name: None,
             units: LengthUnit::Foot,
+            alt: false,
         });
         let on_face = Inference {
             kind: Kind::OnFace,
@@ -500,6 +502,7 @@ mod tests {
         text.hover(&DrawHover {
             instance_name: Some("Chair".into()),
             units: IN,
+            alt: false,
         });
         let in_comp = Inference {
             container: Some(mt_infer::Container::Component),

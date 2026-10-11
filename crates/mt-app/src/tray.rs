@@ -347,6 +347,7 @@ impl App {
                 self.modify = Some(Box::new(crate::modify::PlaceComponent {
                     definition: d,
                     glue,
+                    ..Default::default()
                 }));
                 false
             }

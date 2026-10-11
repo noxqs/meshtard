@@ -27,6 +27,7 @@ pub mod ops;
 pub mod orient;
 pub mod purge;
 pub mod push_pull;
+pub mod snaps;
 pub mod solid;
 pub mod spatial;
 pub mod terrain;

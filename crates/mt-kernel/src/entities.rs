@@ -217,6 +217,9 @@ pub struct Entities {
     pub dimensions: Vec<crate::annotation::Dimension>,
     /// Leader and screen texts (Text tool).
     pub texts: Vec<crate::annotation::Text>,
+    /// Component Snaps of a group's or component's definition (`crate::snaps`; not
+    /// saved in .skp).
+    pub snaps: Vec<crate::snaps::Snap>,
     /// Lookup acceleration, not model data: not cloned, see `spatial`.
     pub(crate) index: crate::spatial::SpatialIndex,
 }

@@ -7,7 +7,7 @@
 //!
 //! While Move, Rotate or Scale runs, the app draws the targets live at the transformed
 //! position ([`ModifyTool::live`]) and hides them at the original one (SketchUp moves
-//! the real geometry; here connected geometry does not stretch until the click).
+//! the real geometry); connected faces and edges are drawn stretched (`move_extra`).
 
 use glam::{DMat3, DMat4, DQuat, DVec2, DVec3};
 use mt_infer::Inference;
@@ -198,6 +198,18 @@ pub trait ModifyTool {
     fn take_section(&mut self) -> Option<mt_kernel::SectionPlane> {
         None
     }
+    /// Called every frame after [`Self::hover`] with the snaps around (Component
+    /// Snaps: Move, Place Component, Make/Edit Snaps).
+    fn snaps(&mut self, _s: &crate::component_snaps::SnapCtx) {}
+    /// Snap disks to draw (context space).
+    fn snap_disks(&self) -> Vec<crate::component_snaps::Disk> {
+        Vec::new()
+    }
+    /// A change to the open context made outside a click (Alt reversing a snap), one
+    /// undo step; polled every frame.
+    fn take_edit(&mut self) -> Option<crate::component_snaps::Edit> {
+        None
+    }
 }
 
 /// See [`ModifyTool::take_model_edit`].
@@ -216,6 +228,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.section_plane" => Box::new(SectionPlaneTool::default()),
         "tool.axes" => Box::new(crate::component_dialog::AxesPick::model_axes()),
         "tool.sandbox_from_scratch" => Box::new(crate::sandbox::FromScratch::default()),
+        "tool.snaps" => Box::new(crate::component_snaps::EditSnaps::default()),
         _ => return None,
     })
 }
@@ -491,6 +504,26 @@ pub struct Transform {
     /// center click (the rotation axis).
     plane_lock: Option<DVec3>,
     plane: Option<DVec3>,
+    /// Move: Alt toggled auto-fold for this move; the directions allowed without it.
+    autofold: bool,
+    freedom: crate::move_extra::Freedom,
+    alt_was: bool,
+    /// Move on an arc's midpoint or end: the curve and the grip held.
+    arc: Option<(
+        mt_kernel::CurveId,
+        crate::move_extra::ArcGrip,
+        mt_kernel::Arc,
+    )>,
+    /// Move by a component snap: the instance, its snap (definition space) and
+    /// transform at the pick; the snap under the cursor before the pick; the join
+    /// found this frame (a transform of the context replacing the cursor's).
+    snap: Option<(usize, mt_kernel::snaps::Snap, DMat4)>,
+    snap_hover: Option<crate::component_snaps::ContextSnap>,
+    joined: Option<crate::component_snaps::Joined>,
+    disks: Vec<crate::component_snaps::Disk>,
+    /// The cursor and the view ray's direction this frame.
+    cur: Option<Inference>,
+    ray: Option<DVec3>,
 }
 
 impl Transform {
@@ -503,7 +536,26 @@ impl Transform {
             last_copy: None,
             plane_lock: None,
             plane: None,
+            autofold: false,
+            freedom: crate::move_extra::Freedom::Free,
+            alt_was: false,
+            arc: None,
+            snap: None,
+            snap_hover: None,
+            joined: None,
+            disks: Vec::new(),
+            cur: None,
+            ray: None,
         }
+    }
+
+    /// Back to no operation (after a change or Escape).
+    fn reset_move(&mut self) {
+        self.autofold = false;
+        self.freedom = crate::move_extra::Freedom::Free;
+        self.arc = None;
+        self.snap = None;
+        self.joined = None;
     }
 
     /// Rotate about center `c` from `s` to `p`: unit axis and angle. In a locked plane
@@ -543,7 +595,11 @@ impl Transform {
     /// The transform for the points so far plus `p`.
     fn xf(&self, p: DVec3) -> Option<DMat4> {
         match (self.kind, &self.points[..]) {
-            (Kind::Move, [a]) => Some(DMat4::from_translation(p - *a)),
+            (Kind::Move, [a]) => Some(match self.joined {
+                Some(j) => j.xf,
+                None if self.autofold => DMat4::from_translation(p - *a),
+                None => DMat4::from_translation(self.freedom.project(p - *a)),
+            }),
             (Kind::Rotate, [c, s]) => {
                 let (axis, angle) = self.rotation(*c, *s, p)?;
                 Some(rotation_about(*c, axis, angle))
@@ -556,6 +612,7 @@ impl Transform {
         let targets = std::mem::take(&mut self.targets);
         self.points.clear();
         self.plane = None;
+        self.reset_move();
         if targets.is_empty() {
             return false;
         }
@@ -583,14 +640,23 @@ impl ModifyTool for Transform {
     fn status(&self) -> String {
         let text: String = match (self.kind, self.points.len()) {
             (Kind::Move, 0) => "Select object to move. Ctrl = toggle copy.",
+            (Kind::Move, _) if self.arc.is_some() => "Select the arc's new point.",
+            (Kind::Move, _) if self.snap.is_some() => {
+                "Move to a snap or a face to join. Alt = nearest snap."
+            }
             (Kind::Move, _) => {
-                "Select destination or enter distance, [x,y,z] or <x,y,z>. After a copy: 5x or /5 for arrays."
+                "Select destination or enter distance, [x,y,z] or <x,y,z>. Alt = toggle Auto-fold. After a copy: 5x or /5 for arrays."
             }
             (Kind::Rotate, 0) => "Select center of rotation. Ctrl = toggle copy.",
             (Kind::Rotate, 1) => "Select start point of the angle.",
             (Kind::Rotate, _) => "Select end point or enter angle.",
         }
         .into();
+        let text = if self.autofold {
+            format!("{text} (Auto-fold)")
+        } else {
+            text
+        };
         if self.copy {
             format!("{text} (Copy)")
         } else {
@@ -618,23 +684,57 @@ impl ModifyTool for Transform {
     }
 
     fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        if let Some((c, grip, _)) = self.arc.take() {
+            self.points.clear();
+            self.reset_move();
+            return crate::move_extra::reshape_arc(ctx.ents, c, grip, inf.point);
+        }
+        let mut base = inf.point;
+        if self.points.is_empty() && self.kind == Kind::Move {
+            self.reset_move();
+            // An arc's midpoint or end with nothing selected reshapes the arc [doc].
+            if ctx.selection.is_empty()
+                && let Some((c, grip)) =
+                    crate::move_extra::arc_grip_at(ctx.ents, inf.point, inf.kind, ctx.picked)
+                && let Some(arc) = ctx.ents.curves.get(c).and_then(|x| x.arc)
+            {
+                self.arc = Some((c, grip, arc));
+                self.points.push(inf.point);
+                return false;
+            }
+            // A component picked up by one of its snaps.
+            if let Some(h) = self.snap_hover
+                && (ctx.selection.is_empty() || ctx.selection == [Owner::Instance(h.instance)])
+                && let Some(inst) = ctx.ents.instances.get(h.instance)
+                && !inst.locked
+            {
+                self.snap = Some((h.instance, h.local, inst.transform));
+                self.targets = vec![Owner::Instance(h.instance)];
+                base = h.snap.position;
+            }
+        }
         if self.points.is_empty() {
-            self.targets = targets(ctx);
+            if self.snap.is_none() {
+                self.targets = targets(ctx);
+            }
             if self.targets.is_empty() {
                 return false;
             }
             self.last_copy = None;
+            if self.kind == Kind::Move {
+                self.freedom = crate::move_extra::fold_freedom(ctx.ents, &self.targets);
+            }
         }
         if self.points.len() + 1 < self.needed() {
             if self
                 .points
                 .last()
-                .is_none_or(|q| q.distance(inf.point) > mt_kernel::TOL)
+                .is_none_or(|q| q.distance(base) > mt_kernel::TOL)
             {
                 if self.points.is_empty() {
                     self.plane = self.plane_lock;
                 }
-                self.points.push(inf.point);
+                self.points.push(base);
             }
             return false;
         }
@@ -651,6 +751,9 @@ impl ModifyTool for Transform {
         text: &str,
         units: LengthUnit,
     ) -> bool {
+        if self.arc.is_some() {
+            return false;
+        }
         // Arrays after a copy.
         if self.points.is_empty()
             && let (Some((n, divide)), Some((targets, xf))) =
@@ -726,11 +829,17 @@ impl ModifyTool for Transform {
     fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
         let mut guide = self.points.clone();
         guide.push(cur.point);
-        if guide.len() > 1 {
+        let mut out = if guide.len() > 1 {
             vec![guide]
         } else {
             Vec::new()
+        };
+        if let Some((_, grip, arc)) = &self.arc
+            && let Some(a) = crate::move_extra::reshaped(arc, *grip, cur.point)
+        {
+            out.push(a.points());
         }
+        out
     }
 
     fn toggle_ctrl(&mut self) {
@@ -745,10 +854,81 @@ impl ModifyTool for Transform {
         self.points.clear();
         self.targets.clear();
         self.plane = None;
+        self.reset_move();
     }
 
     fn direction_locks(&self) -> bool {
         true
+    }
+
+    fn input(&mut self, i: &Input) {
+        self.cur = i.cur.copied();
+        self.ray = i.ray.map(|r| r.1);
+        // Alt while moving geometry toggles auto-fold (with a snap it finds the
+        // nearest snap instead).
+        let alt = i.held.alt;
+        if alt && !self.alt_was && self.kind == Kind::Move && self.points.len() == 1 {
+            let geometry = self
+                .targets
+                .iter()
+                .any(|t| matches!(t, Owner::Edge(_) | Owner::Face(_)));
+            if geometry && self.snap.is_none() && self.arc.is_none() {
+                self.autofold = !self.autofold;
+            }
+        }
+        self.alt_was = alt;
+    }
+
+    fn snaps(&mut self, s: &crate::component_snaps::SnapCtx) {
+        use crate::component_snaps::{Disk, PICK_PX, facing_normal, join};
+        self.disks.clear();
+        self.joined = None;
+        if self.kind != Kind::Move {
+            return;
+        }
+        let hovered = match s.picked {
+            Some(Owner::Instance(i)) => s.disks_of(i),
+            _ => Vec::new(),
+        };
+        if self.points.is_empty() {
+            self.snap_hover = s.under_cursor(PICK_PX, |_| true);
+            self.disks = hovered;
+            if let Some(h) = self.snap_hover {
+                self.disks.push(Disk::hot(h.snap));
+            }
+            return;
+        }
+        let (Some((i, mine, inst_xf)), Some(cur), Some(a)) =
+            (self.snap, self.cur, self.points.first().copied())
+        else {
+            return;
+        };
+        // Where the snap is with the cursor's plain move.
+        let free = mine.transformed(inst_xf).position + (cur.point - a);
+        let found = join(
+            s,
+            inst_xf,
+            &mine,
+            if s.alt { free } else { cur.point },
+            facing_normal(&cur, self.ray),
+            Some(i),
+        );
+        let now = found.map_or(DMat4::from_translation(cur.point - a) * inst_xf, |j| j.xf);
+        self.joined = found.map(|j| crate::component_snaps::Joined {
+            xf: j.xf * inst_xf.inverse(),
+            ..j
+        });
+        if !matches!(s.picked, Some(Owner::Instance(p)) if p == i) {
+            self.disks = hovered;
+        }
+        self.disks.push(Disk::hot(mine.transformed(now)));
+        if let Some(t) = found.and_then(|j| j.target) {
+            self.disks.push(Disk::hot(t));
+        }
+    }
+
+    fn snap_disks(&self) -> Vec<crate::component_snaps::Disk> {
+        self.disks.clone()
     }
 
     fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
@@ -1447,11 +1627,32 @@ impl ModifyTool for FollowMe {
 /// (SketchUp glues the component to the cursor at its origin; rotating with the
 /// cursor is not implemented). A definition that glues lies in the clicked face's
 /// plane when the face accepts it.
-#[derive(Debug)]
+///
+/// Component Snaps: a component with snaps joins a snap of another component near the
+/// cursor (Alt: the nearest one) by the snap that turns it least, or attaches to the
+/// face under the cursor by its first snap when it does not glue there (which snap
+/// SketchUp holds is unverified).
+#[derive(Debug, Default)]
 pub struct PlaceComponent {
     pub definition: mt_kernel::DefinitionId,
     /// The definition's "Glue to": on an accepting face the instance lies in its plane.
     pub glue: mt_kernel::GlueTo,
+    /// The join found this frame (the instance transform) and the disks to draw.
+    pub joined: Option<crate::component_snaps::Joined>,
+    pub disks: Vec<crate::component_snaps::Disk>,
+    pub cur: Option<Inference>,
+    pub ray: Option<DVec3>,
+}
+
+impl PlaceComponent {
+    /// The instance transform for a click at `inf` without snapping; whether it glues.
+    fn plain(&self, inf: &Inference) -> (DMat4, bool) {
+        let glued = inf.normal.is_some_and(|n| self.glue.accepts(n));
+        match inf.normal {
+            Some(n) if glued => (crate::component_dialog::glued_frame(inf.point, n), true),
+            _ => (DMat4::from_translation(inf.point), false),
+        }
+    }
 }
 
 impl ModifyTool for PlaceComponent {
@@ -1468,10 +1669,9 @@ impl ModifyTool for PlaceComponent {
     }
 
     fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
-        let glued = inf.normal.is_some_and(|n| self.glue.accepts(n));
-        let transform = match inf.normal {
-            Some(n) if glued => crate::component_dialog::glued_frame(inf.point, n),
-            _ => DMat4::from_translation(inf.point),
+        let (transform, glued) = match self.joined {
+            Some(j) => (j.xf, false),
+            None => self.plain(inf),
         };
         ctx.ents.instances.push(mt_kernel::Instance {
             definition: self.definition,
@@ -1500,15 +1700,82 @@ impl ModifyTool for PlaceComponent {
     }
 
     fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
-        // A small axis cross at the insertion point.
-        let p = cur.point;
+        // A small axis cross at the insertion point (the joined origin when snapped).
+        let xf = self
+            .joined
+            .map_or(DMat4::from_translation(cur.point), |j| j.xf);
+        let p = xf.transform_point3(DVec3::ZERO);
         [DVec3::X, DVec3::Y, DVec3::Z]
             .iter()
-            .map(|a| vec![p - *a * 6.0, p + *a * 6.0])
+            .map(|a| {
+                let d = xf.transform_vector3(*a).normalize_or(*a) * 6.0;
+                vec![p - d, p + d]
+            })
             .collect()
     }
 
     fn cancel(&mut self) {}
+
+    fn input(&mut self, i: &Input) {
+        self.cur = i.cur.copied();
+        self.ray = i.ray.map(|r| r.1);
+    }
+
+    fn snaps(&mut self, s: &crate::component_snaps::SnapCtx) {
+        use crate::component_snaps::{Disk, JOIN_PX, Joined, facing_normal};
+        self.joined = None;
+        self.disks.clear();
+        let Some(cur) = self.cur else { return };
+        if let Some(Owner::Instance(i)) = s.picked {
+            self.disks = s.disks_of(i);
+        }
+        let own = s
+            .defs
+            .get(self.definition)
+            .map(|d| d.entities.snaps.clone())
+            .unwrap_or_default();
+        if own.is_empty() {
+            return;
+        }
+        let (base, glued) = self.plain(&cur);
+        let target = if s.alt {
+            s.nearest(cur.point, |_| true)
+        } else {
+            s.under_cursor(JOIN_PX, |_| true)
+        };
+        self.joined = match target {
+            // The snap that turns the component least.
+            Some(t) => own
+                .iter()
+                .map(|m| mt_kernel::snaps::snap_to_snap(base, m, &t.snap))
+                .max_by(|a, b| {
+                    let turn = |x: &DMat4| {
+                        let m = glam::DMat3::from_mat4(*x) * glam::DMat3::from_mat4(base).inverse();
+                        m.x_axis.x + m.y_axis.y + m.z_axis.z
+                    };
+                    turn(a).total_cmp(&turn(b))
+                })
+                .map(|xf| Joined {
+                    xf,
+                    target: Some(t.snap),
+                }),
+            None if !glued => facing_normal(&cur, self.ray).map(|n| Joined {
+                xf: mt_kernel::snaps::snap_to_face(base, &own[0], cur.point, n),
+                target: None,
+            }),
+            None => None,
+        };
+        let xf = self.joined.map_or(base, |j| j.xf);
+        self.disks
+            .extend(own.iter().map(|m| Disk::plain(m.transformed(xf))));
+        if let Some(t) = self.joined.and_then(|j| j.target) {
+            self.disks.push(Disk::hot(t));
+        }
+    }
+
+    fn snap_disks(&self) -> Vec<crate::component_snaps::Disk> {
+        self.disks.clone()
+    }
 }
 
 // ------------------------------------------------------------------ Paste
