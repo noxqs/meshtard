@@ -29,6 +29,8 @@ use selection::{Mode, Rect, Selection};
 
 /// SketchUp's selection highlight color (draft: plain blue).
 const SELECTED: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+/// Selection box of a locked group or component (red, as in SketchUp).
+const LOCKED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 /// Touchpad scroll distance, in points, that counts as one wheel notch.
 const POINTS_PER_NOTCH: f32 = 40.0;
@@ -109,7 +111,29 @@ const IMPLEMENTED: &[&str] = &[
     "camera.perspective",
     "camera.previous",
     "camera.next",
+    "camera.zoom_window",
+    "window.tray_show",
+    "window.entity_info",
+    "window.materials",
+    "window.components",
+    "window.styles",
+    "window.tags",
+    "window.outliner",
+    "window.scenes",
+    "window.shadows",
     "view.toolbars",
+    "edit.invert_selection",
+    "edit.hide",
+    "edit.unhide_selected",
+    "edit.unhide_last",
+    "edit.unhide_all",
+    "edit.lock",
+    "edit.unlock_selected",
+    "edit.unlock_all",
+    "view.axes",
+    "view.guides",
+    "view.hidden_geometry",
+    "view.scene_tabs",
 ];
 
 fn main() -> eframe::Result {
@@ -210,6 +234,8 @@ struct App {
     /// Camera move to an activated scene or view, in progress.
     transition: Option<tray::Transition>,
     camera_history: camera_cmd::History,
+    /// Zoom Window: where the drag started (physical pixels).
+    zoom_box: Option<DVec2>,
     /// The viewport size in pixels at the last frame.
     viewport_px: DVec2,
     /// Open group or component space to world space (identity at the root).
@@ -305,6 +331,7 @@ impl App {
             scene_tabs: true,
             transition: None,
             camera_history: camera_cmd::History::default(),
+            zoom_box: None,
             viewport_px: DVec2::ZERO,
             erase_drag: Vec::new(),
             shift_lock: false,
@@ -343,12 +370,18 @@ impl App {
                 .edges
                 .iter()
                 .zip(&self.scene.edge_owner)
-                // Dimension and text lines are not snapped to.
-                .filter(|(_, o)| !matches!(o, Some(Owner::Dimension(_) | Owner::Text(_))))
-                .map(|(s, _)| [v3(s.a), v3(s.b)])
+                .enumerate()
+                // Dimension and text lines and hidden geometry are not snapped to.
+                .filter(|(i, (_, o))| {
+                    !matches!(o, Some(Owner::Dimension(_) | Owner::Text(_)))
+                        && !self.scene.hidden_edges.contains(i)
+                })
+                .map(|(_, (s, _))| [v3(s.a), v3(s.b)])
                 .collect(),
         );
-        if let Some(doc) = &self.document {
+        if let Some(doc) = &self.document
+            && doc.model.style.guides
+        {
             for g in &doc.model.root.guides {
                 match g.dir {
                     Some(d) => self.geometry.guide_lines.push((g.point, d)),
@@ -438,6 +471,9 @@ impl App {
             let mut style = Style::from_spec(&self.spec.default_model);
             let st = &doc.model.style;
             style.profiles = (st.edges && st.profiles).then_some(st.profile_width);
+            if !st.axes {
+                style.axes = None;
+            }
             self.viewport.set_style(device, style);
         }
         self.viewport
@@ -508,26 +544,32 @@ impl App {
         };
         let mut edges = Vec::with_capacity(self.scene.edges.len());
         let mut copies = Vec::new();
+        // Locked groups and components are highlighted red instead of blue.
+        let highlight = |o: &Option<Owner>| match (o, &self.document) {
+            (Some(o), Some(doc)) if doc.is_locked(*o) => LOCKED,
+            _ => SELECTED,
+        };
         for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
             let mut seg = *seg;
             let selected = owner.is_some_and(|o| self.selection.contains(&o));
+            let color = if selected { highlight(owner) } else { SELECTED };
             match moved(owner) {
                 Some((xf, copy)) => {
                     let mut c = seg;
                     (c.a, c.b) = (tp(xf, c.a), tp(xf, c.b));
                     if selected {
-                        c.color = SELECTED;
+                        c.color = color;
                     }
                     if copy {
                         copies.push(c);
                         if selected {
-                            seg.color = SELECTED;
+                            seg.color = color;
                         }
                     } else {
                         seg = c;
                     }
                 }
-                None if selected => seg.color = SELECTED,
+                None if selected => seg.color = color,
                 None => {}
             }
             edges.push(seg);
@@ -562,9 +604,10 @@ impl App {
                     xf = m * xf;
                 }
                 let b = selection::OrientedBox::from_aabb(*min, *max).transformed(xf);
+                let color = if inst.locked { LOCKED } else { SELECTED };
                 for [a, c] in b.edges() {
                     let f = |p: DVec3| p.as_vec3().to_array();
-                    edges.push(Segment::line(f(a), f(c), SELECTED, [1.0, 0.0]));
+                    edges.push(Segment::line(f(a), f(c), color, [1.0, 0.0]));
                 }
             }
         }
@@ -719,6 +762,8 @@ impl App {
                 doc.model.shadows.enabled = !doc.model.shadows.enabled;
                 self.apply_shadows();
             }
+        } else if id == "view.scene_tabs" {
+            self.scene_tabs = !self.scene_tabs;
         } else if let Some(rs) = frame.wgpu_render_state()
             && id.starts_with("view.")
             && let Some(doc) = self.document.as_mut()
@@ -746,6 +791,14 @@ impl App {
                     | "edit.close_group"
                     | "edit.explode"
                     | "edit.make_unique"
+                    | "edit.invert_selection"
+                    | "edit.hide"
+                    | "edit.unhide_selected"
+                    | "edit.unhide_last"
+                    | "edit.unhide_all"
+                    | "edit.lock"
+                    | "edit.unlock_selected"
+                    | "edit.unlock_all"
             )
         {
             let device = rs.device.clone();
@@ -755,6 +808,43 @@ impl App {
                     self.select(&device, Mode::Replace, all);
                 }
                 "edit.select_none" => self.select(&device, Mode::Replace, Vec::new()),
+                "edit.invert_selection" => {
+                    let all = self.all_entities();
+                    let inverted = all
+                        .into_iter()
+                        .filter(|o| !self.selection.contains(o))
+                        .collect();
+                    self.select(&device, Mode::Replace, inverted);
+                }
+                "edit.hide"
+                | "edit.unhide_selected"
+                | "edit.unhide_last"
+                | "edit.unhide_all"
+                | "edit.lock"
+                | "edit.unlock_selected"
+                | "edit.unlock_all" => {
+                    let items = self.selection.items().to_vec();
+                    let Some(doc) = &mut self.document else {
+                        return;
+                    };
+                    let changed = match id {
+                        "edit.hide" => doc.hide(&items),
+                        "edit.unhide_selected" => doc.unhide(&items),
+                        "edit.unhide_last" => doc.unhide_last(),
+                        "edit.unhide_all" => doc.unhide_all(),
+                        "edit.lock" => doc.lock(&items, true),
+                        "edit.unlock_selected" => doc.lock(&items, false),
+                        _ => doc.unlock_all(),
+                    };
+                    if changed {
+                        // Hidden entities leave the selection unless they stay visible
+                        // (View > Hidden Geometry); locking keeps it.
+                        if id == "edit.hide" && !doc.model.style.hidden_geometry {
+                            self.selection.clear();
+                        }
+                        self.rebuild(&device);
+                    }
+                }
                 "edit.delete_guides" => {
                     if let Some(doc) = &mut self.document
                         && doc.edit(|root| !std::mem::take(&mut root.guides).is_empty())
@@ -811,6 +901,12 @@ impl App {
                         })
                         .collect();
                     instances.sort_unstable();
+                    if id == "edit.explode"
+                        && let Some(doc) = &self.document
+                    {
+                        // Locked groups and components are not exploded.
+                        instances.retain(|&i| !doc.is_locked(Owner::Instance(i)));
+                    }
                     if let Some(doc) = &mut self.document
                         && !instances.is_empty()
                         && doc.edit_model(|model, ents| {
@@ -1050,6 +1146,10 @@ impl App {
             Tool::Eraser => {
                 self.eraser_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
+            Tool::ZoomWindow => {
+                self.inference = None;
+                self.zoom_window_tool(ui, &response, rect, viewport_px);
+            }
             _ => self.inference = None,
         }
         self.update_live(&render_state.device);
@@ -1088,6 +1188,7 @@ impl App {
             egui::Color32::WHITE,
         );
         self.draw_selection_box(ui, &response, rect);
+        self.draw_zoom_box(ui, &response, rect);
         if self.annotations(ui, rect, viewport_px) {
             self.rebuild(&render_state.device);
         }
@@ -1341,11 +1442,19 @@ impl App {
             self.engine
                 .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now)
         });
+        // Locked groups and components are left out of what modify tools act on.
+        let unlocked: Vec<Owner> = self
+            .selection
+            .items()
+            .iter()
+            .copied()
+            .filter(|o| !self.document.as_ref().is_some_and(|d| d.is_locked(*o)))
+            .collect();
         if let Some(doc) = &self.document {
             let (camera, xf, bounds) = (&self.camera, self.ctx_xf, &self.inst_bounds);
             tool.hover(&modify::Hover {
                 ents: doc.active(),
-                selection: self.selection.items(),
+                selection: &unlocked,
                 instance_bounds: &|i| bounds.get(&i).copied(),
                 project: &|p| camera.project(xf.transform_point3(p), viewport_px),
                 cursor,
@@ -1365,8 +1474,12 @@ impl App {
             return;
         }
         let double = response.double_clicked();
-        let picked = selection::pick(&self.scene, self.bvh.as_ref(), &self.camera, c, viewport_px);
-        let selection = self.selection.items().to_vec();
+        let mut picked =
+            selection::pick(&self.scene, self.bvh.as_ref(), &self.camera, c, viewport_px);
+        if picked.is_some_and(|o| doc.is_locked(o)) {
+            picked = None;
+        }
+        let selection = unlocked;
         let eye = self.ctx_xf.inverse().transform_point3(self.camera.eye);
         let changed = doc.edit(|root| {
             let mut ctx = modify::Ctx {
@@ -1679,6 +1792,9 @@ fn view_toggle(s: &mut mt_kernel::StyleSettings, id: &str) -> bool {
         "view.section_cuts" => s.section_cuts = !s.section_cuts,
         "view.section_fill" => s.section_fill = !s.section_fill,
         "view.xray" => s.xray = !s.xray,
+        "view.axes" => s.axes = !s.axes,
+        "view.guides" => s.guides = !s.guides,
+        "view.hidden_geometry" => s.hidden_geometry = !s.hidden_geometry,
         "view.wireframe" => s.face_style = F::Wireframe,
         "view.hidden_line" => s.face_style = F::HiddenLine,
         "view.shaded" => s.face_style = F::Shaded,
@@ -1696,6 +1812,9 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
         "view.section_cuts" => s.section_cuts,
         "view.section_fill" => s.section_fill,
         "view.xray" => s.xray,
+        "view.axes" => s.axes,
+        "view.guides" => s.guides,
+        "view.hidden_geometry" => s.hidden_geometry,
         "view.wireframe" => s.face_style == F::Wireframe,
         "view.hidden_line" => s.face_style == F::HiddenLine,
         "view.shaded" => s.face_style == F::Shaded,
@@ -1709,6 +1828,10 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
 #[cfg(target_os = "macos")]
 const VIEW_TOGGLES: &[&str] = &[
     "view.shadows",
+    "view.scene_tabs",
+    "view.hidden_geometry",
+    "view.axes",
+    "view.guides",
     "view.section_planes",
     "view.section_cuts",
     "view.section_fill",
@@ -1814,6 +1937,10 @@ impl App {
                             "Definition".into(),
                             def.map(|d| d.name.clone()).unwrap_or_default(),
                         ),
+                        (
+                            "Locked".into(),
+                            if inst.locked { "Yes" } else { "No" }.into(),
+                        ),
                     ],
                 }
             }
@@ -1912,6 +2039,8 @@ impl eframe::App for App {
         let can_go_back = self.camera_history.can_go_back();
         let can_go_forward = self.camera_history.can_go_forward();
         let camera = self.camera.clone();
+        let scene_tabs = self.scene_tabs;
+        let tray_on = shell.tray_visible();
         let spec = self.spec.clone();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
@@ -1929,6 +2058,8 @@ impl eframe::App for App {
             is_checked: &|id| {
                 camera_cmd::is_checked(&camera, id)
                     || (id == "view.shadows" && shadows_on)
+                    || (id == "view.scene_tabs" && scene_tabs)
+                    || (id == "window.tray_show" && tray_on)
                     || style.as_ref().is_some_and(|s| view_checked(s, id))
             },
             entity_info: &info,
@@ -1995,5 +2126,26 @@ impl eframe::App for App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_toggles_flip_and_check() {
+        let mut s = mt_kernel::StyleSettings::default();
+        for id in ["view.axes", "view.guides", "view.hidden_geometry"] {
+            let before = view_checked(&s, id);
+            assert!(view_toggle(&mut s, id));
+            assert_eq!(view_checked(&s, id), !before, "{id}");
+            assert!(IMPLEMENTED.contains(&id));
+        }
+        assert!(!s.axes && !s.guides && s.hidden_geometry);
+        assert!(
+            !view_toggle(&mut s, "view.scene_tabs"),
+            "app state, not style"
+        );
     }
 }

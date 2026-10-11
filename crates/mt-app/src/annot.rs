@@ -90,19 +90,35 @@ pub fn point_label(p: DVec3, units: LengthUnit) -> String {
 /// Adds the dimensions and texts of the model root and the open context.
 pub fn collect(doc: &Document, scene: &mut Scene) {
     let root = doc.context.is_empty();
-    add(&doc.model.root, DMat4::IDENTITY, root, doc.units, scene);
+    let show_hidden = doc.model.style.hidden_geometry;
+    add(
+        &doc.model.root,
+        DMat4::IDENTITY,
+        root,
+        doc.units,
+        show_hidden,
+        scene,
+    );
     if !root {
         add(
             doc.active(),
             doc.context_transform(),
             true,
             doc.units,
+            show_hidden,
             scene,
         );
     }
 }
 
-fn add(ents: &Entities, xf: DMat4, owned: bool, units: LengthUnit, scene: &mut Scene) {
+fn add(
+    ents: &Entities,
+    xf: DMat4,
+    owned: bool,
+    units: LengthUnit,
+    show_hidden: bool,
+    scene: &mut Scene,
+) {
     let w = |p: DVec3| xf.transform_point3(p);
     let f = |p: DVec3| w(p).as_vec3().to_array();
     let mut line = |a: DVec3, b: DVec3, owner: Option<Owner>| {
@@ -113,7 +129,7 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, units: LengthUnit, scene: &mut S
     };
     let mut labels = Vec::new();
     for (i, d) in ents.dimensions.iter().enumerate() {
-        if d.hidden {
+        if d.hidden && !show_hidden {
             continue;
         }
         let owner = owned.then_some(Owner::Dimension(i));
@@ -137,7 +153,7 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, units: LengthUnit, scene: &mut S
         });
     }
     for (i, t) in ents.texts.iter().enumerate() {
-        if t.hidden {
+        if t.hidden && !show_hidden {
             continue;
         }
         let owner = owned.then_some(Owner::Text(i));

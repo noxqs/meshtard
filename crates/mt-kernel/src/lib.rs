@@ -22,6 +22,7 @@ pub mod tessellate;
 pub mod texture;
 pub mod transform;
 pub mod validate;
+pub mod visibility;
 
 pub use annotation::{Dimension, DimensionKind, Text};
 pub use entities::*;

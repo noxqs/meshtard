@@ -106,6 +106,13 @@ pub struct StyleSettings {
     pub section_fill: bool,
     /// Section fill color (sRGB). SketchUp's default is unverified (dark gray here).
     pub section_fill_color: [u8; 3],
+    /// View > Axes: draw the drawing axes.
+    pub axes: bool,
+    /// View > Guides: draw (and infer from) construction guides.
+    pub guides: bool,
+    /// View > Hidden Geometry: draw hidden entities (edges dashed, faces faded) and let
+    /// them be selected.
+    pub hidden_geometry: bool,
 }
 
 impl Default for StyleSettings {
@@ -121,6 +128,9 @@ impl Default for StyleSettings {
             section_cuts: true,
             section_fill: true,
             section_fill_color: [64, 64, 64],
+            axes: true,
+            guides: true,
+            hidden_geometry: false,
         }
     }
 }

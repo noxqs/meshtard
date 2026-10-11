@@ -14,21 +14,21 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
    `Camera::perspective` already exists and renders; add the commands and check marks. Make sure picking and inference use the orthographic ray (`Camera::ray`).
 4. [x] **Previous / Next camera** (`camera.previous`, `camera.next`) S.
    A camera history in `App` (push on each finished orbit/pan/zoom/view command, cap ~50). Trial: is a single wheel step one entry?
-5. [ ] **Hide / Unhide (Selected, Last, All)** (`edit.hide`, `edit.unhide_*`) S.
+5. [x] **Hide / Unhide (Selected, Last, All)** (`edit.hide`, `edit.unhide_*`) S.
    `hidden` flags exist on edges, faces, instances, annotations and the renderer skips them. Add the commands with undo; "Last" needs the last hidden set kept in the document. Depends on item 8 (Hidden Geometry) to select hidden things for Unhide Selected.
 6. [ ] **Cut / Copy / Paste / Paste In Place** (`edit.cut|copy|paste|paste_in_place`) M.
    Clipboard = a detached `Entities` (selection copied with its connected edges, components by definition). Paste starts a Move-like placement with the cursor (reuse `modify.rs` Move preview); Paste In Place inserts at the original coordinates in the active context. Internal clipboard first; system clipboard later. Trial: paste grab point (bounding box corner?).
-7. [ ] **Invert Selection** (`edit.invert_selection`, Ctrl+Shift+I) S.
+7. [x] **Invert Selection** (`edit.invert_selection`, Ctrl+Shift+I) S.
    Everything visible in the active context minus the selection.
-8. [ ] **View toggles: Axes, Guides, Hidden Geometry, Scene Tabs** (`view.axes|guides|hidden_geometry|scene_tabs`) S.
+8. [x] **View toggles: Axes, Guides, Hidden Geometry, Scene Tabs** (`view.axes|guides|hidden_geometry|scene_tabs`) S.
    Flags in `StyleSettings` (axes/guides per model, hidden geometry draws hidden edges dashed and faces as a mesh). Save in the file where the format has it. Check marks via `view_checked`.
 9. [ ] **Edge Style toggles: Edges, Back Edges, Profiles, Depth Cue, Extension** (`view.edges` …) M.
    `profiles` exists in `StyleSettings`; renderer needs: edges off, back edges dashed through faces (second pass without depth test, dashed shader), profile width, depth cue (width by distance), extension (lines overshoot). Trial: default widths and dash pattern.
-10. [ ] **Window menu opens tray panels** (`window.entity_info|components|materials|styles|tags|scenes|shadows|outliner|soften_edges|fog|environments|instructor`, `window.tray_show`) S.
-    Shell API to show the tray and expand a panel; panels not built yet (Fog, Soften Edges, Environments, Instructor) get stubs or stay grey until built.
-11. [ ] **Zoom Window** (`camera.zoom_window`, Ctrl+Shift+W) S.
+10. [x] **Window menu opens tray panels** (`window.entity_info|components|materials|styles|tags|scenes|shadows|outliner|soften_edges|fog|environments|instructor`, `window.tray_show`) S.
+    Shell API to show the tray and expand a panel; panels not built yet (Fog, Soften Edges, Environments, Instructor) get stubs or stay grey until built. Done for the built panels and Show Tray (check mark); the others stay grey.
+11. [x] **Zoom Window** (`camera.zoom_window`, Ctrl+Shift+W) S.
     Drag a box; fit the camera to it along the current direction.
-12. [ ] **Lock / Unlock** (`edit.lock`, `edit.unlock_*`) S.
+12. [x] **Lock / Unlock** (`edit.lock`, `edit.unlock_*`) S.
     `locked` flag on groups and component instances (read and write it in the file); locked instances can be selected but not edited or moved; drawn with red selection box. Trial: what is blocked exactly.
 
 ## Tier 2: modeling power and file exchange

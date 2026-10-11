@@ -191,6 +191,17 @@ Reading first means real SketchUp models are available for testing everything el
 ### Later
 - Ruby plugin API (kept in view).
 
+### M10: Everyday commands (FEATURES.md Tier 1)
+- [ ] Items 1-12 of `spec/parity/FEATURES.md`: camera commands, Hide/Lock, Cut/Copy/Paste, Invert Selection, View and Edge Style toggles, Window menu panels, Zoom Window (plus Fog, item 26).
+- One commit and push when the whole tier passes fmt, clippy, tests and a GUI check.
+
+### M11: File exchange (FEATURES.md items 14-17)
+- [ ] Export 2D, Export 3D, Import, View > Animation commands.
+
+### M12: Solid Tools and modeling extras (FEATURES.md items 13, 18-28)
+
+### M13: Presentation and the rest (FEATURES.md Tier 3)
+
 ## Risks
 
 1. **Kernel robustness.** Floating-point tolerance bugs are where most effort goes. Invariant checker and property tests from day one.

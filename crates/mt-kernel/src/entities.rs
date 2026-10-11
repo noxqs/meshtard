@@ -151,6 +151,8 @@ pub struct Instance {
     pub transform: DMat4,
     pub name: String,
     pub hidden: bool,
+    /// Edit > Lock: can be selected but not moved, erased, exploded or opened.
+    pub locked: bool,
     pub layer: Option<LayerId>,
     /// Paints faces of the definition that have no material of their own.
     pub material: Option<MaterialId>,

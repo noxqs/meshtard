@@ -15,6 +15,7 @@ pub enum Tool {
     Orbit,
     Pan,
     Zoom,
+    ZoomWindow,
 }
 
 impl Tool {
@@ -47,6 +48,7 @@ impl Tool {
             "camera.orbit" => Self::Orbit,
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,
+            "camera.zoom_window" => Self::ZoomWindow,
             _ => return None,
         })
     }
@@ -60,6 +62,7 @@ impl Tool {
             Self::Orbit => "camera.orbit",
             Self::Pan => "camera.pan",
             Self::Zoom => "camera.zoom",
+            Self::ZoomWindow => "camera.zoom_window",
         }
     }
 
@@ -76,6 +79,7 @@ impl Tool {
             Self::Orbit => "Drag in direction to orbit. Shift = Pan, Ctrl = suspend gravity.",
             Self::Pan => "Drag in direction to pan.",
             Self::Zoom => "Drag up or down to zoom.",
+            Self::ZoomWindow => "Drag a window around the area to zoom to.",
         }
     }
 }
@@ -101,7 +105,7 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
     }
     if input.left_drag != DVec2::ZERO {
         match tool {
-            Tool::Select | Tool::Draw(_) | Tool::Modify(_) | Tool::Eraser => {}
+            Tool::Select | Tool::Draw(_) | Tool::Modify(_) | Tool::Eraser | Tool::ZoomWindow => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
             Tool::Orbit => camera.orbit(input.left_drag),
             Tool::Pan => camera.pan(input.left_drag, viewport),

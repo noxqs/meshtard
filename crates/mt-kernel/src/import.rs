@@ -246,6 +246,8 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             transform: transform_from_skp(&i.matrix),
             name: i.name.clone(),
             hidden: i.hidden,
+            // The lock flag's place in the file is not known; not read.
+            locked: false,
             layer: layer(&i.layer),
             material: material(i.material_id),
         });

@@ -296,6 +296,27 @@ impl Camera {
         self.eye = center - forward * distance;
     }
 
+    /// Zoom Window: centers the view on the pixel box `a`-`b` and zooms so the box
+    /// fills the view, keeping the view direction. Depth is taken at the target's
+    /// distance (SketchUp may zoom to the geometry under the box; unverified).
+    pub fn zoom_window(&mut self, a: DVec2, b: DVec2, viewport: DVec2) {
+        let size = (b - a).abs();
+        if size.x < 2.0 || size.y < 2.0 {
+            return;
+        }
+        let center = (a + b) / 2.0;
+        let Some(on_plane) = self
+            .ray(center, viewport)
+            .hit_plane(self.target, self.forward())
+        else {
+            return;
+        };
+        let scale = (size.x / viewport.x).max(size.y / viewport.y);
+        let forward = self.forward();
+        self.target = on_plane;
+        self.eye = on_plane - forward * self.distance() * scale;
+    }
+
     /// The camera looking along `view` (from the eye towards the target) at the
     /// same target, distance, field of view and projection.
     pub fn looking(&self, view: StandardView) -> Camera {
@@ -381,6 +402,27 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn zoom_window_centers_and_fills() {
+        for perspective in [true, false] {
+            let mut c = camera(perspective);
+            // A point at the target's depth.
+            let p = c.target + c.right() * 30.0 + c.up() * 20.0;
+            let px = c.project(p, VIEWPORT).unwrap();
+            let half = DVec2::new(80.0, 30.0);
+            c.zoom_window(px - half, px + half, VIEWPORT);
+            // The box center is now at the screen center and the box's width fills it.
+            let center = c.project(p, VIEWPORT).unwrap();
+            assert!(
+                (center - VIEWPORT / 2.0).length() < 1e-6,
+                "{center} {perspective}"
+            );
+            let edge = c.project(p + c.right() * 1.0, VIEWPORT).unwrap();
+            let px_per_unit = (edge - center).length();
+            assert!(px_per_unit > 5.0, "zoomed in {px_per_unit}");
         }
     }
 

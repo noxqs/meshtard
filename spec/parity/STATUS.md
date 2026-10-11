@@ -31,7 +31,7 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Tray | Shadows | differs | show, time, date, light, dark, on faces, on ground; no UTC offset, "Use sun for shading" or "From edges"; time slider spans the whole day |
 | Tray | Environments, Instructor | missing | listed in `tray.toml` but empty |
 | View | Sky and ground | unverified | colors are placeholders |
-| View | Axes (solid positive, dotted negative) | unverified | |
+| View | Axes (solid positive, dotted negative) | unverified | View > Axes toggles them (model setting, not saved in the .skp: the style field is not known) |
 | View | Edge style (color, width) | unverified | black, 1 px, soft and hidden edges skipped |
 | View | Face shading | unverified | `[shading]` draft: flat diffuse, camera light, two-sided |
 | View | Profiles (width 2, borders and silhouettes) | unverified | |
@@ -41,20 +41,26 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | View | Textures | unverified | drawn in Shaded With Textures with their imported UV mapping; colorize from memory |
 | View | Shadows (sun position, shadow map, light/dark) | unverified | NOAA sun; default location (Boulder) and time (Nov 8, 13:30) from memory; year not stored; toggles not undoable |
 | View | Translucent materials | unverified | sorted back to front |
-| View | Scene tabs | unverified | click activates; right-click Update/Add/Delete; no Move Left/Right; tab look a guess |
+| View | Scene tabs | unverified | click activates; right-click Update/Add/Delete; no Move Left/Right; tab look a guess; View > Scene Tabs shows/hides them (app setting, not saved) |
+| View | Guides toggle | unverified | View > Guides hides guides and stops inferring from them (model setting, not saved in the .skp) |
+| View | Hidden Geometry | unverified | hidden and soft edges dashed gray, hidden faces translucent with a dotted triangle mesh, hidden groups/components, section planes, dimensions and texts shown and selectable (SketchUp 2020+ splits groups etc. into View > Hidden Objects, not in our menu); colors, dash lengths and alpha from memory; not saved in the .skp |
 | View | Scene transitions | unverified | camera animates over 2 s; path a guess; tag visibility switches at once (SketchUp fades) |
 | Camera | Default eye, target, FOV | unverified | |
 | Camera | Orbit (middle drag, O) | unverified | scenario 00 |
 | Camera | Pan (shift+middle, H) | unverified | scenario 00 |
 | Camera | Zoom (wheel at cursor, Z) | unverified | scenario 00 |
 | Camera | Zoom Extents (Shift+Z), Standard Views, Parallel Projection / Perspective, Previous / Next | unverified | fit to bounding sphere; views animate and fit; Iso from the camera's quadrant; scenario 00 steps 11-14 |
-| Camera | Zoom Window | missing | FEATURES.md item 11 |
+| Camera | Zoom Window | unverified | drag a box (solid either way); centers on it at the target depth and fills the view; tool stays active |
+| Shell | Window menu opens tray panels, Show Tray | unverified | Environments, Instructor, Fog, Soften Edges still grey |
 | Select | Click rules (Ctrl add, Shift toggle, Ctrl+Shift remove) | unverified | |
 | Select | Double click face/edge, triple click connected | unverified | |
 | Select | Window (left to right) vs crossing (right to left) | unverified | solid vs dashed box |
 | Select | Edge pick aperture 5 px | unverified | |
 | Select | One click on a curve segment selects the curve | unverified | |
 | Select | Select All, Select None, Delete | unverified | |
+| Select | Invert Selection (Ctrl+Shift+I) | unverified | everything visible and selectable in the open context minus the selection (hidden entities count when Hidden Geometry is on) |
+| Edit | Hide, Unhide Selected / Last / All | unverified | undoable; works on the open context's top-level entities (edges, faces, groups, components, section planes, dimensions, texts); hidden entities leave the selection unless Hidden Geometry is on; Last = the set of the last Hide, in the context it was hidden in, used once, kept outside undo; Unhide All does not reach inside groups (from memory) |
+| Edit | Lock, Unlock Selected / All | unverified | `locked` on groups and component instances, undoable; locked: selectable, highlighted red (edges and box), not moved/rotated/scaled/painted/push-pulled by tools, not erased, deleted, exploded or opened; Make Unique and Create Group still allowed; Unlock All covers every instance in the model; Entity Info shows a Locked row (no toggle); not read from or saved to the .skp (the flag's place in the format is unknown) |
 | Geometry | Merge tolerance 0.001" | unverified | `mt_kernel::TOL` |
 | Geometry | Lines split each other where they cross | unverified | |
 | Geometry | Closed planar loop creates a face | unverified | |
@@ -112,7 +118,7 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | File | Opens at the saved view | unverified | |
 | File | Command-line path and dropped `.skp` open | unverified | |
 | File | New, Save, Save As, Save A Copy As | differs | writes SketchUp 2017 format; SketchUp 2026 writes VFF |
-| File | Round trip | differs | not saved: camera view (opens in Iso), scenes, styles, shadows, units, active section, edge tags, guides and section planes inside components; arcs reopen as polylines |
+| File | Round trip | differs | not saved: camera view (opens in Iso), scenes, styles, shadows, units, active section, edge tags, guides and section planes inside components, group/component locks, View > Axes / Guides / Hidden Geometry; arcs reopen as polylines (hidden flags of edges, faces and instances are saved) |
 | File | "Save changes?" prompt | unverified | on New, Open, dropped file, close; Yes/No/Cancel, wording a guess |
 | File | Saved files open in real SketchUp 2026 | unverified | not tried yet |
 | Platform | Linux (X11, Wayland) | unverified | main dev platform |

@@ -4,6 +4,8 @@
 use glam::{DVec2, DVec3};
 use mt_render::{Camera, StandardView};
 
+use eframe::egui;
+
 use crate::App;
 
 /// Camera views to go back and forward through (Camera > Previous / Next).
@@ -132,6 +134,57 @@ impl App {
             self.go(to);
         }
         true
+    }
+
+    /// The Zoom Window tool: drag a box; on release the view zooms to it (one
+    /// history step). The box is drawn solid in both drag directions.
+    pub(crate) fn zoom_window_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        viewport_px: DVec2,
+    ) {
+        let ppp = ui.ctx().pixels_per_point();
+        let to_px = |p: egui::Pos2| {
+            DVec2::new(
+                f64::from((p.x - rect.min.x) * ppp),
+                f64::from((p.y - rect.min.y) * ppp),
+            )
+        };
+        let primary = egui::PointerButton::Primary;
+        if response.drag_started_by(primary) {
+            self.zoom_box = ui.input(|i| i.pointer.press_origin()).map(to_px);
+        }
+        if response.drag_stopped_by(primary)
+            && let (Some(start), Some(end)) = (
+                self.zoom_box.take(),
+                response.interact_pointer_pos().map(to_px),
+            )
+        {
+            let before = self.camera.clone();
+            self.camera.zoom_window(start, end, viewport_px);
+            if self.camera != before {
+                self.camera_history.push(before);
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.zoom_box = None;
+        }
+    }
+
+    /// Draws the Zoom Window box over the rendered view.
+    pub(crate) fn draw_zoom_box(&self, ui: &egui::Ui, response: &egui::Response, rect: egui::Rect) {
+        if let (Some(_), Some(start), Some(end)) = (
+            self.zoom_box,
+            ui.input(|i| i.pointer.press_origin()),
+            response.interact_pointer_pos(),
+        ) {
+            let r = egui::Rect::from_two_pos(start, end).intersect(rect);
+            let stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+            ui.painter()
+                .rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+        }
     }
 
     /// Moves to `to` with the scene transition animation; a projection change is

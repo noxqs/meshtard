@@ -1303,6 +1303,7 @@ impl ModifyTool for PlaceComponent {
             transform,
             name: String::new(),
             hidden: false,
+            locked: false,
             layer: None,
             material: None,
         });

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use glam::{DMat3, DMat4, DVec3};
 use mt_kernel::{
     DefinitionId, EdgeId, Entities, FaceId, MaterialId, Model, import, tessellate, texture,
+    visibility,
 };
 use mt_render::{Camera, FaceVertex, Segment};
 
@@ -34,6 +35,9 @@ pub struct Document {
     /// The group or component open for editing: instance indices from the root down
     /// (empty: editing the model root).
     pub context: Vec<usize>,
+    /// What the last Edit > Hide hid, and the context it was in (Edit > Unhide > Last).
+    /// Not part of undo: an undo can leave it naming other entities.
+    last_hidden: Option<(Vec<usize>, Vec<Owner>)>,
 }
 
 /// Undo steps kept.
@@ -52,6 +56,32 @@ pub enum Owner {
     Dimension(usize),
     /// Index into the context's `texts`.
     Text(usize),
+}
+
+impl Owner {
+    pub fn item(self) -> visibility::Item {
+        use visibility::Item;
+        match self {
+            Self::Face(f) => Item::Face(f),
+            Self::Edge(e) => Item::Edge(e),
+            Self::Instance(i) => Item::Instance(i),
+            Self::Section(i) => Item::Section(i),
+            Self::Dimension(i) => Item::Dimension(i),
+            Self::Text(i) => Item::Text(i),
+        }
+    }
+
+    fn from_item(item: visibility::Item) -> Self {
+        use visibility::Item;
+        match item {
+            Item::Face(f) => Self::Face(f),
+            Item::Edge(e) => Self::Edge(e),
+            Item::Instance(i) => Self::Instance(i),
+            Item::Section(i) => Self::Section(i),
+            Item::Dimension(i) => Self::Dimension(i),
+            Item::Text(i) => Self::Text(i),
+        }
+    }
 }
 
 /// Everything the viewport draws for the model, with the owner of each piece.
@@ -73,6 +103,9 @@ pub struct Scene {
     pub annotations: Vec<crate::annot::Annotation>,
     /// The textures `FaceVertex::texture` indexes, for `Viewport::set_textures`.
     pub textures: Vec<mt_render::TextureSource>,
+    /// Indices into `edges` of hidden entities drawn by View > Hidden Geometry (not
+    /// snapped to).
+    pub hidden_edges: HashSet<usize>,
     /// Index into `textures` of each model material (`FaceVertex::NO_TEXTURE` when
     /// untextured).
     texture_of: Vec<u32>,
@@ -89,6 +122,15 @@ enum Level<'a> {
     Outside,
 }
 
+/// What an instance passes to its contents.
+#[derive(Clone, Copy, Default)]
+struct Inherited {
+    /// Paints faces without a material of their own.
+    material: Option<MaterialId>,
+    /// Inside a hidden instance (drawn only with View > Hidden Geometry).
+    hidden: bool,
+}
+
 /// Edge color outside the open group or component (draft; SketchUp fades the rest of
 /// the model, amount unverified).
 const FADED_EDGE: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
@@ -98,6 +140,13 @@ fn fade(c: [f32; 4]) -> [f32; 4] {
     let l = |x: f32| x + (1.0 - x) * 0.55;
     [l(c[0]), l(c[1]), l(c[2]), c[3]]
 }
+
+/// How View > Hidden Geometry draws hidden entities (drafts: SketchUp shows hidden
+/// edges dashed and hidden faces as a faded mesh; colors and dash lengths unverified).
+const HIDDEN_EDGE: [f32; 4] = [0.45, 0.45, 0.45, 1.0];
+const HIDDEN_DASH: f32 = 4.0;
+const HIDDEN_MESH_DASH: f32 = 2.0;
+const HIDDEN_FACE_ALPHA: f32 = 0.35;
 
 /// Section plane outline colors (drafts; SketchUp's are unverified).
 const SECTION_COLOR: [f32; 4] = [0.85, 0.55, 0.2, 1.0];
@@ -127,6 +176,7 @@ impl Document {
             saved_state: 0,
             next_state: 1,
             has_file: true,
+            last_hidden: None,
         })
     }
 
@@ -144,6 +194,7 @@ impl Document {
             saved_state: 0,
             next_state: 1,
             has_file: false,
+            last_hidden: None,
         }
     }
 
@@ -202,7 +253,8 @@ impl Document {
 
     /// Opens instance `index` of the active context for editing.
     pub fn open_instance(&mut self, index: usize) -> bool {
-        if index >= self.active().instances.len() {
+        // Locked groups and components cannot be opened.
+        if self.active().instances.get(index).is_none_or(|i| i.locked) {
             return false;
         }
         self.context.push(index);
@@ -342,7 +394,7 @@ impl Document {
         self.collect(
             root,
             DMat4::IDENTITY,
-            None,
+            Inherited::default(),
             Level::Context(&self.context),
             &mut active,
             &mut scene,
@@ -350,7 +402,12 @@ impl Document {
         let f = |p: DVec3| p.as_vec3().to_array();
         self.section_planes(&mut scene);
         crate::annot::collect(self, &mut scene);
-        for g in &root.guides {
+        let guides = if self.model.style.guides {
+            &root.guides[..]
+        } else {
+            &[]
+        };
+        for g in guides {
             match g.dir {
                 Some(d) => scene.guides.push(Segment::line(
                     f(g.point - d * GUIDE_EXTENT),
@@ -406,7 +463,7 @@ impl Document {
         };
         let f = |p: DVec3| p.as_vec3().to_array();
         for (i, sp) in ents.section_planes.iter().enumerate() {
-            if sp.hidden {
+            if sp.hidden && !self.model.style.hidden_geometry {
                 continue;
             }
             let c = xf.transform_point3(sp.point);
@@ -465,11 +522,14 @@ impl Document {
         &self,
         ents: &Entities,
         xf: DMat4,
-        inherited: Option<MaterialId>,
+        inherited: Inherited,
         level: Level,
         active: &mut HashSet<DefinitionId>,
         out: &mut Scene,
     ) {
+        let show_hidden = self.model.style.hidden_geometry;
+        let ghost = inherited.hidden;
+        let inherited = inherited.material;
         // Outside the open context: faded, not selectable.
         let faded = matches!(level, Level::Outside | Level::Context([_, ..]));
         let owner_of = |own: Owner| match level {
@@ -488,9 +548,10 @@ impl Document {
 
         for (id, e) in &ents.edges {
             // Styles > Edges off hides all edges (profiles too, in this draft).
+            // View > Hidden Geometry shows hidden edges (and soft ones) dashed.
+            let hidden = ghost || e.attrs.hidden || e.attrs.soft;
             if !self.model.style.edges
-                || e.attrs.hidden
-                || e.attrs.soft
+                || (hidden && !show_hidden)
                 || !self.layer_visible(e.attrs.layer)
             {
                 continue;
@@ -498,9 +559,15 @@ impl Document {
             let mut seg = Segment::line(
                 world(ents.pos(e.start)),
                 world(ents.pos(e.end)),
-                edge_color,
-                [EDGE_WIDTH, 0.0],
+                if hidden { HIDDEN_EDGE } else { edge_color },
+                [EDGE_WIDTH, if hidden { HIDDEN_DASH } else { 0.0 }],
             );
+            if hidden {
+                out.hidden_edges.insert(out.edges.len());
+                out.edges.push(seg);
+                out.edge_owner.push(owner_of(Owner::Edge(id)));
+                continue;
+            }
             match e.faces[..] {
                 [] => {}
                 [f] => {
@@ -518,21 +585,26 @@ impl Document {
         }
 
         for (f, face) in &ents.faces {
-            if face.attrs.hidden || !self.layer_visible(face.attrs.layer) {
+            let hidden = ghost || face.attrs.hidden;
+            if (hidden && !show_hidden) || !self.layer_visible(face.attrs.layer) {
                 continue;
             }
             let front_material = face.attrs.material.or(inherited);
             let back_material = face.attrs.back_material.or(inherited);
             let mut front = self.color(front_material, self.model.front_color);
             let mut back = self.color(back_material, self.model.back_color);
-            if faded {
+            if faded || hidden {
                 front = fade(front);
                 back = fade(back);
+            }
+            if hidden {
+                front[3] = front[3].min(HIDDEN_FACE_ALPHA);
+                back[3] = back[3].min(HIDDEN_FACE_ALPHA);
             }
             // Texture mapping per side, in the face's own coordinates. Faded geometry
             // (outside the open context) shows its lightened colors, not textures.
             let side = |m: Option<MaterialId>, is_back: bool| {
-                let i = m.filter(|_| !faded)?;
+                let i = m.filter(|_| !faded && !hidden)?;
                 let layer = *out.texture_of.get(i)?;
                 let map = texture::face_mapping(face, is_back, self.model.materials.get(i)?)?;
                 // Shift by whole repeats so the numbers stay small in f32.
@@ -571,13 +643,27 @@ impl Document {
                         ..FaceVertex::new(f32x3(world[k]), f32x3(n), front, back)
                     });
                 }
+                if hidden {
+                    // A hidden face shows as a mesh of its triangles.
+                    for k in 0..3 {
+                        let seg = Segment::line(
+                            f32x3(tri[k]),
+                            f32x3(tri[(k + 1) % 3]),
+                            HIDDEN_EDGE,
+                            [EDGE_WIDTH, HIDDEN_MESH_DASH],
+                        );
+                        out.hidden_edges.insert(out.edges.len());
+                        out.edges.push(seg);
+                        out.edge_owner.push(owner_of(Owner::Face(f)));
+                    }
+                }
                 out.triangles.push(tri);
                 out.tri_owner.push(owner_of(Owner::Face(f)));
             }
         }
 
         for (index, i) in ents.instances.iter().enumerate() {
-            if i.hidden || !self.layer_visible(i.layer) {
+            if (i.hidden && !show_hidden) || !self.layer_visible(i.layer) {
                 continue;
             }
             let Some(def) = self.model.definitions.get(i.definition) else {
@@ -593,15 +679,11 @@ impl Document {
                 Level::Inside(o) => Level::Inside(o),
                 _ => Level::Outside,
             };
-            let material = i.material.or(inherited);
-            self.collect(
-                &def.entities,
-                xf * i.transform,
-                material,
-                child,
-                active,
-                out,
-            );
+            let parent = Inherited {
+                material: i.material.or(inherited),
+                hidden: ghost || i.hidden,
+            };
+            self.collect(&def.entities, xf * i.transform, parent, child, active, out);
             active.remove(&i.definition);
         }
     }
@@ -610,7 +692,11 @@ impl Document {
     /// them, coplanar neighbors merge), faces are removed leaving their edges, components
     /// are removed.
     pub fn delete(&mut self, items: &[Owner]) {
-        let items = items.to_vec();
+        let items: Vec<Owner> = items
+            .iter()
+            .copied()
+            .filter(|o| !self.is_locked(*o))
+            .collect();
         self.edit(|root| {
             Self::delete_in(root, &items);
             !items.is_empty()
@@ -651,7 +737,8 @@ impl Document {
         instances.sort_unstable();
         instances.dedup();
         for i in instances.into_iter().rev() {
-            if i < root.instances.len() {
+            // Locked groups and components are not erased.
+            if root.instances.get(i).is_some_and(|x| !x.locked) {
                 root.instances.remove(i);
             }
         }
@@ -661,7 +748,11 @@ impl Document {
     /// `hide` (Shift) hides edges instead, `soften` (Ctrl) softens and smooths them,
     /// both together unsoften.
     pub fn erase(&mut self, items: &[Owner], hide: bool, soften: bool) {
-        let items = items.to_vec();
+        let items: Vec<Owner> = items
+            .iter()
+            .copied()
+            .filter(|o| !self.is_locked(*o))
+            .collect();
         self.edit(|root| {
             Self::erase_in(root, &items, hide, soften);
             !items.is_empty()
@@ -702,6 +793,78 @@ impl Document {
             }
         }
         Self::delete_in(root, &erase);
+    }
+
+    /// Whether `o` is a locked group or component of the active context.
+    pub fn is_locked(&self, o: Owner) -> bool {
+        visibility::is_locked(self.active(), o.item())
+    }
+
+    /// Edit > Hide: hides `items` of the active context and remembers them for
+    /// Edit > Unhide > Last.
+    pub fn hide(&mut self, items: &[Owner]) -> bool {
+        let items: Vec<_> = items.iter().map(|o| o.item()).collect();
+        let mut changed = Vec::new();
+        let done = self.edit(|ents| {
+            changed = visibility::set_hidden(ents, &items, true);
+            !changed.is_empty()
+        });
+        if done {
+            let hidden = changed.into_iter().map(Owner::from_item).collect();
+            self.last_hidden = Some((self.context.clone(), hidden));
+        }
+        done
+    }
+
+    /// Edit > Unhide > Selected.
+    pub fn unhide(&mut self, items: &[Owner]) -> bool {
+        let items: Vec<_> = items.iter().map(|o| o.item()).collect();
+        self.edit(|ents| !visibility::set_hidden(ents, &items, false).is_empty())
+    }
+
+    /// Edit > Unhide > Last: shows what the last Edit > Hide hid, in the context it was
+    /// hidden in (the open context stays as it is).
+    pub fn unhide_last(&mut self) -> bool {
+        let Some((context, items)) = self.last_hidden.clone() else {
+            return false;
+        };
+        if Self::path_definitions(&self.model, &context).is_none() {
+            return false;
+        }
+        let current = std::mem::replace(&mut self.context, context);
+        let done = self.unhide(&items);
+        self.context = current.clone();
+        if done {
+            // Undo returns to the context the command ran in.
+            if let Some(step) = self.undo.last_mut() {
+                step.1 = current;
+            }
+            self.last_hidden = None;
+        }
+        self.fix_context();
+        done
+    }
+
+    /// Edit > Unhide > All: every hidden entity of the active context (not inside its
+    /// groups and components; unverified against SketchUp).
+    pub fn unhide_all(&mut self) -> bool {
+        self.edit(visibility::unhide_all)
+    }
+
+    /// Edit > Lock and Edit > Unlock > Selected.
+    pub fn lock(&mut self, items: &[Owner], locked: bool) -> bool {
+        let items: Vec<_> = items.iter().map(|o| o.item()).collect();
+        self.edit(|ents| visibility::set_locked(ents, &items, locked))
+    }
+
+    /// Edit > Unlock > All: every group and component in the model.
+    pub fn unlock_all(&mut self) -> bool {
+        self.edit_model(|model, ents| {
+            let all: Vec<_> = (0..ents.instances.len())
+                .map(visibility::Item::Instance)
+                .collect();
+            visibility::unlock_all(model) | visibility::set_locked(ents, &all, false)
+        })
     }
 
     pub fn extents_camera(&self, fov_deg: f64) -> Option<Camera> {
@@ -806,6 +969,127 @@ mod tests {
         assert!(doc.undo(), "undo the diagonal; reopens the group");
         assert_eq!(doc.context, vec![0]);
         assert_eq!(doc.active().faces.len(), 1);
+    }
+
+    /// A 10" square face at the root and a group made from a copy of it.
+    fn square_and_group() -> Document {
+        let mut doc = Document::untitled();
+        let p = [
+            DVec3::ZERO,
+            DVec3::X * 10.0,
+            DVec3::new(10.0, 10.0, 0.0),
+            DVec3::Y * 10.0,
+        ];
+        doc.edit(|root| {
+            for i in 0..4 {
+                mt_kernel::add_line(root, p[i], p[(i + 1) % 4]);
+            }
+            true
+        });
+        doc.edit_model(|model, ents| {
+            let sel = mt_kernel::group::Selection {
+                edges: ents.edges.keys().collect(),
+                faces: ents.faces.keys().collect(),
+                instances: vec![],
+            };
+            mt_kernel::group::make_group(&mut model.definitions, ents, &sel, "Group#1".into(), true)
+                .is_some()
+        });
+        doc.edit(|root| {
+            for i in 0..4 {
+                let up = DVec3::Z * 20.0;
+                mt_kernel::add_line(root, p[i] + up, p[(i + 1) % 4] + up);
+            }
+            true
+        });
+        doc
+    }
+
+    #[test]
+    fn hide_unhide_with_undo() {
+        let mut doc = square_and_group();
+        let face = doc.model.root.faces.keys().next().unwrap();
+        let visible_tris = doc.scene().triangles.len();
+        assert!(doc.hide(&[Owner::Face(face), Owner::Instance(0)]));
+        assert!(doc.scene().triangles.is_empty());
+        assert!(
+            !doc.hide(&[Owner::Face(face)]),
+            "already hidden: no undo step"
+        );
+        // Hidden Geometry shows them, selectable, and marks their edges as hidden.
+        doc.model.style.hidden_geometry = true;
+        let scene = doc.scene();
+        assert_eq!(scene.triangles.len(), visible_tris);
+        assert!(scene.tri_owner.contains(&Some(Owner::Instance(0))));
+        assert!(scene.tri_owner.contains(&Some(Owner::Face(face))));
+        assert!(!scene.hidden_edges.is_empty());
+        assert!(
+            scene
+                .hidden_edges
+                .iter()
+                .all(|&i| scene.edges[i].style[1] > 0.0),
+            "hidden edges are dashed"
+        );
+        doc.model.style.hidden_geometry = false;
+        assert!(doc.unhide(&[Owner::Instance(0)]));
+        assert!(!doc.model.root.instances[0].hidden);
+        assert!(doc.model.root.faces[face].attrs.hidden);
+        // Unhide Last brings back the rest of the last hidden set.
+        assert!(doc.unhide_last());
+        assert!(!doc.model.root.faces[face].attrs.hidden);
+        assert!(!doc.unhide_last(), "used up");
+        assert!(doc.undo());
+        assert!(doc.model.root.faces[face].attrs.hidden);
+        assert!(doc.unhide_all());
+        assert!(!doc.model.root.faces[face].attrs.hidden);
+        assert!(!doc.unhide_all());
+    }
+
+    #[test]
+    fn unhide_last_works_from_another_context() {
+        let mut doc = square_and_group();
+        assert!(doc.open_instance(0));
+        let face = doc.active().faces.keys().next().unwrap();
+        assert!(doc.hide(&[Owner::Face(face)]));
+        doc.close_instance();
+        assert!(doc.unhide_last());
+        assert!(doc.context.is_empty(), "the open context does not change");
+        let def = doc.model.root.instances[0].definition;
+        assert!(!doc.model.definitions[def].entities.faces[face].attrs.hidden);
+        assert!(doc.undo());
+        assert!(doc.context.is_empty());
+        assert!(doc.model.definitions[def].entities.faces[face].attrs.hidden);
+    }
+
+    #[test]
+    fn locked_instances_resist_edits() {
+        let mut doc = square_and_group();
+        assert!(doc.lock(&[Owner::Instance(0)], true));
+        assert!(doc.is_locked(Owner::Instance(0)));
+        assert!(!doc.open_instance(0), "a locked group does not open");
+        doc.delete(&[Owner::Instance(0)]);
+        assert_eq!(doc.model.root.instances.len(), 1, "not deleted");
+        doc.erase(&[Owner::Instance(0)], false, false);
+        assert_eq!(doc.model.root.instances.len(), 1, "not erased");
+        assert!(doc.lock(&[Owner::Instance(0)], false));
+        assert!(doc.lock(&[Owner::Instance(0)], true));
+        assert!(doc.unlock_all());
+        assert!(!doc.is_locked(Owner::Instance(0)));
+        assert!(!doc.unlock_all());
+        assert!(doc.undo());
+        assert!(doc.is_locked(Owner::Instance(0)), "unlock is an undo step");
+    }
+
+    #[test]
+    fn guides_toggle_hides_guides() {
+        let mut doc = Document::untitled();
+        doc.model.root.guides.push(mt_kernel::Guide {
+            point: DVec3::ZERO,
+            dir: Some(DVec3::X),
+        });
+        assert_eq!(doc.scene().guides.len(), 1);
+        doc.model.style.guides = false;
+        assert!(doc.scene().guides.is_empty());
     }
 
     #[test]

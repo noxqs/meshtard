@@ -256,6 +256,7 @@ pub fn make_group_with_frame(
         transform: frame,
         name: String::new(),
         hidden: false,
+        locked: false,
         layer: None,
         material: None,
     });
