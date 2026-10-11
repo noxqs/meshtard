@@ -94,6 +94,7 @@ mod tests {
             locked: false,
             normal: None,
             segment: None,
+            container: None,
         };
         let o = DVec3::new(10.0, 0.0, 0.0);
         for p in [o, o + DVec3::Y * 5.0, o - DVec3::X * 3.0] {

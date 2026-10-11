@@ -172,6 +172,7 @@ fn hinted(inf: &Inference, point: DVec3, kind: Kind, guide: Option<(DVec3, DVec3
         guide,
         edge: None,
         segment: None,
+        container: None,
         ..*inf
     }
 }
@@ -189,6 +190,7 @@ mod tests {
             locked: false,
             normal: None,
             segment: None,
+            container: None,
         }
     }
 

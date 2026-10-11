@@ -215,6 +215,13 @@ impl App {
                 }
                 false
             }
+            Event::MaterialDefault => {
+                self.current_material = None;
+                if let Some(t) = self.modify.as_mut() {
+                    t.set_material(None);
+                }
+                false
+            }
             Event::MaterialCreate => {
                 doc.edit_model(|m, _| {
                     let n = (1..)

@@ -38,6 +38,7 @@ pub enum Kind {
     Move,
     Rotate,
     Scale,
+    Flip,
     PushPull,
     FollowMe,
     Offset,
@@ -129,6 +130,7 @@ impl Kind {
         Self::Move,
         Self::Rotate,
         Self::Scale,
+        Self::Flip,
         Self::PushPull,
         Self::FollowMe,
         Self::Offset,
@@ -165,8 +167,8 @@ impl Kind {
             | Arc3Point | Pie | Freehand | Sandbox | Eraser | PaintBucket | Eyedropper
             | TapeMeasure => Layout::Tip,
             Axes => Layout::Origin,
-            Move | Rotate | Scale | PushPull | FollowMe | Offset | Protractor | Orbit | Pan
-            | Zoom | ZoomWindow | FieldOfView | Walk | LookAround | PositionCamera => {
+            Move | Rotate | Scale | Flip | PushPull | FollowMe | Offset | Protractor | Orbit
+            | Pan | Zoom | ZoomWindow | FieldOfView | Walk | LookAround | PositionCamera => {
                 Layout::Centered
             }
         }
@@ -189,9 +191,8 @@ impl Kind {
             PushPull => (14.0, 18.0),
             Zoom | ZoomWindow => (12.0, 12.0),
             PositionCamera => (16.0, 30.0),
-            Move | Scale | FollowMe | Offset | Orbit | Pan | FieldOfView | Walk | LookAround => {
-                (16.0, 16.0)
-            }
+            Move | Scale | Flip | FollowMe | Offset | Orbit | Pan | FieldOfView | Walk
+            | LookAround => (16.0, 16.0),
         }
     }
 
@@ -602,6 +603,7 @@ fn draw_kind(k: &mut Ink, kind: Kind) {
         }
         Protractor => protractor(k),
         Scale => scale(k),
+        Flip => flip(k),
         PushPull => push_pull(k),
         FollowMe => follow_me(k),
         Offset => offset(k),
@@ -801,6 +803,17 @@ fn protractor(k: &mut Ink) {
         );
     }
     k.disc(c, 1.5, INK);
+}
+
+/// A shape and its mirror image across a dashed plane, with a double arrow.
+fn flip(k: &mut Ink) {
+    k.shape(&[(13.0, 9.0), (13.0, 23.0), (4.0, 23.0)], FACE);
+    k.shape(&[(19.0, 9.0), (19.0, 23.0), (28.0, 23.0)], LIGHT_BLUE);
+    for y in [2.0, 7.0, 12.0, 17.0, 22.0, 27.0] {
+        k.line(&[(16.0, y), (16.0, y + 3.0)], 1.2, RED);
+    }
+    k.arrow((12.0, 5.0), (4.0, 5.0), 1.4, INK);
+    k.arrow((20.0, 5.0), (28.0, 5.0), 1.4, INK);
 }
 
 fn scale(k: &mut Ink) {

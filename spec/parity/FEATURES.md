@@ -137,9 +137,9 @@ Source: help.sketchup.com pages and the 2024.0-2026.2 release notes; the per-ite
 45. [x] **Select submenu** S: Connected Faces, Bounding Edges, All Connected, All with Same Tag / Material, Deselect Edges / Faces, Invert. Connected by Snaps: no (needs item 59).
 46. [x] **Reverse Faces / Orient Faces** S. `mt_kernel::orient`.
 47. [x] **Flip Along > Red / Green / Blue; Reset Scale, Reset Skew, Scale Definition** S (instances). `mt_kernel::instance_ops`.
-48. [ ] **Flip tool** M: three draggable planes, arrow keys pick the plane, Ctrl = flipped copy, Alt = object/parent axes, custom plane on a face, arrays `3x` / `3/`.
-49. [ ] **Inference inside an open group or component** M (STATUS `missing`): magenta markers, "in group" tooltip; also On Section, Perpendicular to Face, Extend Edge.
-50. [ ] **Paint Bucket modes** S: Alt sample, Shift all matching, Ctrl all connected, Ctrl+Shift same object; Default material.
+48. [x] **Flip tool** M: three draggable planes, arrow keys pick the plane, Ctrl = flipped copy, Alt = object/parent axes, custom plane on a face, arrays `3x` / `3/`.
+49. [x] **Inference inside an open group or component** M (STATUS `missing`): magenta markers, "in group" tooltip; also On Section, Perpendicular to Face, Extend Edge.
+50. [x] **Paint Bucket modes** S: Alt sample, Shift all matching, Ctrl all connected, Ctrl+Shift same object; Default material.
 51. [x] **Divide; Weld Edges / Explode Curve** S-M: live division points, typed segment count or length. `mt_kernel::curves`; typed segment length and Divide on free-form curves not done.
 52. [ ] **Entity Info fields** M: visibility / lock / shadow toggles, instance name vs definition, advanced attributes, editable length / radius / segments, soft/smooth on edges, section plane name and symbol, text and dimension options.
 53. [ ] **Materials Edit tab** M: color wheel / RGB / HSL / HEX, texture load/replace, size with aspect lock, external editor.

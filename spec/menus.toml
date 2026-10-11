@@ -67,6 +67,9 @@ items = [
   { id = "edit.create_group", label = "Create Group" },
   { id = "edit.make_component", label = "Make Component..." },
   { id = "edit.close_group", label = "Close Group/Component" },
+  # Flip tool (help page "Flipping, mirroring, rotating and arrays": Edit menu,
+  # Getting Started and Large Tool Set). Position in the menu unverified.
+  { id = "tool.flip", label = "Flip" },
   { label = "Intersect Faces", items = [
     { id = "edit.intersect_model", label = "With Model" },
     { id = "edit.intersect_selection", label = "With Selection" },

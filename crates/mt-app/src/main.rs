@@ -14,6 +14,7 @@ mod cursor;
 mod document;
 mod export;
 mod filedialog;
+mod flip;
 mod image_entity;
 mod import;
 #[cfg(target_os = "macos")]
@@ -23,6 +24,7 @@ mod model_info;
 mod modify;
 mod nav;
 mod overlay;
+mod paint;
 mod pick_tool;
 mod preferences;
 mod presentation;
@@ -32,6 +34,7 @@ mod sandbox;
 mod section_export;
 mod selection;
 mod settings;
+mod snap;
 mod soften;
 mod solid_tools;
 mod splash;
@@ -96,6 +99,7 @@ const IMPLEMENTED: &[&str] = &[
     "tool.offset",
     "tool.follow_me",
     "tool.paint_bucket",
+    "tool.flip",
     "edit.intersect_model",
     "edit.intersect_selection",
     "edit.create_group",
@@ -503,61 +507,11 @@ impl App {
             if gpu { "GPU" } else { "CPU" },
             start.elapsed()
         );
-        let v3 = |p: [f32; 3]| DVec3::new(p[0].into(), p[1].into(), p[2].into());
-        self.geometry = mt_infer::Geometry::from_edges(
-            self.scene
-                .edges
-                .iter()
-                .zip(&self.scene.edge_owner)
-                .enumerate()
-                // Dimension and text lines and hidden geometry are not snapped to.
-                .filter(|(i, (_, o))| {
-                    !matches!(o, Some(Owner::Dimension(_) | Owner::Text(_)))
-                        && !self.scene.hidden_edges.contains(i)
-                })
-                .map(|(_, (s, _))| [v3(s.a), v3(s.b)])
-                .collect(),
-        );
-        if let Some(doc) = &self.document
-            && doc.model.style.guides
-        {
-            for g in &doc.model.root.guides {
-                match g.dir {
-                    Some(d) => self.geometry.guide_lines.push((g.point, d)),
-                    None => self.geometry.guide_points.push(g.point),
-                }
-            }
-        }
         self.ctx_xf = self
             .document
             .as_ref()
             .map_or(glam::DMat4::IDENTITY, Document::context_transform);
-        // Arcs and circles of the open context, for the "center" inference.
-        if let Some(doc) = &self.document {
-            let ents = doc.active();
-            let mut arcs: std::collections::BTreeMap<_, (mt_kernel::Arc, Vec<usize>)> =
-                std::collections::BTreeMap::new();
-            for (i, owner) in self.scene.edge_owner.iter().enumerate() {
-                let Some(Owner::Edge(e)) = owner else {
-                    continue;
-                };
-                let Some(c) = ents.edges.get(*e).and_then(|e| e.attrs.curve) else {
-                    continue;
-                };
-                if let Some(arc) = ents.curves.get(c).and_then(|c| c.arc) {
-                    arcs.entry(c).or_insert((arc, Vec::new())).1.push(i);
-                }
-            }
-            let xf = self.ctx_xf;
-            for (arc, edges) in arcs.into_values() {
-                let curve = mt_infer::ArcCurve {
-                    center: xf.transform_point3(arc.center),
-                    normal: xf.transform_vector3(arc.normal).normalize_or_zero(),
-                    radius: xf.transform_vector3(arc.x_axis * arc.radius).length(),
-                };
-                self.geometry.add_arc(curve, edges);
-            }
-        }
+        self.geometry = snap::geometry(&self.scene, self.document.as_ref(), self.ctx_xf);
         self.engine.geometry_changed();
         self.apply_shadows();
         self.cut_lines.clear();
@@ -569,8 +523,8 @@ impl App {
             });
             let width = doc.model.style.section_cut_width;
             let f = |q: DVec3| q.as_vec3().to_array();
-            self.cut_lines = mt_render::section_lines(&self.scene.triangles, p, n)
-                .into_iter()
+            self.geometry.section_lines = mt_render::section_lines(&self.scene.triangles, p, n);
+            self.cut_lines = (self.geometry.section_lines.iter().copied())
                 .map(|[a, b]| Segment::line(f(a), f(b), [0.0, 0.0, 0.0, 1.0], [width, 0.0]))
                 .collect();
         }
@@ -1560,6 +1514,18 @@ impl App {
                 }
             }
             let anchor = anchor.map(|a| xf.transform_point3(a));
+            if let Some(m) = &self.modify {
+                // Flip's planes, under the inference marker.
+                let planes: Vec<_> = m
+                    .planes(&local)
+                    .into_iter()
+                    .map(|p| modify::Plane {
+                        corners: p.corners.map(|c| xf.transform_point3(c)),
+                        ..p
+                    })
+                    .collect();
+                overlay::planes(&ui.painter().with_clip_rect(rect), to_screen, &planes);
+            }
             overlay::paint(
                 &ui.painter().with_clip_rect(rect),
                 to_screen,
@@ -1754,7 +1720,7 @@ impl App {
             mt_infer::Axis::Green,
             mt_infer::Axis::Blue,
         ]) {
-            if pressed {
+            if pressed && !tool.arrow(axis) {
                 self.engine.toggle_axis_lock(axis);
             }
         }
@@ -1803,6 +1769,30 @@ impl App {
             .copied()
             .filter(|o| !self.document.as_ref().is_some_and(|d| d.is_locked(*o)))
             .collect();
+        let local = self.inference.map(|i| to_local(&i, self.ctx_xf));
+        tool.input(&modify::Input {
+            held: ui.input(|i| cursor::Mods {
+                ctrl: i.modifiers.command,
+                shift: i.modifiers.shift,
+                alt: i.modifiers.alt,
+            }),
+            press: response.drag_started_by(egui::PointerButton::Primary),
+            ray: cursor.map(|c| {
+                let r = self.camera.ray(c, viewport_px);
+                let inv = self.ctx_xf.inverse();
+                let d = inv.transform_vector3(r.dir).normalize_or_zero();
+                (inv.transform_point3(r.origin), d)
+            }),
+            cur: local.as_ref(),
+            material: cursor.and_then(|c| {
+                let r = self.camera.ray(c, viewport_px);
+                let hit = self.bvh.ray(r.origin, r.dir)?;
+                let [a, b, c] = self.scene.triangles.get(hit.triangle)?;
+                let back = (*b - *a).cross(*c - *a).dot(r.dir) > 0.0;
+                let m = self.scene.tri_material.get(hit.triangle)?;
+                Some(m[usize::from(back)])
+            }),
+        });
         if let Some(doc) = &self.document {
             let (camera, xf, bounds) = (&self.camera, self.ctx_xf, &self.inst_bounds);
             tool.hover(&modify::Hover {
@@ -1846,6 +1836,10 @@ impl App {
             let clicked = tool.click(&mut ctx, &inf);
             clicked | (double && tool.double_click(&mut ctx, &inf))
         });
+        // Paint Bucket with Alt: the sampled material becomes current.
+        if let Some(m) = tool.take_sampled_material() {
+            self.current_material = m;
+        }
         // Set Component Axes finished: make the component with the picked axes.
         if let Some((d, axes)) = tool.take_axes() {
             self.modify = None;

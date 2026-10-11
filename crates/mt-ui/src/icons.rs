@@ -81,6 +81,7 @@ pub const KNOWN: &[&str] = &[
     "tool.rotate",
     "tool.follow_me",
     "tool.scale",
+    "tool.flip",
     "tool.offset",
     "tool.tape_measure",
     "tool.dimensions",
@@ -147,6 +148,7 @@ pub fn paint(painter: &Painter, rect: Rect, id: &str, palette: &Palette) -> bool
         "tool.rotate" => rotate(&p),
         "tool.follow_me" => follow_me(&p),
         "tool.scale" => scale(&p),
+        "tool.flip" => flip(&p),
         "tool.offset" => offset(&p),
         "tool.tape_measure" => tape_measure(&p),
         "tool.dimensions" => dimensions(&p),
@@ -582,6 +584,15 @@ fn scale(p: &Pen) {
         p.dashed(a, b, 1.6, 1.2, p.c.green);
     }
     p.arrow((10.0, 14.0), (21.0, 3.0), 2.0, p.c.green);
+}
+
+fn flip(p: &Pen) {
+    // A shape and its mirror image across a dashed plane.
+    p.poly(&[(10.0, 6.0), (10.0, 19.0), (2.0, 19.0)], p.c.face);
+    p.poly(&[(14.0, 6.0), (14.0, 19.0), (22.0, 19.0)], p.c.face_dark);
+    p.dashed((12.0, 1.0), (12.0, 23.0), 2.0, 1.4, p.c.red);
+    p.arrow((9.0, 3.0), (3.0, 3.0), 1.4, p.c.accent);
+    p.arrow((15.0, 3.0), (21.0, 3.0), 1.4, p.c.accent);
 }
 
 fn offset(p: &Pen) {

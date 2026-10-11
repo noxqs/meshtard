@@ -41,6 +41,31 @@ pub struct Hover<'a> {
     pub cursor: Option<DVec2>,
 }
 
+/// The input of a frame, given to the tool before [`ModifyTool::hover`] and any click.
+pub struct Input<'a> {
+    /// Modifier keys held now (Paint Bucket's fill modes, Flip's Alt).
+    pub held: crate::cursor::Mods,
+    /// The primary button just went down and a drag starts (a click reports false:
+    /// it comes on release).
+    pub press: bool,
+    /// The view ray under the cursor (origin, unit direction), context space.
+    pub ray: Option<(DVec3, DVec3)>,
+    /// The inference under the cursor, context space.
+    pub cur: Option<&'a Inference>,
+    /// The material shown on the face side under the cursor (`Some(None)`: the
+    /// default material), whatever group or component the face is in.
+    pub material: Option<Option<usize>>,
+}
+
+/// A translucent plane drawn over the view (Flip's planes), context space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Plane {
+    pub corners: [DVec3; 4],
+    pub color: [u8; 3],
+    /// Under the cursor, picked by an arrow key or dragged.
+    pub hot: bool,
+}
+
 /// A point drawn over the view (Scale's grips); `hot` under the cursor or grabbed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Marker {
@@ -97,8 +122,24 @@ pub trait ModifyTool {
     fn double_click(&mut self, _ctx: &mut Ctx, _inf: &Inference) -> bool {
         false
     }
+    /// Called every frame before [`Self::hover`] and a click.
+    fn input(&mut self, _i: &Input) {}
     /// Called every frame before a click with what is under the cursor.
     fn hover(&mut self, _h: &Hover) {}
+    /// An arrow key (right = red, left = green, up = blue). Returns whether the tool
+    /// used it; otherwise it locks the inference direction.
+    fn arrow(&mut self, _axis: mt_infer::Axis) -> bool {
+        false
+    }
+    /// Translucent planes to draw over the view (Flip).
+    fn planes(&self, _cur: &Inference) -> Vec<Plane> {
+        Vec::new()
+    }
+    /// The material sampled by a click (Paint Bucket with Alt), once: the app makes it
+    /// the current material.
+    fn take_sampled_material(&mut self) -> Option<Option<usize>> {
+        None
+    }
     /// Points to draw over the view (context space) for the cursor at `cur`.
     fn markers(&self, _cur: &Inference) -> Vec<Marker> {
         Vec::new()
@@ -146,7 +187,8 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.scale" => Box::new(Scale::default()),
         "tool.offset" => Box::new(Offset::default()),
         "tool.follow_me" => Box::new(FollowMe),
-        "tool.paint_bucket" => Box::new(PaintBucket::default()),
+        "tool.paint_bucket" => Box::new(crate::paint::PaintBucket::default()),
+        "tool.flip" => Box::new(crate::flip::Flip::default()),
         "tool.section_plane" => Box::new(SectionPlaneTool),
         "tool.axes" => Box::new(crate::component_dialog::AxesPick::model_axes()),
         "tool.sandbox_from_scratch" => Box::new(crate::sandbox::FromScratch::default()),
@@ -179,7 +221,7 @@ fn targets(ctx: &Ctx) -> Vec<Owner> {
 }
 
 /// Applies `xf` to the targets, or a transformed copy when `copy`.
-fn apply(ents: &mut Entities, targets: &[Owner], xf: DMat4, copy: bool) {
+pub(crate) fn apply(ents: &mut Entities, targets: &[Owner], xf: DMat4, copy: bool) {
     // Section planes move with the selection (or copy).
     for t in targets {
         if let Owner::Section(i) = *t
@@ -221,7 +263,7 @@ fn apply(ents: &mut Entities, targets: &[Owner], xf: DMat4, copy: bool) {
 }
 
 /// `5x` (more copies at the same spacing) or `/5` (divide the copy distance).
-fn parse_array(text: &str) -> Option<(usize, bool)> {
+pub(crate) fn parse_array(text: &str) -> Option<(usize, bool)> {
     let t = text.trim();
     if let Some(n) = t
         .strip_suffix(['x', 'X', '*'])
@@ -1230,93 +1272,7 @@ impl ModifyTool for FollowMe {
     fn cancel(&mut self) {}
 }
 
-// ------------------------------------------------------------------ Paint Bucket
-
-/// Paints the clicked face side, or the clicked group or component. When the clicked
-/// entity is selected, the whole selection is painted. Alt-sampling and Ctrl/Shift fill
-/// modes are not implemented yet.
-#[derive(Debug, Default)]
-pub struct PaintBucket {
-    material: Option<usize>,
-}
-
-impl ModifyTool for PaintBucket {
-    fn status(&self) -> String {
-        if self.material.is_some() {
-            "Select a face or object to paint."
-        } else {
-            "Pick a material in the Materials panel, then select a face or object to paint."
-        }
-        .into()
-    }
-
-    fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
-        ("", String::new())
-    }
-
-    fn anchor(&self) -> Option<DVec3> {
-        None
-    }
-
-    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
-        let Some(picked) = ctx.picked else {
-            return false;
-        };
-        let targets: Vec<Owner> = if ctx.selection.contains(&picked) {
-            ctx.selection.to_vec()
-        } else {
-            vec![picked]
-        };
-        let m = self.material;
-        let mut changed = false;
-        for t in targets {
-            match t {
-                Owner::Face(f) => {
-                    let Some(face) = ctx.ents.faces.get_mut(f) else {
-                        continue;
-                    };
-                    // The side facing the camera.
-                    let front = (ctx.eye - inf.point).dot(face.normal) >= 0.0 || t != picked;
-                    let slot = if front {
-                        &mut face.attrs.material
-                    } else {
-                        &mut face.attrs.back_material
-                    };
-                    changed |= *slot != m;
-                    *slot = m;
-                }
-                Owner::Instance(i) => {
-                    if let Some(inst) = ctx.ents.instances.get_mut(i) {
-                        changed |= inst.material != m;
-                        inst.material = m;
-                    }
-                }
-                Owner::Edge(_) | Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
-            }
-        }
-        changed
-    }
-
-    fn typed(
-        &mut self,
-        _ctx: &mut Ctx,
-        _cur: Option<&Inference>,
-        _text: &str,
-        _units: LengthUnit,
-    ) -> bool {
-        false
-    }
-
-    fn preview(&self, _ents: &Entities, _cur: &Inference) -> Vec<Vec<DVec3>> {
-        Vec::new()
-    }
-
-    fn cancel(&mut self) {}
-
-    fn set_material(&mut self, material: Option<usize>) {
-        self.material = material;
-    }
-}
+// Paint Bucket: see `crate::paint`.
 
 // ------------------------------------------------------------------ Place Component
 
@@ -1595,6 +1551,7 @@ mod tests {
             locked: false,
             normal: None,
             segment: None,
+            container: None,
         }
     }
 

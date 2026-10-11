@@ -1,6 +1,6 @@
 //! The open model: loading a `.skp` into the kernel and turning it into renderer input.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use glam::{DMat3, DMat4, DVec3};
@@ -103,6 +103,9 @@ pub struct Scene {
     /// World-space triangles for picking; triangle `i` is `indices[3 * i..3 * i + 3]`.
     pub triangles: Vec<[DVec3; 3]>,
     pub tri_owner: Vec<Option<Owner>>,
+    /// Front and back material shown on each triangle (inherited from instances
+    /// included), for the Paint Bucket's Alt sampling.
+    pub tri_material: Vec<[Option<MaterialId>; 2]>,
     /// Construction guides drawn as dashed lines (not pickable as edges).
     pub guides: Vec<Segment>,
     /// The active section cut in world space: point and normal (removed side).
@@ -114,6 +117,11 @@ pub struct Scene {
     /// Indices into `edges` of hidden entities drawn by View > Hidden Geometry (not
     /// snapped to).
     pub hidden_edges: HashSet<usize>,
+    /// The group or component (relative to the open context) of edges and triangles
+    /// inside one, by index into `edges` / `triangles`, for the inference tooltip
+    /// ("Endpoint in Group").
+    pub edge_container: HashMap<usize, mt_infer::Container>,
+    pub tri_container: HashMap<usize, mt_infer::Container>,
     /// Index into `textures` of each model material (`FaceVertex::NO_TEXTURE` when
     /// untextured).
     texture_of: Vec<u32>,
@@ -137,6 +145,9 @@ struct Inherited {
     material: Option<MaterialId>,
     /// Inside a hidden instance (drawn only with View > Hidden Geometry).
     hidden: bool,
+    /// Inside a group or component that is not on the open context's path (the
+    /// outermost such instance).
+    container: Option<mt_infer::Container>,
 }
 
 /// Edge color outside the open group or component (draft; SketchUp fades the rest of
@@ -761,6 +772,7 @@ impl Document {
             .flatten()
             .and_then(|d| d.last().copied());
         let ghost = inherited.hidden;
+        let container = inherited.container;
         let inherited = inherited.material;
         // Outside the open context: faded, not selectable.
         let faded = matches!(level, Level::Outside | Level::Context([_, ..]));
@@ -797,6 +809,9 @@ impl Document {
                 if hidden { HIDDEN_EDGE } else { edge_color },
                 [EDGE_WIDTH, if hidden { HIDDEN_DASH } else { 0.0 }],
             );
+            if let Some(c) = container {
+                out.edge_container.insert(out.edges.len(), c);
+            }
             if hidden {
                 out.hidden_edges.insert(out.edges.len());
                 out.edges.push(seg);
@@ -893,8 +908,12 @@ impl Document {
                         out.edge_owner.push(owner_of(Owner::Face(f)));
                     }
                 }
+                if let Some(c) = container {
+                    out.tri_container.insert(out.triangles.len(), c);
+                }
                 out.triangles.push(tri);
                 out.tri_owner.push(owner_of(Owner::Face(f)));
+                out.tri_material.push([front_material, back_material]);
             }
         }
 
@@ -919,9 +938,15 @@ impl Document {
                 Level::Inside(o) => Level::Inside(o),
                 _ => Level::Outside,
             };
+            let kind = if def.is_group {
+                mt_infer::Container::Group
+            } else {
+                mt_infer::Container::Component
+            };
             let parent = Inherited {
                 material: i.material.or(inherited),
                 hidden: ghost || i.hidden,
+                container: container.or((!matches!(child, Level::Context(_))).then_some(kind)),
             };
             self.collect(&def.entities, xf * i.transform, parent, child, active, out);
             active.remove(&i.definition);
