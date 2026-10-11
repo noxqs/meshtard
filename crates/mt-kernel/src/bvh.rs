@@ -198,6 +198,37 @@ impl Bvh {
         best
     }
 
+    /// Calls `f` with every triangle whose leaf box the ray (`t >= 0`) passes through: a
+    /// superset of the triangles it hits, for queries that need every hit (inside/outside
+    /// tests by ray parity).
+    pub fn ray_candidates(&self, origin: DVec3, dir: DVec3, mut f: impl FnMut(usize)) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let inv = DVec3::ONE / dir;
+        let mut stack = vec![0usize];
+        while let Some(n) = stack.pop() {
+            if self.nodes[n]
+                .bounds()
+                .hit(origin, inv, f64::INFINITY)
+                .is_none()
+            {
+                continue;
+            }
+            match self.nodes[n] {
+                Node::Leaf { first, count, .. } => {
+                    for &i in &self.order[first..first + count] {
+                        f(i);
+                    }
+                }
+                Node::Inner { left, right, .. } => {
+                    stack.push(left);
+                    stack.push(right);
+                }
+            }
+        }
+    }
+
     /// Total bounds, or `None` when empty.
     pub fn bounds(&self) -> Option<(DVec3, DVec3)> {
         self.nodes.first().map(|n| {

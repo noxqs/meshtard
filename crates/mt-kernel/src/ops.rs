@@ -472,7 +472,7 @@ pub fn erase_edge(ents: &mut Entities, e: EdgeId) {
 
 /// Joins two collinear edges meeting at `v` (and nothing else) into one, when they bound
 /// the same faces and have the same attributes.
-fn heal_vertex(ents: &mut Entities, v: VertexId) {
+pub(crate) fn heal_vertex(ents: &mut Entities, v: VertexId) {
     let Some(vert) = ents.vertices.get(v) else {
         return;
     };

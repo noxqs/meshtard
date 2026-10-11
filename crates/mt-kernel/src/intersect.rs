@@ -21,7 +21,7 @@ pub fn intersect_faces(ents: &mut Entities, faces: &[FaceId], with: &[FaceId]) -
             if f == g || !ents.faces.contains_key(f) || !ents.faces.contains_key(g) {
                 continue;
             }
-            for seg in face_face(ents, f, g) {
+            for seg in face_face(ents, f, ents, g) {
                 let dup = segments.iter().any(|&(a, b)| {
                     (a.distance(seg.0) <= TOL && b.distance(seg.1) <= TOL)
                         || (a.distance(seg.1) <= TOL && b.distance(seg.0) <= TOL)
@@ -39,9 +39,10 @@ pub fn intersect_faces(ents: &mut Entities, faces: &[FaceId], with: &[FaceId]) -
     before.added_on(ents, &segments)
 }
 
-/// Segments where faces `f` and `g` cross: their planes' line clipped to both regions.
-fn face_face(ents: &Entities, f: FaceId, g: FaceId) -> Vec<(DVec3, DVec3)> {
-    let (pf, pg) = (ents.face_plane(f), ents.face_plane(g));
+/// Segments where face `f` of `ef` and face `g` of `eg` cross: their planes' line
+/// clipped to both regions. The two may be the same `Entities`.
+pub(crate) fn face_face(ef: &Entities, f: FaceId, eg: &Entities, g: FaceId) -> Vec<(DVec3, DVec3)> {
+    let (pf, pg) = (ef.face_plane(f), eg.face_plane(g));
     let dir = pf.normal.cross(pg.normal);
     let len2 = dir.length_squared();
     if len2 < 1e-12 {
@@ -49,11 +50,11 @@ fn face_face(ents: &Entities, f: FaceId, g: FaceId) -> Vec<(DVec3, DVec3)> {
     }
     let origin = (pf.normal.cross(dir) * -pg.d + pg.normal.cross(dir) * pf.d) / len2;
     let dir = dir / len2.sqrt();
-    let a = clip(ents, f, origin, dir);
+    let a = clip(ef, f, origin, dir);
     if a.is_empty() {
         return Vec::new();
     }
-    let b = clip(ents, g, origin, dir);
+    let b = clip(eg, g, origin, dir);
     let mut out = Vec::new();
     for &(a0, a1) in &a {
         for &(b0, b1) in &b {
@@ -68,7 +69,7 @@ fn face_face(ents: &Entities, f: FaceId, g: FaceId) -> Vec<(DVec3, DVec3)> {
 
 /// Parameter intervals of the line `origin + s * dir` (lying in the face's plane) that
 /// are inside the face or on its boundary.
-fn clip(ents: &Entities, f: FaceId, origin: DVec3, dir: DVec3) -> Vec<(f64, f64)> {
+pub(crate) fn clip(ents: &Entities, f: FaceId, origin: DVec3, dir: DVec3) -> Vec<(f64, f64)> {
     let face = &ents.faces[f];
     let side = face.normal.cross(dir);
     let loops: Vec<Vec<DVec3>> = face.loops().map(|l| ents.loop_points(l)).collect();

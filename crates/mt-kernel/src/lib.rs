@@ -18,6 +18,7 @@ pub mod model;
 pub mod offset;
 pub mod ops;
 pub mod push_pull;
+pub mod solid;
 pub mod spatial;
 pub mod tessellate;
 pub mod texture;
@@ -36,6 +37,7 @@ pub use model::{
 pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};
 pub use push_pull::push_pull;
+pub use solid::{SolidError, SolidInput, is_solid};
 pub use texture::{FaceUv, Texture};
 pub use transform::{copy_geometry, copy_geometry_from, transform_vertices, vertices_of};
 pub use validate::{Checks, validate};
