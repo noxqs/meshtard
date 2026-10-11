@@ -78,6 +78,9 @@ pub struct DefinitionAttrs {
     pub url: String,
     /// "Type" in Entity Info.
     pub kind: String,
+    /// License of a model from the model library (Meshtard addition, not in
+    /// SketchUp's Entity Info), e.g. "CC0 1.0 (public domain)".
+    pub license: String,
 }
 
 /// SketchUp's component "Glue to" setting (Make Component dialog).

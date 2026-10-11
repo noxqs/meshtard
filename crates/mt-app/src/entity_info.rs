@@ -178,6 +178,10 @@ pub(crate) fn describe(doc: &Document, items: &[Owner]) -> EntityInfo {
                 ] {
                     info.field(key, label, InfoValue::Text(value.clone()));
                 }
+                // Models from Window > Model Library (not a SketchUp field).
+                if !a.license.is_empty() {
+                    info.field("license", "License", InfoValue::Text(a.license.clone()));
+                }
             }
             crate::solid_tools::describe(doc, inst, &mut info);
             info
@@ -409,7 +413,7 @@ fn set_text(doc: &mut Document, items: &[Owner], key: &str, text: &str) -> Resul
                         .get_mut(i)
                         .is_some_and(|x| replace(&mut x.attrs.owner))
                 }),
-                "definition_name" | "price" | "size" | "url" | "type" => {
+                "definition_name" | "price" | "size" | "url" | "type" | "license" => {
                     if key == "definition_name" && text.is_empty() {
                         return Err("A component definition needs a name.".into());
                     }
@@ -427,6 +431,7 @@ fn set_text(doc: &mut Document, items: &[Owner], key: &str, text: &str) -> Resul
                             "price" => &mut a.price,
                             "size" => &mut a.size,
                             "url" => &mut a.url,
+                            "license" => &mut a.license,
                             _ => &mut a.kind,
                         })
                     })

@@ -179,10 +179,8 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
 
 ## Online libraries (requested 2026-10-11)
 
-68. [ ] **Model library browser (Window > 3D Warehouse equivalent)** L. A tray panel / window to search, preview and import models straight into the open model (placed with Place Component).
-    - Sources are pluggable. First check whether Trimble's 3D Warehouse has a usable public API and terms that allow a third-party client (believed not: it needs a Trimble ID; unverified). If not, start with open libraries that have public APIs and permissive licenses, e.g. Poly Haven (CC0, glTF), plus a local folder library (any folder of .skp / .obj / .stl / .glb), and optionally Sketchfab (needs the user's own account/token, downloadable models only).
-    - Needs a glTF/GLB importer (done with item 64: `mt_kernel::gltf_io::import`, resolve callback for files next to the model), thumbnails, a download cache in the user data folder, license shown per model.
-    - Steps: (1) local folder library + search UI, (2) Poly Haven source + GLB import, (3) further sources.
+68. [x] **Model library browser (Window > 3D Warehouse equivalent)** L. Done: Window > Model Library (the `window.3d_warehouse` menu item and toolbar button, renamed and enabled; `mt-app/src/library/`), a modeless dialog: source (Local folders, Poly Haven, Sketchfab once a token is entered), search, thumbnail grid, details (name, author, license with link, size, polygons, source page), Download & Place (background thread with progress and Cancel, cached in `<data>/meshtard/library/models`), then Place Component; the definition gets URL (source page), Type and License in Entity Info > Advanced Attributes and a credit line as its description. Local folders: the Preferences > Files Components folder plus folders added in the panel, scanned for .skp/.glb/.gltf/.obj/.stl, thumbnails rendered offscreen and cached. Research and terms: spec/parity/LIBRARY.md (3D Warehouse has no public API and its terms forbid scraping: not used). STATUS.md rows "Window > Model Library".
+    - Left: Sketchfab OAuth login (the guidelines prefer it over personal tokens; needs a registered client id); Smithsonian Open Access as a further CC0 source (needs an api.data.gov key); thumbnail requests are not reprioritized when the filter changes (a long queue finishes first); no collections/favorites or "recent downloads" list; cache size not limited (no clean-up); local thumbnails render with the default camera and style only.
 69. [ ] **Extension system and Extension Warehouse** L. SketchUp extensions are Ruby scripts against SketchUp's Ruby API; running them would mean re-implementing that API (large, later). Meshtard first needs its own extension system:
     - (1) Extension API design: commands, menus/toolbars, tools, model access, observers; scripting language choice (e.g. Rhai or Lua embedded, or WASM plugins for sandboxing); permissions.
     - (2) Extension Manager (Window > Extension Manager, currently grey): install from a file, enable/disable, uninstall, updates.
@@ -220,7 +218,7 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)
-- `window.3d_warehouse`, `extensions.warehouse` (Trimble online services)
+- `extensions.warehouse` (Trimble online service); `window.3d_warehouse` is now Window > Model Library with open sources (item 68)
 - `extensions.manager` (plugins are out of scope for now; see PLAN.md)
 - `help.welcome`, `help.knowledge_center`, `help.contact`: done as links to the project page (https://github.com/noxqs/meshtard), opened with the system browser
 

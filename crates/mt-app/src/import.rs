@@ -283,12 +283,28 @@ impl App {
         name: &str,
         device: &egui_wgpu::wgpu::Device,
     ) {
+        self.place_imported_with(model, name, device, |_| {});
+    }
+
+    /// [`Self::place_imported`], with `f` changing the new definition in the same
+    /// undo step (the model library stores the license and source there).
+    pub(crate) fn place_imported_with(
+        &mut self,
+        model: mt_kernel::Model,
+        name: &str,
+        device: &egui_wgpu::wgpu::Device,
+        f: impl FnOnce(&mut mt_kernel::Definition),
+    ) {
         let Some(doc) = &mut self.document else {
             return;
         };
         let mut def = None;
         doc.edit_model(|m, _| {
-            def = Some(mt_kernel::import::merge_as_definition(m, model, name));
+            let id = mt_kernel::import::merge_as_definition(m, model, name);
+            if let Some(d) = m.definitions.get_mut(id) {
+                f(d);
+            }
+            def = Some(id);
             true
         });
         let Some(definition) = def else { return };
