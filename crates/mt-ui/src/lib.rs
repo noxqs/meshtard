@@ -119,7 +119,6 @@
 pub mod cursors;
 pub mod dialog;
 pub mod dock;
-mod env_panel;
 mod entity_info;
 pub mod icons;
 mod menu;
@@ -138,7 +137,6 @@ use std::collections::{BTreeMap, HashMap};
 use mt_spec::Spec;
 
 pub use dialog::{Dialog, DialogResponse};
-pub use env_panel::{EXPOSURE_RANGE, EnvSettings, EnvironmentData, EnvironmentRow};
 pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use menu::menu_list;
 pub use style_panel::{
@@ -417,16 +415,6 @@ pub enum Event {
     StylePurge,
     /// Styles: a style clicked in the Select tab: apply it.
     StyleApply(usize),
-
-    /// Environments: a library environment clicked (`None`: no environment).
-    EnvironmentSelect(Option<usize>),
-    /// Environments: "Add Environment..." clicked (the app asks for a file).
-    EnvironmentAdd,
-    /// Environments: "Remove" clicked for this (user-added) library entry.
-    EnvironmentRemove(usize),
-    /// Environments: an Edit setting changed (skydome, reflections, exposures,
-    /// rotation, sun location); the complete new settings.
-    EnvironmentChanged(EnvSettings),
 }
 
 /// A toolbar as listed by [`Shell::toolbars`].
@@ -485,13 +473,6 @@ pub struct Shell {
     trays: TrayLayout,
     tray_default: TrayLayout,
     trays_dialog: Option<trays::TraysDialog>,
-    /// Environments panel data and its Set Sun Location mode.
-    env_data: EnvironmentData,
-    env_sun_mode: bool,
-    /// Instructor panel text (`spec/instructor.toml`); `None` if it failed to parse.
-    instructor: Option<mt_spec::Instructor>,
-    /// Menu labels the app replaced (Edit > Undo shows the operation's name).
-    menu_labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -550,23 +531,6 @@ impl Shell {
             trays: TrayLayout::from_spec(spec),
             tray_default: TrayLayout::from_spec(spec),
             trays_dialog: None,
-            env_data: EnvironmentData::default(),
-            env_sun_mode: false,
-            instructor: mt_spec::Instructor::builtin().ok(),
-            menu_labels: HashMap::new(),
-        }
-    }
-
-    /// Replaces the menu label of command `id` (e.g. "Undo Move" for `edit.undo`);
-    /// `None` restores the spec's label.
-    pub fn set_menu_label(&mut self, id: &str, label: Option<String>) {
-        match label {
-            Some(l) => {
-                self.menu_labels.insert(id.to_owned(), l);
-            }
-            None => {
-                self.menu_labels.remove(id);
-            }
         }
     }
 

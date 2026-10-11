@@ -62,38 +62,6 @@ struct Globals {
 @group(2) @binding(0) var face_textures: texture_2d_array<f32>;
 @group(2) @binding(1) var face_sampler: sampler;
 
-// Environments (environment.rs): a linear RGB equirectangular panorama.
-struct EnvParams {
-    // x: 1 when drawn as the skydome, y: skydome exposure, z: rotation (radians),
-    // w: 1 when used for reflections.
-    a: vec4<f32>,
-    // rgb: face tint from the average color, w: reflection exposure.
-    b: vec4<f32>,
-};
-@group(3) @binding(0) var<uniform> env: EnvParams;
-@group(3) @binding(1) var env_map: texture_2d<f32>;
-@group(3) @binding(2) var env_sampler: sampler;
-
-fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
-    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
-}
-
-// Panorama coordinates seen along `dir` (mirrors `dir_to_uv` in environment.rs).
-fn env_uv(dir: vec3<f32>) -> vec2<f32> {
-    let d = normalize(dir);
-    let lon = atan2(d.y, d.x) - env.a.z;
-    let u = fract(0.5 - lon / 6.2831853);
-    let v = acos(clamp(d.z, -1.0, 1.0)) / 3.14159265;
-    return vec2<f32>(u, v);
-}
-
-// The panorama's sRGB color along `dir` at `exposure`.
-fn env_color(dir: vec3<f32>, exposure: f32) -> vec3<f32> {
-    let c = textureSampleLevel(env_map, env_sampler, env_uv(dir), 0.0).rgb;
-    return linear_to_srgb(c * exposure);
-}
-
 fn section_clipped(p: vec3<f32>) -> bool {
     return dot(g.section.xyz, p) + g.section.w > 0.0;
 }
@@ -178,9 +146,6 @@ fn unproject(ndc: vec2<f32>, depth: f32) -> vec3<f32> {
 
 // Sky, ground or background color seen along the ray `origin` + t `dir` (no shadows).
 fn background_color(origin: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
-    if (env.a.x > 0.5) {
-        return env_color(dir, env.a.y);
-    }
     let ground_on = g.ground.w > 0.5;
     let from_below = g.background.w > 0.5;
     let hits_ground = (origin.z > 0.0 && dir.z < 0.0) || (from_below && origin.z < 0.0 && dir.z > 0.0);
@@ -342,18 +307,7 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         let ambient = g.light.w;
         shade = ambient + (1.0 - ambient) * max(0.0, dot(n, g.light.xyz));
     }
-    var rgb = color.rgb * shade;
-    if (env.a.w > 0.5) {
-        // Use for Reflections (draft): tint by the environment's average color and
-        // mix in the reflected panorama at grazing angles (Schlick Fresnel, half
-        // strength). Meshtard has no glossy materials, so every face reflects alike.
-        let view = select(g.eye.xyz, g.eye.xyz - in.world, g.eye.w > 0.5);
-        let v = normalize(view);
-        let fresnel = 0.04 + 0.96 * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
-        let r = reflect(-v, n);
-        rgb = mix(rgb * env.b.rgb, env_color(r, env.b.w), fresnel * 0.5);
-    }
-    return vec4<f32>(apply_fog(rgb, in.world, in.pos.xy), color.a);
+    return vec4<f32>(apply_fog(color.rgb * shade, in.world, in.pos.xy), color.a);
 }
 
 // Section fill: the color as given, unlit and not clipped.

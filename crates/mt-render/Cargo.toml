@@ -11,8 +11,7 @@ earcutr = "0.5"
 bytemuck.workspace = true
 egui-wgpu.workspace = true
 mt-spec.workspace = true
-image = { workspace = true, features = ["jpeg", "bmp", "hdr", "exr"] }
-half = "2"
+image = { workspace = true, features = ["jpeg", "bmp"] }
 
 [dev-dependencies]
 pollster.workspace = true

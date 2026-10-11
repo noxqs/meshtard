@@ -130,28 +130,6 @@ pub(crate) struct Textures {
     pub bind_group: wgpu::BindGroup,
     /// Layers in the array that hold textures (excess textures are dropped).
     pub layers: u32,
-    /// The array behind `bind_group`, kept to rebind with another sampler.
-    array: wgpu::Texture,
-    smooth: bool,
-}
-
-/// The face texture sampler: linear with mipmaps (anti-aliased) or nearest.
-fn face_sampler(device: &wgpu::Device, smooth: bool) -> wgpu::Sampler {
-    let (filter, mip) = if smooth {
-        (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear)
-    } else {
-        (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest)
-    };
-    device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("face textures"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        mag_filter: filter,
-        min_filter: filter,
-        mipmap_filter: mip,
-        anisotropy_clamp: if smooth { 8 } else { 1 },
-        ..Default::default()
-    })
 }
 
 impl Textures {
@@ -177,9 +155,17 @@ impl Textures {
                 },
             ],
         });
-        let sampler = face_sampler(device, true);
-        let array = Self::array(device, 1, 1, 1);
-        let bind_group = Self::bind(device, &layout, &sampler, &array);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("face textures"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        let bind_group = Self::bind(device, &layout, &sampler, &Self::array(device, 1, 1, 1));
         Self {
             layout,
             sampler,
@@ -187,19 +173,7 @@ impl Textures {
             dirty: false,
             bind_group,
             layers: 0,
-            array,
-            smooth: true,
         }
-    }
-
-    /// Switches between linear-with-mipmaps (`smooth`) and nearest sampling.
-    pub fn set_smooth(&mut self, device: &wgpu::Device, smooth: bool) {
-        if smooth == self.smooth {
-            return;
-        }
-        self.smooth = smooth;
-        self.sampler = face_sampler(device, smooth);
-        self.bind_group = Self::bind(device, &self.layout, &self.sampler, &self.array);
     }
 
     pub fn layout(&self) -> &wgpu::BindGroupLayout {
@@ -322,8 +296,12 @@ impl Textures {
         let largest = images.iter().flatten().map(|i| i.width.max(i.height)).max();
         let Some(largest) = largest else {
             self.layers = 0;
-            self.array = Self::array(device, 1, 1, 1);
-            self.bind_group = Self::bind(device, &self.layout, &self.sampler, &self.array);
+            self.bind_group = Self::bind(
+                device,
+                &self.layout,
+                &self.sampler,
+                &Self::array(device, 1, 1, 1),
+            );
             return;
         };
         let mut size = largest
@@ -375,7 +353,6 @@ impl Textures {
         }
         self.layers = count;
         self.bind_group = Self::bind(device, &self.layout, &self.sampler, &texture);
-        self.array = texture;
     }
 }
 

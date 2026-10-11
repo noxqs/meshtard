@@ -11,7 +11,6 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, look_at_rh, orthographic_rh};
 use crate::effects::{AmbientOcclusion, AoPass, Watermark, Watermarks};
-use crate::environment::{EnvImage, EnvPass, EnvView};
 use crate::mesh::{FaceBuffers, FaceVertex};
 use crate::section::SectionCut;
 use crate::texture::{TextureSource, Textures};
@@ -566,8 +565,6 @@ pub struct Viewport {
     faces_translucent: wgpu::RenderPipeline,
     faces: Option<FaceBuffers>,
     textures: Textures,
-    /// Environments panel: skydome and reflections (bind group 3).
-    env: EnvPass,
     selection: wgpu::RenderPipeline,
     selected: Option<FaceBuffers>,
     /// Faces drawn live during Move, Rotate and Scale (see `set_preview_faces`).
@@ -659,15 +656,9 @@ impl Viewport {
         });
         let shadow_map = ShadowMap::new(device, &shadow_layout, &shadow_sampler, 1);
         let textures = Textures::new(device);
-        let env = EnvPass::new(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport"),
-            bind_group_layouts: &[
-                Some(&layout),
-                Some(&shadow_layout),
-                Some(textures.layout()),
-                Some(env.layout()),
-            ],
+            bind_group_layouts: &[Some(&layout), Some(&shadow_layout), Some(textures.layout())],
             immediate_size: 0,
         });
 
@@ -879,7 +870,6 @@ impl Viewport {
             faces_translucent,
             faces: None,
             textures,
-            env,
             selection,
             selected: None,
             preview: None,
@@ -931,19 +921,6 @@ impl Viewport {
     /// white; past the device's array layer limit textures are not shown.
     pub fn set_textures(&mut self, textures: &[TextureSource]) {
         self.textures.set(textures);
-    }
-
-    /// Texture filtering (Model Info > Rendering > Use Anti-Aliased Textures): on is
-    /// linear with mipmaps, off is nearest texel.
-    pub fn set_smooth_textures(&mut self, device: &wgpu::Device, smooth: bool) {
-        self.textures.set_smooth(device, smooth);
-    }
-
-    /// The Environments panel's environment and how it is used; `None` draws the
-    /// style's sky and ground and no reflections. The image is uploaded when it
-    /// changes (compared by pointer).
-    pub fn set_environment(&mut self, env: Option<(std::sync::Arc<EnvImage>, EnvView)>) {
-        self.env.set(env);
     }
 
     /// Extra faces drawn like the model's (the targets of Move, Rotate and Scale at
@@ -1080,7 +1057,6 @@ impl Viewport {
             );
         }
         self.textures.upload(device, queue);
-        self.env.prepare(device, queue);
         if let Some(faces) = self
             .faces
             .as_mut()
@@ -1374,7 +1350,6 @@ impl Viewport {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &self.shadow_map.bind_group, &[]);
         pass.set_bind_group(2, &self.textures.bind_group, &[]);
-        pass.set_bind_group(3, &self.env.bind_group, &[]);
     }
 
     /// Background, background watermarks and opaque faces (with the section fill and

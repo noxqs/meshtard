@@ -344,8 +344,6 @@ pub struct Model {
     pub text_style: crate::model_data::TextStyle,
     /// Model Info > Geo-location.
     pub geo: crate::model_data::GeoLocation,
-    /// Environments panel.
-    pub environment: crate::model_data::EnvironmentSettings,
 }
 
 impl Default for Model {
@@ -373,7 +371,6 @@ impl Default for Model {
             dimension_style: Default::default(),
             text_style: Default::default(),
             geo: Default::default(),
-            environment: Default::default(),
         }
     }
 }

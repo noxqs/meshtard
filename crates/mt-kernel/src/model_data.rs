@@ -388,38 +388,3 @@ mod tests {
         assert!(m.layer_shown(1));
     }
 }
-
-/// Environments panel (FEATURES.md 66): the model's environment and how it is used.
-/// Model-only like the rest of this module (not in .skp files); the images live in
-/// the app's environment library, `source` names one.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EnvironmentSettings {
-    /// Library key of the environment (a bundled name or a file path); `None` = none.
-    pub source: Option<String>,
-    /// Use as Skydome.
-    pub skydome: bool,
-    /// Use for Reflections.
-    pub reflections: bool,
-    /// Rotation about the blue axis, degrees.
-    pub rotation_deg: f64,
-    /// Exposure multipliers (1 = as recorded).
-    pub skydome_exposure: f64,
-    pub reflection_exposure: f64,
-    /// Set Sun Location: the sun's panorama point (u, v in 0..1); when set it
-    /// replaces the Shadows panel's sun.
-    pub sun_uv: Option<[f64; 2]>,
-}
-
-impl Default for EnvironmentSettings {
-    fn default() -> Self {
-        Self {
-            source: None,
-            skydome: true,
-            reflections: true,
-            rotation_deg: 0.0,
-            skydome_exposure: 1.0,
-            reflection_exposure: 1.0,
-            sun_uv: None,
-        }
-    }
-}
