@@ -275,7 +275,7 @@ items = [
   { id = "window.outliner", label = "Outliner" },
   { id = "window.instructor", label = "Instructor" },
   { separator = true },
-  { id = "window.3d_warehouse", label = "3D Warehouse" },
+  { id = "window.3d_warehouse", label = "Model Library" },
   { separator = true },
   { id = "window.preferences", label = "Preferences" },
 ]

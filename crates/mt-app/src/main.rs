@@ -25,6 +25,7 @@ mod grips;
 mod image_entity;
 mod import;
 mod lasso;
+mod library;
 mod locks;
 #[cfg(target_os = "macos")]
 mod macos_menu;
@@ -297,6 +298,7 @@ const IMPLEMENTED: &[&str] = &[
     "edit.select_instances",
     "edit.replace_selected",
     "help.search",
+    "window.3d_warehouse",
 ];
 
 fn main() -> eframe::Result {
@@ -457,6 +459,8 @@ struct App {
     grips: grips::Grips,
     /// Faces and edges stretched by the running Move, Rotate or Scale (drawn live).
     stretch: move_extra::Stretch,
+    /// Window > Model Library (3D Warehouse equivalent).
+    library: library::Library,
 }
 
 impl App {
@@ -563,6 +567,7 @@ impl App {
             lasso: Default::default(),
             grips: Default::default(),
             stretch: Default::default(),
+            library: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -1069,6 +1074,7 @@ impl App {
             || self.m13_command(ctx, frame, id)
             || self.presentation_command(ctx, frame, id)
             || self.texture_command(frame, id)
+            || self.library_command(ctx, id)
         {
         } else if id == "window.model_info" {
             self.open_model_info();
@@ -2628,6 +2634,7 @@ impl eframe::App for App {
         self.context_extra_ui(ui.ctx(), frame);
         self.tool_extra_ui(ui.ctx(), frame);
         self.search_ui(ui.ctx(), frame);
+        self.library_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
