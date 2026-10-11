@@ -14,6 +14,8 @@ pub mod geom;
 pub mod group;
 pub mod import;
 pub mod intersect;
+pub mod mesh_export;
+pub mod mesh_import;
 pub mod model;
 pub mod offset;
 pub mod ops;

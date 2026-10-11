@@ -196,7 +196,8 @@ Reading first means real SketchUp models are available for testing everything el
 - Model-only for now (not in the .skp): lock flag, Axes/Guides/Hidden Geometry, edge style options, fog.
 
 ### M11: File exchange (FEATURES.md items 14-17)
-- [ ] Export 2D, Export 3D, Import, View > Animation commands.
+- [x] Export 2D, Export 3D, Import, View > Animation commands.
+- Not done: glTF export, image import (waits for the image entity, item 30), OBJ texture import, animation settings saved in the file.
 
 ### M12: Solid Tools and modeling extras (FEATURES.md items 13, 18-28)
 

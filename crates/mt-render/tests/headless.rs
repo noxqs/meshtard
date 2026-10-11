@@ -1379,3 +1379,30 @@ fn fog_fades_faces_towards_fog_color() {
         "towards green: {px:?} from {clear:?}"
     );
 }
+
+#[test]
+fn render_image_keeps_screen_targets_and_can_be_transparent() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let spec = Spec::builtin().unwrap().default_model;
+    let camera = Camera::from_spec(&spec.camera);
+    let mut viewport = Viewport::new(&device, Style::from_spec(&spec));
+    viewport.render(&device, &queue, &camera, SIZE, 1.0);
+    let img = viewport.render_image(&device, &queue, &camera, [300, 200], 1.0, false);
+    assert_eq!(img.dimensions(), (300, 200));
+    assert_eq!(img.get_pixel(2, 2)[3], 255);
+    let clear = viewport.render_image(&device, &queue, &camera, [300, 200], 1.0, true);
+    assert_eq!(clear.get_pixel(2, 2)[3], 0, "background left out");
+    // The axes are still drawn.
+    let viewport_px = DVec2::new(300.0, 200.0);
+    let on_z = camera
+        .project(DVec3::new(0.0, 0.0, 100.0), viewport_px)
+        .unwrap();
+    let px = clear.get_pixel(on_z.x.round() as u32, on_z.y.round() as u32);
+    assert!(px[3] > 100 && px[2] > 150, "blue Z axis, got {px:?}");
+    // The on-screen frame is untouched.
+    let view = viewport.color_view().unwrap();
+    assert_eq!(view.texture().width(), SIZE[0]);
+}

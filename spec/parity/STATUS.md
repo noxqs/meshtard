@@ -47,7 +47,7 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | View | Scene tabs | unverified | click activates; right-click Update/Add/Delete; no Move Left/Right; tab look a guess; View > Scene Tabs shows/hides them (app setting, not saved) |
 | View | Guides toggle | unverified | View > Guides hides guides and stops inferring from them (model setting, not saved in the .skp) |
 | View | Hidden Geometry | unverified | hidden and soft edges dashed gray, hidden faces translucent with a dotted triangle mesh, hidden groups/components, section planes, dimensions and texts shown and selectable (SketchUp 2020+ splits groups etc. into View > Hidden Objects, not in our menu); colors, dash lengths and alpha from memory; not saved in the .skp |
-| View | Scene transitions | unverified | camera animates over 2 s; path a guess; tag visibility switches at once (SketchUp fades) |
+| View | Scene transitions | unverified | camera animates over the View > Animation > Settings time (2 s default; 0 or transitions off jumps); path a guess; tag visibility switches at once (SketchUp fades) |
 | Camera | Default eye, target, FOV | unverified | |
 | Camera | Orbit (middle drag, O) | unverified | scenario 00 |
 | Camera | Pan (shift+middle, H) | unverified | scenario 00 |
@@ -125,6 +125,15 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | File | Round trip | differs | not saved: camera view (opens in Iso), scenes, styles, shadows, units, active section, edge tags, guides and section planes inside components, group/component locks, View > Axes / Guides / Hidden Geometry; arcs reopen as polylines (hidden flags of edges, faces and instances are saved) |
 | File | "Save changes?" prompt | unverified | on New, Open, dropped file, close; Yes/No/Cancel, wording a guess |
 | File | Saved files open in real SketchUp 2026 | unverified | not tried yet |
+| File | Export 2D Graphic (PNG, JPEG) | unverified | options dialog first (Use view size, width/height with the view's aspect, Anti-alias, Transparent background for PNG), then the save dialog; offscreen render; anti-alias = 2x supersampling over the view's 4x MSAA; line widths stay in pixels; selection not drawn; dimension and text labels missing; transparent leaves out sky/ground (and ground shadows); JPEG quality 90. Defaults (view size, anti-alias on, transparent off) from memory |
+| File | Export 3D Model: OBJ | unverified | triangles only (no polygon option), flattened groups/components, hidden and hidden-tag geometry skipped, edges not exported; MTL Kd/d, textures written next to the .obj as `<name>_<material>.<ext>` (stored image; colorized textures not recolored); faces without material use `FrontColor`/`BackColor` (names from memory); units choice (default model units); "Swap YZ" (Y up) on and two-sided off by default (from memory) |
+| File | Export 3D Model: STL | unverified | binary only, front faces, units choice (default model units), Z up; no ASCII option |
+| File | Export 3D Model: COLLADA | unverified | COLLADA 1.4.1, one flattened mesh with a `<triangles>` block per material, inches (`<unit meter="0.0254">`), Z up, lambert colors/textures/opacity, two-sided on by default (from memory); no node hierarchy or component instancing like SketchUp's exporter; no glTF |
+| File | Import `.skp` | unverified | the file becomes one component definition (its components come along; materials and tags matched by name) placed with the Place Component tool; scenes and styles of the imported file dropped; name clash handling a guess |
+| File | Import OBJ, STL | unverified | options: units (defaults STL mm, OBJ m: guesses), Y up (OBJ default), Merge coplanar faces (on); one group at the context origin, one undo step, selected; vertices welded within tolerance; MTL colors/opacity become materials; OBJ texture maps, normals, UVs and groups ignored |
+| File | Import images | missing | needs an image entity (FEATURES.md item 30) |
+| File | `MESHTARD_TEST_DIALOG` | differs | test hook: a file whose first line answers every file dialog (GUI checks without a desktop portal) |
+| View | View > Animation | unverified | Add/Update/Delete Scene act like the Scenes panel (Update without SketchUp's property dialog); Previous/Next (PageUp/PageDown, from memory) wrap; Play loops through the scenes (transition, then scene delay) until Escape or any click; no Pause/Stop window. Settings dialog: Enable scene transitions, transition time, scene delay; defaults (on, 2 s, 1 s) from memory; app settings, not saved in the model |
 | Platform | Linux (X11, Wayland) | unverified | main dev platform |
 | Platform | Windows build | unverified | CI-built, not yet run by hand |
 | Platform | macOS build | unverified | CI-built, not yet run by hand |

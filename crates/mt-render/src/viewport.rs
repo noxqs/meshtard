@@ -501,6 +501,9 @@ pub struct Viewport {
     edge_bounds: Option<(Vec3, Vec3)>,
     style: Style,
     targets: Option<Targets>,
+    /// Leave the background (sky, ground, background color) out and clear to
+    /// transparent: [`Viewport::render_image`] for PNG export.
+    transparent: bool,
 }
 
 impl Viewport {
@@ -777,6 +780,7 @@ impl Viewport {
             edge_bounds: None,
             style: style.clone(),
             targets: None,
+            transparent: false,
         };
         viewport.set_style(device, style);
         viewport
@@ -1131,7 +1135,11 @@ impl Viewport {
                     depth_slice: None,
                     resolve_target: Some(&targets.resolve_view),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        load: wgpu::LoadOp::Clear(if self.transparent {
+                            wgpu::Color::TRANSPARENT
+                        } else {
+                            wgpu::Color::WHITE
+                        }),
                         store: wgpu::StoreOp::Discard,
                     },
                 })],
@@ -1150,8 +1158,10 @@ impl Viewport {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, &self.shadow_map.bind_group, &[]);
             pass.set_bind_group(2, &self.textures.bind_group, &[]);
-            pass.set_pipeline(&self.background);
-            pass.draw(0..3, 0..1);
+            if !self.transparent {
+                pass.set_pipeline(&self.background);
+                pass.draw(0..3, 0..1);
+            }
             // Order: opaque faces, then edges and axes, which are pulled towards the
             // camera so lines on a face win the depth test and lines behind it fail.
             // Translucent faces last (without depth write) so they blend over
@@ -1241,6 +1251,88 @@ impl Viewport {
     pub fn color_view(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.resolve_view)
     }
+
+    /// Renders one frame offscreen at `size` pixels and reads it back (File > Export >
+    /// 2D Graphic). The on-screen targets are kept. With `transparent` the background
+    /// is left out (alpha 0 there; colors are un-premultiplied for straight-alpha
+    /// image files). `size` is clamped to the device's texture limit.
+    pub fn render_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        size: [u32; 2],
+        pixels_per_point: f32,
+        transparent: bool,
+    ) -> image::RgbaImage {
+        let max = device.limits().max_texture_dimension_2d;
+        let size = size.map(|x| x.clamp(1, max));
+        let saved = self.targets.take();
+        let was = std::mem::replace(&mut self.transparent, transparent);
+        let texture = self
+            .render(device, queue, camera, size, pixels_per_point)
+            .clone();
+        self.transparent = was;
+        self.targets = saved;
+        let mut img = read_back(device, queue, &texture);
+        if transparent {
+            for p in img.pixels_mut() {
+                let a = p[3];
+                if a > 0 && a < 255 {
+                    for c in 0..3 {
+                        p[c] = ((u32::from(p[c]) * 255 + u32::from(a) / 2) / u32::from(a)).min(255)
+                            as u8;
+                    }
+                }
+            }
+        }
+        img
+    }
+}
+
+/// Copies a [`COLOR_FORMAT`] texture into an image (blocks until the GPU is done).
+pub fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+) -> image::RgbaImage {
+    let (w, h) = (texture.width(), texture.height());
+    let padded =
+        (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("read back"),
+        size: u64::from(padded) * u64::from(h),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: None,
+            },
+        },
+        texture.size(),
+    );
+    queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let mut img = image::RgbaImage::new(w, h);
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        return img;
+    }
+    let Ok(data) = slice.get_mapped_range() else {
+        return img;
+    };
+    for (y, row) in data.chunks(padded as usize).take(h as usize).enumerate() {
+        let dst = &mut img.as_mut()[y * (w as usize) * 4..][..(w as usize) * 4];
+        dst.copy_from_slice(&row[..(w as usize) * 4]);
+    }
+    img
 }
 
 #[cfg(test)]

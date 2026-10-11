@@ -1,10 +1,14 @@
 //! meshtard desktop application.
 
+mod animation;
 mod annot;
 mod camera_cmd;
 mod component_dialog;
 mod confirm;
 mod document;
+mod export;
+mod filedialog;
+mod import;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod modify;
@@ -145,6 +149,16 @@ const IMPLEMENTED: &[&str] = &[
     "view.extension",
     "view.fog",
     "window.fog",
+    "file.export_2d",
+    "file.export_3d",
+    "file.import",
+    "view.anim_add_scene",
+    "view.anim_update_scene",
+    "view.anim_delete_scene",
+    "view.anim_previous",
+    "view.anim_next",
+    "view.anim_play",
+    "view.anim_settings",
 ];
 
 fn main() -> eframe::Result {
@@ -271,6 +285,12 @@ struct App {
     /// transform it is drawn with.
     ghost: Option<Scene>,
     ghost_xf: Option<glam::DMat4>,
+    /// File > Export dialogs and their last options.
+    exports: export::Exports,
+    /// File > Import options for an OBJ or STL file, while asked.
+    mesh_import: Option<import::MeshImport>,
+    /// View > Animation settings and playback.
+    animation: animation::Animation,
 }
 
 impl App {
@@ -357,6 +377,9 @@ impl App {
             clipboard: None,
             ghost: None,
             ghost_xf: None,
+            exports: Default::default(),
+            mesh_import: None,
+            animation: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -837,6 +860,20 @@ impl App {
                 doc.model.shadows.enabled = !doc.model.shadows.enabled;
                 self.apply_shadows();
             }
+        } else if let Some(rs) = frame.wgpu_render_state()
+            && id.starts_with("view.anim_")
+        {
+            if self.animation_command(id) {
+                let device = rs.device.clone();
+                self.rebuild(&device);
+            }
+        } else if matches!(id, "file.export_2d" | "file.export_3d") {
+            self.export_command(id);
+        } else if let Some(rs) = frame.wgpu_render_state()
+            && id == "file.import"
+        {
+            let device = rs.device.clone();
+            self.import_command(&device);
         } else if id == "view.scene_tabs" {
             self.scene_tabs = !self.scene_tabs;
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -1213,17 +1250,7 @@ impl App {
                 || "Untitled.skp".into(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            rfd::FileDialog::new()
-                .add_filter("SketchUp Models", &["skp"])
-                .set_file_name(name)
-                .save_file()
-                .map(|p| {
-                    if p.extension().is_none() {
-                        p.with_extension("skp")
-                    } else {
-                        p
-                    }
-                })
+            filedialog::save(&[("SketchUp Models", &["skp"])], &name)
         };
         let Some(path) = path else {
             return false;
@@ -2273,6 +2300,7 @@ impl eframe::App for App {
         let can_go_forward = self.camera_history.can_go_forward();
         let camera = self.camera.clone();
         let scene_tabs = self.scene_tabs;
+        let playing = self.animation.is_playing();
         let tray_on = shell.tray_visible();
         let spec = self.spec.clone();
         let ui_frame = mt_ui::Frame {
@@ -2294,6 +2322,7 @@ impl eframe::App for App {
                 camera_cmd::is_checked(&camera, id)
                     || (id == "view.shadows" && shadows_on)
                     || (id == "view.scene_tabs" && scene_tabs)
+                    || (id == "view.anim_play" && playing)
                     || (id == "window.tray_show" && tray_on)
                     || style.as_ref().is_some_and(|s| view_checked(s, id))
             },
@@ -2313,6 +2342,9 @@ impl eframe::App for App {
         self.splash_ui(ui.ctx());
         self.confirm_ui(ui.ctx(), frame);
         self.make_component_ui(ui.ctx(), frame);
+        self.export_ui(ui.ctx(), frame);
+        self.import_ui(ui.ctx(), frame);
+        self.animation_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),

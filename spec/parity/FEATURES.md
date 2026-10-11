@@ -35,14 +35,14 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 
 13. [ ] **Solid Tools: Outer Shell, Union, Subtract, Intersect, Trim, Split** (`tool.outer_shell`, `tool.solid_*`) L.
     Needs a "is solid" test (closed manifold, already shown in Entity Info?) and a robust mesh boolean in mt-kernel built on `intersect.rs` (intersect faces, classify each face inside/outside the other solid by ray parity, keep/discard, merge coplanar). CUDA candidate for classification on large models. Trial: result naming, which input is kept (Subtract/Trim), what happens to materials.
-14. [ ] **Export 2D Graphic (PNG/JPG)** (`file.export_2d`) S.
-    Render the viewport offscreen at a chosen size (wgpu texture readback), save with `image`. Options dialog: size, transparent background, anti-alias.
-15. [ ] **Export 3D Model (OBJ, STL, glTF/DAE)** (`file.export_3d`) M.
-    Triangulate with `tessellate.rs`; OBJ+MTL with textures first, STL for printing, then COLLADA (SketchUp's main exchange format). Trial: export options per format.
-16. [ ] **Import (OBJ, STL, images, .skp as component)** (`file.import`) M.
-    .skp import as a component definition (reader exists); OBJ/STL to faces with merge; images as image entities or textures (needs image entity, see 30).
-17. [ ] **Scenes from the View > Animation menu** (`view.anim_*`) S.
-    Scenes and transitions exist in the tray; add Add/Update/Delete/Previous/Next/Play and the Settings dialog (transition time, scene delay). Trial: Update Scene's property dialog.
+14. [x] **Export 2D Graphic (PNG/JPG)** (`file.export_2d`) S.
+    Render the viewport offscreen at a chosen size (wgpu texture readback), save with `image`. Options dialog: size, transparent background, anti-alias. Done (`crates/mt-app/src/export.rs`, `Viewport::render_image`); dimension/text labels (egui overlay) are not in the image.
+15. [x] **Export 3D Model (OBJ, STL, glTF/DAE)** (`file.export_3d`) M.
+    Triangulate with `tessellate.rs`; OBJ+MTL with textures first, STL for printing, then COLLADA (SketchUp's main exchange format). Trial: export options per format. Done in `mt_kernel::mesh_export` (OBJ+MTL+textures, binary STL, COLLADA 1.4.1); glTF not done; edges, guides and annotations are not exported; colorized textures are written as the stored image.
+16. [x] **Import (OBJ, STL, images, .skp as component)** (`file.import`) M.
+    .skp import as a component definition (reader exists); OBJ/STL to faces with merge; images as image entities or textures (needs image entity, see 30). Done for .skp (Place Component), OBJ (MTL colors, no texture maps) and STL (`mt_kernel::mesh_import`, `crates/mt-app/src/import.rs`). Images are not imported yet: they wait for the image entity of item 30.
+17. [x] **Scenes from the View > Animation menu** (`view.anim_*`) S.
+    Scenes and transitions exist in the tray; add Add/Update/Delete/Previous/Next/Play and the Settings dialog (transition time, scene delay). Trial: Update Scene's property dialog. Done (`crates/mt-app/src/animation.rs`); Update Scene updates at once (no property dialog); settings are not saved in the file.
 18. [ ] **Tag tool and Window > Tags shortcuts** (`tool.tag`) S.
     Click to move entities to the active tag (SketchUp 2026 Tag Tool: Alt to sample, Ctrl to keep selection). Trial: its exact keys.
 19. [ ] **Axes tool** (`tool.axes`) S.

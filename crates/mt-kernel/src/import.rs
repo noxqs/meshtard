@@ -171,6 +171,84 @@ pub fn from_skp(src: &skp::Model) -> Model {
     model
 }
 
+/// File > Import of a `.skp`: adds the whole of `src` to `dst` as one new component
+/// definition named `name` (made unique) and returns it. Materials and tags are matched
+/// by name (a material or tag `dst` already has is used instead of the imported one;
+/// SketchUp's handling of name clashes is unverified); the imported model's components
+/// come along as definitions of their own. Scenes, styles and settings of `src` are
+/// dropped.
+pub fn merge_as_definition(dst: &mut Model, src: Model, name: &str) -> DefinitionId {
+    let materials: Vec<MaterialId> = src
+        .materials
+        .into_iter()
+        .map(
+            |m| match dst.materials.iter().position(|x| x.name == m.name) {
+                Some(i) => i,
+                None => {
+                    dst.materials.push(m);
+                    dst.materials.len() - 1
+                }
+            },
+        )
+        .collect();
+    let layers: Vec<LayerId> = src
+        .layers
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                return 0;
+            }
+            match dst.layers.iter().position(|x| x.name == l.name) {
+                Some(k) => k,
+                None => {
+                    dst.layers.push(l);
+                    dst.layers.len() - 1
+                }
+            }
+        })
+        .collect();
+    // Keys first, so instances can point at definitions inserted later.
+    let mut defs: HashMap<DefinitionId, DefinitionId> = HashMap::new();
+    let src_defs: Vec<(DefinitionId, Definition)> = src.definitions.into_iter().collect();
+    for (old, _) in &src_defs {
+        defs.insert(*old, dst.definitions.insert(Definition::default()));
+    }
+    let remap = |ents: &mut Entities| {
+        let mat = |m: &mut Option<MaterialId>| *m = m.and_then(|i| materials.get(i).copied());
+        let lay = |l: &mut Option<LayerId>| {
+            *l = l.and_then(|i| layers.get(i).copied()).filter(|&i| i != 0)
+        };
+        for f in ents.faces.values_mut() {
+            mat(&mut f.attrs.material);
+            mat(&mut f.attrs.back_material);
+            lay(&mut f.attrs.layer);
+        }
+        for e in ents.edges.values_mut() {
+            lay(&mut e.attrs.layer);
+        }
+        ents.instances.retain(|i| defs.contains_key(&i.definition));
+        for i in &mut ents.instances {
+            i.definition = defs[&i.definition];
+            mat(&mut i.material);
+            lay(&mut i.layer);
+        }
+    };
+    for (old, mut d) in src_defs {
+        remap(&mut d.entities);
+        d.name = dst.unique_definition_name(&d.name);
+        dst.definitions[defs[&old]] = d;
+    }
+    let mut root = src.root;
+    remap(&mut root);
+    let def = Definition {
+        name: dst.unique_definition_name(name),
+        entities: root,
+        ..Default::default()
+    };
+    dst.definitions.insert(def)
+}
+
 fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
     let mut ents = Entities::new();
     let mut vertices: HashMap<i64, VertexId> = HashMap::new();
@@ -326,4 +404,60 @@ fn guides(d: &skp::Definition) -> Vec<crate::entities::Guide> {
             dir: None,
         });
     lines.chain(points).collect()
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn merged_model_becomes_a_definition_with_mapped_ids() {
+        let mut src = Model::default();
+        src.materials.push(Material {
+            name: "Shared".into(),
+            color: [1, 2, 3],
+            opacity: 1.0,
+            texture: None,
+        });
+        src.layers.push(Layer {
+            name: "Walls".into(),
+            color: [0; 3],
+            visible: true,
+        });
+        let inner = src.definitions.insert(Definition {
+            name: "Chair".into(),
+            ..Default::default()
+        });
+        crate::add_line(&mut src.root, DVec3::ZERO, DVec3::X);
+        src.root.instances.push(Instance {
+            definition: inner,
+            transform: DMat4::IDENTITY,
+            name: String::new(),
+            hidden: false,
+            locked: false,
+            layer: Some(1),
+            material: Some(0),
+        });
+        let mut dst = Model::default();
+        dst.materials.push(Material {
+            name: "Other".into(),
+            color: [9; 3],
+            opacity: 1.0,
+            texture: None,
+        });
+        dst.definitions.insert(Definition {
+            name: "Chair".into(),
+            ..Default::default()
+        });
+        let d = merge_as_definition(&mut dst, src, "house");
+        let def = &dst.definitions[d];
+        assert_eq!(def.name, "house");
+        assert_eq!(def.entities.edges.len(), 1);
+        let inst = &def.entities.instances[0];
+        assert_eq!(inst.material, Some(1));
+        assert_eq!(dst.materials[1].name, "Shared");
+        assert_eq!(dst.layers[inst.layer.unwrap()].name, "Walls");
+        assert_eq!(dst.definitions[inst.definition].name, "Chair#2");
+        assert_eq!(dst.definitions.len(), 3);
+    }
 }

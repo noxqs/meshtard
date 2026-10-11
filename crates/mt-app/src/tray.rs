@@ -391,7 +391,8 @@ impl App {
                     return false;
                 };
                 self.active_scene = Some(i);
-                // The camera moves there over `SCENE_TRANSITION_SECS` (see
+                // The camera moves there over the View > Animation > Settings
+                // transition time (see
                 // `App::animate_camera`); tag visibility changes at once (SketchUp fades
                 // it, unverified).
                 let to = mt_render::Camera {
@@ -400,7 +401,11 @@ impl App {
                     fov_deg: p.fov_deg,
                     perspective: p.perspective,
                 };
-                self.transition = Some(Transition::new(self.camera.clone(), to));
+                self.transition = Some(Transition::with_secs(
+                    self.camera.clone(),
+                    to,
+                    self.animation.transition_secs(),
+                ));
                 for (k, l) in doc.model.layers.iter_mut().enumerate() {
                     l.visible = !p.hidden_layers.contains(&k);
                 }
@@ -471,21 +476,31 @@ pub(crate) struct Transition {
     to: mt_render::Camera,
     /// egui time of the first frame; set by the first [`Transition::at`].
     start: Option<f64>,
+    /// Duration in seconds (0 jumps).
+    secs: f64,
 }
 
 impl Transition {
     pub(crate) fn new(from: mt_render::Camera, to: mt_render::Camera) -> Self {
+        Self::with_secs(from, to, SCENE_TRANSITION_SECS)
+    }
+
+    pub(crate) fn with_secs(from: mt_render::Camera, to: mt_render::Camera, secs: f64) -> Self {
         Self {
             from,
             to,
             start: None,
+            secs,
         }
     }
 
     /// The camera at egui time `now` and whether the move is over.
     pub(crate) fn at(&mut self, now: f64) -> (mt_render::Camera, bool) {
         let start = *self.start.get_or_insert(now);
-        let t = (now - start) / SCENE_TRANSITION_SECS;
+        if self.secs <= 0.0 {
+            return (self.to.clone(), true);
+        }
+        let t = (now - start) / self.secs;
         let camera = self.from.interpolate(&self.to, mt_render::ease_in_out(t));
         (camera, t >= 1.0)
     }
