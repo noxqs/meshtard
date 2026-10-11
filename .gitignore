@@ -1,3 +1,5 @@
 /target
 *.png.tmp
 .claude/worktrees/
+*~autosave.skp
+*.skb
