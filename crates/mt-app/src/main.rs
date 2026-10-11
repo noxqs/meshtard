@@ -110,6 +110,13 @@ const IMPLEMENTED: &[&str] = &[
     "camera.previous",
     "camera.next",
     "view.toolbars",
+    "view.edges",
+    "view.back_edges",
+    "view.profiles",
+    "view.depth_cue",
+    "view.extension",
+    "view.fog",
+    "window.fog",
 ];
 
 fn main() -> eframe::Result {
@@ -437,7 +444,16 @@ impl App {
                 .set_monochrome_colors(rgb(doc.model.front_color), rgb(doc.model.back_color));
             let mut style = Style::from_spec(&self.spec.default_model);
             let st = &doc.model.style;
-            style.profiles = (st.edges && st.profiles).then_some(st.profile_width);
+            style.profiles = st.profiles.then_some(st.profile_width);
+            style.edges = st.edges;
+            style.back_edges = st.back_edges;
+            style.depth_cue = st.depth_cue.then_some(st.depth_cue_width);
+            style.extension = st.extension.then_some(st.extension_length);
+            style.fog = st.fog.enabled.then(|| mt_render::Fog {
+                start: st.fog.start,
+                end: st.fog.end,
+                color: (!st.fog.use_background).then(|| rgb(st.fog.color)),
+            });
             self.viewport.set_style(device, style);
         }
         self.viewport
@@ -1684,6 +1700,12 @@ fn view_toggle(s: &mut mt_kernel::StyleSettings, id: &str) -> bool {
         "view.shaded" => s.face_style = F::Shaded,
         "view.shaded_textures" => s.face_style = F::ShadedWithTextures,
         "view.monochrome" => s.face_style = F::Monochrome,
+        "view.edges" => s.edges = !s.edges,
+        "view.back_edges" => s.back_edges = !s.back_edges,
+        "view.profiles" => s.profiles = !s.profiles,
+        "view.depth_cue" => s.depth_cue = !s.depth_cue,
+        "view.extension" => s.extension = !s.extension,
+        "view.fog" => s.fog.enabled = !s.fog.enabled,
         _ => return false,
     }
     true
@@ -1701,6 +1723,12 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
         "view.shaded" => s.face_style == F::Shaded,
         "view.shaded_textures" => s.face_style == F::ShadedWithTextures,
         "view.monochrome" => s.face_style == F::Monochrome,
+        "view.edges" => s.edges,
+        "view.back_edges" => s.back_edges,
+        "view.profiles" => s.profiles,
+        "view.depth_cue" => s.depth_cue,
+        "view.extension" => s.extension,
+        "view.fog" => s.fog.enabled,
         _ => false,
     }
 }
@@ -1718,6 +1746,12 @@ const VIEW_TOGGLES: &[&str] = &[
     "view.shaded",
     "view.shaded_textures",
     "view.monochrome",
+    "view.edges",
+    "view.back_edges",
+    "view.profiles",
+    "view.depth_cue",
+    "view.extension",
+    "view.fog",
 ];
 
 /// The kernel's view of a selection.
@@ -1995,5 +2029,38 @@ impl eframe::App for App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_style_tests {
+    use super::{IMPLEMENTED, view_checked, view_toggle};
+
+    #[test]
+    fn edge_style_and_fog_toggle_and_check() {
+        let mut s = mt_kernel::StyleSettings::default();
+        let ids = [
+            "view.edges",
+            "view.back_edges",
+            "view.profiles",
+            "view.depth_cue",
+            "view.extension",
+            "view.fog",
+        ];
+        // Edges and Profiles on by default, the rest off.
+        let defaults: Vec<bool> = ids.iter().map(|id| view_checked(&s, id)).collect();
+        assert_eq!(defaults, [true, false, true, false, false, false]);
+        for (id, was) in ids.iter().zip(defaults) {
+            assert!(IMPLEMENTED.contains(id), "{id} enabled");
+            assert!(view_toggle(&mut s, id), "{id} is a toggle");
+            assert_eq!(view_checked(&s, id), !was, "{id} flipped");
+            assert!(view_toggle(&mut s, id));
+            assert_eq!(view_checked(&s, id), was, "{id} back");
+        }
+        // Each toggle changes only its own flag.
+        view_toggle(&mut s, "view.back_edges");
+        let after: Vec<bool> = ids.iter().map(|id| view_checked(&s, id)).collect();
+        assert_eq!(after, [true, true, true, false, false, false]);
+        assert!(IMPLEMENTED.contains(&"window.fog"));
     }
 }

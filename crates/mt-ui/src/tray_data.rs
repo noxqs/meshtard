@@ -32,6 +32,7 @@ pub struct TrayData {
     pub scene_tabs: bool,
     pub style: StyleSettings,
     pub shadows: ShadowSettings,
+    pub fog: FogSettings,
     /// Tag of the selected entities, shown as a Tag dropdown in Entity Info; `None`
     /// hides the row (nothing selected).
     pub entity_tag: Option<usize>,
@@ -61,6 +62,7 @@ impl Default for TrayData {
             scene_tabs: true,
             style: StyleSettings::default(),
             shadows: ShadowSettings::default(),
+            fog: FogSettings::default(),
             entity_tag: None,
             components: Vec::new(),
             current_component: None,
@@ -228,6 +230,14 @@ pub struct StyleSettings {
     pub profiles: bool,
     /// Profile width in pixels.
     pub profile_width: u8,
+    /// Edge Settings > Back Edges.
+    pub back_edges: bool,
+    /// Edge Settings > Depth Cue and its width in pixels.
+    pub depth_cue: bool,
+    pub depth_cue_width: u8,
+    /// Edge Settings > Extension and its length in pixels.
+    pub extension: bool,
+    pub extension_length: u8,
     /// Modeling Settings > Section Cut Width, pixels.
     pub section_cut_width: u8,
     /// Modeling Settings > Section Fill and its color (sRGB).
@@ -244,11 +254,43 @@ impl Default for StyleSettings {
             edges: true,
             profiles: true,
             profile_width: 3,
+            back_edges: false,
+            depth_cue: false,
+            depth_cue_width: 4,
+            extension: false,
+            extension_length: 2,
             section_cut_width: 3,
             section_fill: true,
             section_fill_color: [64, 64, 64],
             face_style: FaceStyle::default(),
             x_ray: false,
+        }
+    }
+}
+
+/// Settings of the Fog panel. Distances are percentages of the model's depth seen
+/// from the camera (0 its nearest point, 100 its farthest); SketchUp's scale and the
+/// defaults are unverified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FogSettings {
+    /// Display Fog.
+    pub enabled: bool,
+    /// Distance: where the fog starts and where it is complete, 0..=100.
+    pub start: u8,
+    pub end: u8,
+    /// Use Background Color; otherwise `color`.
+    pub use_background: bool,
+    pub color: [u8; 3],
+}
+
+impl Default for FogSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start: 0,
+            end: 100,
+            use_background: true,
+            color: [255, 255, 255],
         }
     }
 }

@@ -38,6 +38,15 @@ struct Globals {
     face_style: vec4<f32>,
     mono_front: vec4<f32>,
     mono_back: vec4<f32>,
+    // x: 1 when Edges is on, y: depth cue width in points (0 = off), z: extension in
+    // points (0 = off), w: back edge dash in points.
+    edge_style: vec4<f32>,
+    // View depth of p: dot(xyz, p) + w.
+    view_axis: vec4<f32>,
+    // x, y: view depth of the model's near and far side; z, w: fog start and end depth.
+    depth_range: vec4<f32>,
+    // rgb: fog color, w: 1 to fade towards the background instead.
+    fog_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -48,6 +57,39 @@ struct Globals {
 
 fn section_clipped(p: vec3<f32>) -> bool {
     return dot(g.section.xyz, p) + g.section.w > 0.0;
+}
+
+fn view_depth(p: vec3<f32>) -> f32 {
+    return dot(g.view_axis.xyz, p) + g.view_axis.w;
+}
+
+// Fog amount at view depth `d` (mirrors `fog_amount` in viewport.rs). Off when the
+// start is past the end (start 1, end 0).
+fn fog_amount(d: f32) -> f32 {
+    let start = g.depth_range.z;
+    let end = g.depth_range.w;
+    if (start > end) {
+        return 0.0;
+    }
+    if (end <= start) {
+        return select(0.0, 1.0, d >= end);
+    }
+    return clamp((d - start) / (end - start), 0.0, 1.0);
+}
+
+// `color` fogged for world point `p` seen at framebuffer position `frag` (y down).
+fn apply_fog(color: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    let f = fog_amount(view_depth(p));
+    if (f <= 0.0) {
+        return color;
+    }
+    var fog = g.fog_color.rgb;
+    if (g.fog_color.w > 0.5) {
+        let ndc = vec2<f32>(frag.x / g.viewport.x * 2.0 - 1.0, 1.0 - frag.y / g.viewport.y * 2.0);
+        let origin = unproject(ndc, 1.0);
+        fog = background_color(origin, normalize(unproject(ndc, 0.5) - origin));
+    }
+    return mix(color, fog, f);
 }
 
 // Fraction of the sun reaching `p` (1 = lit), 5x5 PCF over the shadow map. `n` is the
@@ -95,11 +137,8 @@ fn unproject(ndc: vec2<f32>, depth: f32) -> vec3<f32> {
     return p.xyz / p.w;
 }
 
-@fragment
-fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
-    let origin = unproject(in.ndc, 1.0);
-    let dir = normalize(unproject(in.ndc, 0.5) - origin);
-
+// Sky, ground or background color seen along the ray `origin` + t `dir` (no shadows).
+fn background_color(origin: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
     let ground_on = g.ground.w > 0.5;
     let from_below = g.background.w > 0.5;
     let hits_ground = (origin.z > 0.0 && dir.z < 0.0) || (from_below && origin.z < 0.0 && dir.z > 0.0);
@@ -110,6 +149,15 @@ fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
         let t = pow(clamp(dir.z, 0.0, 1.0), 0.5);
         color = mix(g.sky_horizon.rgb, g.sky_zenith.rgb, t);
     }
+    return color;
+}
+
+@fragment
+fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
+    let origin = unproject(in.ndc, 1.0);
+    let dir = normalize(unproject(in.ndc, 0.5) - origin);
+    var color = background_color(origin, dir);
+
     // Shadows on the ground plane z = 0, seen from above. Unshadowed ground keeps its
     // color; shadowed ground is scaled by dark / (dark + light * sun.z), the ratio the
     // face shading would give a horizontal face.
@@ -186,7 +234,7 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     if (g.face_style.x > 1.5) {
         color = vec4<f32>(select(g.mono_back.rgb, g.mono_front.rgb, front), color.a);
     } else if (g.face_style.x > 0.5) {
-        return vec4<f32>(g.background.rgb, color.a);
+        return vec4<f32>(apply_fog(g.background.rgb, in.world, in.pos.xy), color.a);
     }
     let n = normalize(select(-in.normal, in.normal, front));
     var shade: f32;
@@ -203,7 +251,7 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         let ambient = g.light.w;
         shade = ambient + (1.0 - ambient) * max(0.0, dot(n, g.light.xyz));
     }
-    return vec4<f32>(color.rgb * shade, color.a);
+    return vec4<f32>(apply_fog(color.rgb * shade, in.world, in.pos.xy), color.a);
 }
 
 // Section fill: the color as given, unlit and not clipped.
@@ -262,20 +310,38 @@ struct Segment {
     @location(5) n2: vec3<f32>,
     // 0: never a profile, 1: profile on the silhouette, 2: always a profile.
     @location(6) profile: f32,
+    // 1: model edge (the Edge Style settings apply).
+    @location(7) flags: u32,
 };
 
-// Line width in logical points, widened to the profile width on profile edges.
-fn line_width(s: Segment) -> f32 {
+// Whether the segment is drawn as a profile now (profiles on and it is one).
+fn is_profile(s: Segment) -> bool {
     if (g.profile.y < 0.5 || s.profile < 0.5) {
-        return s.style.x;
+        return false;
     }
-    var is_profile = s.profile > 1.5;
-    if (!is_profile) {
-        let mid = (s.a + s.b) * 0.5;
-        let to_eye = select(g.eye.xyz, g.eye.xyz - mid, g.eye.w > 0.5);
-        is_profile = dot(s.n1, to_eye) * dot(s.n2, to_eye) <= 0.0;
+    if (s.profile > 1.5) {
+        return true;
     }
-    return select(s.style.x, max(s.style.x, g.profile.x), is_profile);
+    let mid = (s.a + s.b) * 0.5;
+    let to_eye = select(g.eye.xyz, g.eye.xyz - mid, g.eye.w > 0.5);
+    return dot(s.n1, to_eye) * dot(s.n2, to_eye) <= 0.0;
+}
+
+// Depth cue: `max_width` at the model's near side to 1 at its far side (mirrors
+// `depth_cue_width` in viewport.rs).
+fn depth_cue_width(d: f32, max_width: f32) -> f32 {
+    let t = clamp((d - g.depth_range.x) / max(g.depth_range.y - g.depth_range.x, 1e-6), 0.0, 1.0);
+    return max_width + (1.0 - max_width) * t;
+}
+
+// Line width in logical points: widened to the profile width on profile edges; on
+// model edges set by the depth cue (at the edge's midpoint) when that is on.
+fn line_width(s: Segment, profile: bool) -> f32 {
+    var w = s.style.x;
+    if (s.flags == 1u && g.edge_style.y > 0.0) {
+        w = depth_cue_width(view_depth((s.a + s.b) * 0.5), g.edge_style.y);
+    }
+    return select(w, max(w, g.profile.x), profile);
 }
 
 struct LineOut {
@@ -283,8 +349,8 @@ struct LineOut {
     @location(0) color: vec4<f32>,
     // Segment start in framebuffer pixels (y down) and unit direction.
     @location(1) @interpolate(flat) start_dir: vec4<f32>,
-    // x: width in pixels, y: dash length in pixels.
-    @location(2) @interpolate(flat) style: vec2<f32>,
+    // x: width in pixels, y: dash length in pixels, z: 1 for a model edge.
+    @location(2) @interpolate(flat) style: vec3<f32>,
     // World position along the segment, for the section plane.
     @location(3) world: vec3<f32>,
 };
@@ -320,10 +386,24 @@ fn pull_depth(c: vec4<f32>, half_px: f32) -> f32 {
 
 @vertex
 fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
+    return line_vertex(vi, s, false);
+}
+
+// Back edges: plain width (no profile widening), like SketchUp's thin dashed lines.
+@vertex
+fn back_line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
+    return line_vertex(vi, s, true);
+}
+
+fn line_vertex(vi: u32, s: Segment, back: bool) -> LineOut {
     var out: LineOut;
     var ca = g.view_proj * vec4<f32>(s.a, 1.0);
     var cb = g.view_proj * vec4<f32>(s.b, 1.0);
-    if (ca.w < g.viewport.w && cb.w < g.viewport.w) {
+    let model = s.flags == 1u;
+    let profile = is_profile(s);
+    // Behind the camera, or Edges off and not a profile.
+    let hidden = model && g.edge_style.x < 0.5 && !profile;
+    if ((ca.w < g.viewport.w && cb.w < g.viewport.w) || hidden) {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
@@ -337,8 +417,15 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
 
     let size = g.viewport.xy;
     let ppp = g.viewport.z;
-    let sa = (ca.xy / ca.w * 0.5 + 0.5) * size;
-    let sb = (cb.xy / cb.w * 0.5 + 0.5) * size;
+    var sa = (ca.xy / ca.w * 0.5 + 0.5) * size;
+    var sb = (cb.xy / cb.w * 0.5 + 0.5) * size;
+    // Extension (mirrors `extend_segment` in viewport.rs).
+    let ext = g.edge_style.z * ppp;
+    if (model && ext > 0.0 && length(sb - sa) > 1e-6) {
+        let d = normalize(sb - sa);
+        sa -= d * ext;
+        sb += d * ext;
+    }
     var along = sb - sa;
     let len = length(along);
     var dir = vec2<f32>(1.0, 0.0);
@@ -354,7 +441,7 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     let side = sides[vi];
 
     // Half width plus one pixel of feather for antialiasing.
-    let width = line_width(s);
+    let width = line_width(s, profile && !back);
     let half = width * ppp * 0.5 + 1.0;
     let c = select(ca, cb, end > 0.5);
     let base = select(sa, sb, end > 0.5);
@@ -366,7 +453,7 @@ fn line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     out.world = select(wa, wb, end > 0.5);
     // Framebuffer y runs down; everything above uses y up.
     out.start_dir = vec4<f32>(sa.x, size.y - sa.y, dir.x, -dir.y);
-    out.style = vec2<f32>(width * ppp, s.style.y * ppp);
+    out.style = vec3<f32>(width * ppp, s.style.y * ppp, select(0.0, 1.0, model));
     return out;
 }
 
@@ -376,18 +463,35 @@ fn line_fs(in: LineOut) -> @location(0) vec4<f32> {
     if (section_clipped(in.world)) {
         discard;
     }
-    return line_color(in);
+    return fogged_line(in, line_color(in, in.style.y));
+}
+
+// Back edges: the hidden parts of model edges (this pipeline only passes fragments
+// behind the depth buffer), dashed.
+@fragment
+fn back_line_fs(in: LineOut) -> @location(0) vec4<f32> {
+    if (in.style.z < 0.5 || section_clipped(in.world)) {
+        discard;
+    }
+    return fogged_line(in, line_color(in, g.edge_style.w * g.viewport.z));
 }
 
 // Axes and other overlays: never clipped.
 @fragment
 fn overlay_line_fs(in: LineOut) -> @location(0) vec4<f32> {
-    return line_color(in);
+    return line_color(in, in.style.y);
 }
 
-fn line_color(in: LineOut) -> vec4<f32> {
+// Model edges fade into the fog like faces.
+fn fogged_line(in: LineOut, c: vec4<f32>) -> vec4<f32> {
+    if (in.style.z < 0.5) {
+        return c;
+    }
+    return vec4<f32>(apply_fog(c.rgb, in.world, in.pos.xy), c.a);
+}
+
+fn line_color(in: LineOut, dash: f32) -> vec4<f32> {
     let width = in.style.x;
-    let dash = in.style.y;
     let rel = in.pos.xy - in.start_dir.xy;
     let dir = in.start_dir.zw;
     let along = dot(rel, dir);

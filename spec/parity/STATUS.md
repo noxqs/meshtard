@@ -27,7 +27,8 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Tray | Components | differs | In Model list with icons and instance counts, place, edit name and description, Purge Unused; no thumbnail grid, Edit tab, Statistics tab or 3D Warehouse |
 | Tray | Outliner | unverified | tree, selection, filter; icons and root label a guess |
 | Tray | Scenes | differs | Update/Add/Delete, list, click activates; no thumbnails, name/description fields, move up/down or per-scene property toggles |
-| Tray | Styles | differs | Edit tab only: edges, profiles and width, face style, X-ray, section cut width; text instead of icon buttons |
+| Tray | Styles | differs | Edit tab only: edges, back edges, profiles, depth cue and extension with widths, face style, X-ray, section cut width; text instead of icon buttons |
+| Tray | Fog | unverified | hidden until Window > Fog; Display Fog, Start and End sliders (percent), Use Background Color and a color; SketchUp has one two-handled Distance slider |
 | Tray | Shadows | differs | show, time, date, light, dark, on faces, on ground; no UTC offset, "Use sun for shading" or "From edges"; time slider spans the whole day |
 | Tray | Environments, Instructor | missing | listed in `tray.toml` but empty |
 | View | Sky and ground | unverified | colors are placeholders |
@@ -35,6 +36,8 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | View | Edge style (color, width) | unverified | black, 1 px, soft and hidden edges skipped |
 | View | Face shading | unverified | `[shading]` draft: flat diffuse, camera light, two-sided |
 | View | Profiles (width 2, borders and silhouettes) | unverified | |
+| View | Edge Style toggles: Edges, Back Edges, Profiles, Depth Cue, Extension | unverified | View > Edge Style with check marks; Edges off keeps profiles; back edges dashed 3 px and 1 px wide; depth cue 4 px at the model's near side down to 1 px at its far side, per edge (midpoint); extension 2 px at both ends. Defaults (off, 4, 2) from memory of SketchUp's rendering options; model-only (not read from or written to .skp); not undo steps; hidden edges with Edges off can still be picked |
+| View | Fog | unverified | linear in view depth from start to end, given as fractions of the model's depth range (SketchUp's distance scale unknown); towards the sky/ground/background behind each pixel, or a color; faces and model edges (not guides or axes); defaults (off, 0 to 100%, background color) a guess; model-only |
 | View | Selection highlight (blue edges, dotted faces, component box) | unverified | box follows component axes |
 | View | Face styles: Wireframe, Hidden Line, Shaded, Shaded With Textures, Monochrome | unverified | profiles hidden in Wireframe; material opacity kept in Hidden Line and Monochrome |
 | View | X-ray | unverified | faces at 50% opacity, amount a guess |

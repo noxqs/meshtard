@@ -487,8 +487,10 @@ impl Document {
         let f32x3 = |n: DVec3| [n.x as f32, n.y as f32, n.z as f32];
 
         for (id, e) in &ents.edges {
-            // Styles > Edges off hides all edges (profiles too, in this draft).
-            if !self.model.style.edges
+            // Edges off: the renderer draws only the profiles among model edges, so
+            // edges are left out only when profiles are off too.
+            let style = &self.model.style;
+            if (!style.edges && !style.profiles)
                 || e.attrs.hidden
                 || e.attrs.soft
                 || !self.layer_visible(e.attrs.layer)
@@ -501,6 +503,7 @@ impl Document {
                 edge_color,
                 [EDGE_WIDTH, 0.0],
             );
+            seg.flags = Segment::MODEL_EDGE;
             match e.faces[..] {
                 [] => {}
                 [f] => {

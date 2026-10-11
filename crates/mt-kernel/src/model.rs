@@ -106,6 +106,41 @@ pub struct StyleSettings {
     pub section_fill: bool,
     /// Section fill color (sRGB). SketchUp's default is unverified (dark gray here).
     pub section_fill_color: [u8; 3],
+    /// View > Edge Style > Back Edges: edges behind faces drawn dashed.
+    pub back_edges: bool,
+    /// View > Edge Style > Depth Cue and its width in pixels (the nearest edges' width).
+    pub depth_cue: bool,
+    pub depth_cue_width: f32,
+    /// View > Edge Style > Extension and its length in pixels.
+    pub extension: bool,
+    pub extension_length: f32,
+    /// View > Fog and the Fog panel.
+    pub fog: FogSettings,
+}
+
+/// Window > Fog. Distances are fractions of the model's depth as seen from the camera
+/// (0 its nearest point, 1 its farthest); SketchUp's own scale and defaults are
+/// unverified.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogSettings {
+    pub enabled: bool,
+    pub start: f32,
+    pub end: f32,
+    /// "Use background color"; otherwise `color` (sRGB).
+    pub use_background: bool,
+    pub color: [u8; 3],
+}
+
+impl Default for FogSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start: 0.0,
+            end: 1.0,
+            use_background: true,
+            color: [255, 255, 255],
+        }
+    }
 }
 
 impl Default for StyleSettings {
@@ -121,6 +156,14 @@ impl Default for StyleSettings {
             section_cuts: true,
             section_fill: true,
             section_fill_color: [64, 64, 64],
+            // Off, widths 4 and 2: from memory of SketchUp's rendering options
+            // (DrawDepthQue, DepthQueWidth, ExtendLines, LineExtension), unverified.
+            back_edges: false,
+            depth_cue: false,
+            depth_cue_width: 4.0,
+            extension: false,
+            extension_length: 2.0,
+            fog: FogSettings::default(),
         }
     }
 }
