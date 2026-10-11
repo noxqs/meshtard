@@ -341,24 +341,38 @@ impl Shell {
                         }
                     });
                 });
-                if data.materials.is_empty() {
-                    ui.label(RichText::new("No materials in the model.").color(t.text_disabled));
-                    return;
-                }
+                // The Default material (no material) first, then the model's.
+                let cells: Vec<Option<usize>> = std::iter::once(None)
+                    .chain((0..data.materials.len()).map(Some))
+                    .collect();
                 let size = 40.0;
                 let gap = 4.0;
                 let w = ui.available_width();
                 let per_row = (((w + gap) / (size + gap)).floor() as usize).max(1);
-                for chunk_start in (0..data.materials.len()).step_by(per_row) {
+                for row in cells.chunks(per_row) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
-                        let end = (chunk_start + per_row).min(data.materials.len());
-                        for i in chunk_start..end {
-                            let m = &data.materials[i];
+                        for &cell in row {
                             let (rect, r) =
                                 ui.allocate_exact_size(vec2(size, size), Sense::click());
-                            paint_swatch(ui.painter(), rect.shrink(2.0), m.color, m.opacity, &t);
-                            if current == Some(i) {
+                            let name = match cell {
+                                Some(i) => {
+                                    let m = &data.materials[i];
+                                    paint_swatch(
+                                        ui.painter(),
+                                        rect.shrink(2.0),
+                                        m.color,
+                                        m.opacity,
+                                        &t,
+                                    );
+                                    m.name.as_str()
+                                }
+                                None => {
+                                    paint_default_swatch(ui.painter(), rect.shrink(2.0), &t);
+                                    "Default"
+                                }
+                            };
+                            if current == cell {
                                 ui.painter().rect_stroke(
                                     rect,
                                     0.0,
@@ -373,9 +387,12 @@ impl Shell {
                                     StrokeKind::Inside,
                                 );
                             }
-                            if r.on_hover_text(&m.name).clicked() {
-                                data.current_material = Some(i);
-                                self.pending.push(Event::MaterialPick(i));
+                            if r.on_hover_text(name).clicked() {
+                                data.current_material = cell;
+                                self.pending.push(match cell {
+                                    Some(i) => Event::MaterialPick(i),
+                                    None => Event::MaterialDefault,
+                                });
                             }
                         }
                     });

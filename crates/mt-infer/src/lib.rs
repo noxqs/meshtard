@@ -34,6 +34,8 @@ pub const EDGE_APERTURE: f64 = 6.0;
 pub const DIRECTION_APERTURE: f64 = 10.0;
 /// Half-length of the model axes considered for "on axis" inferences, in inches.
 const AXIS_EXTENT: f64 = 1e6;
+/// How far beyond its ends an edge is extended for "Extend Edge", in edge lengths.
+const EXTEND_FACTOR: f64 = 3.0;
 /// Seconds the cursor rests on a point before it is acquired for "from point"
 /// tracking (SketchUp: about a second; unverified).
 pub const ACQUIRE_DELAY: f64 = 1.0;
@@ -106,7 +108,34 @@ pub enum Kind {
     HalfCircle,
     /// Arc tangent to the edge ending at its start point.
     Tangent,
+    /// On the cut line of the active section plane.
+    OnSection,
+    /// Along the normal of the face hovered last, from the anchor.
+    PerpendicularToFace,
+    /// On the line through the edge hovered last, beyond its ends.
+    ExtendEdge,
 }
+
+/// The kind of instance an inferred point lies in, relative to the open context:
+/// SketchUp draws such point inferences magenta and says "in Group" / "in Component".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Container {
+    Group,
+    Component,
+}
+
+impl Container {
+    /// Tooltip suffix.
+    pub fn label(self) -> &'static str {
+        match self {
+            Container::Group => "in Group",
+            Container::Component => "in Component",
+        }
+    }
+}
+
+/// Marker color of point inferences inside a group or component.
+pub const CONTAINER_COLOR: [u8; 3] = [255, 0, 255];
 
 impl Kind {
     /// Tooltip text, as SketchUp shows it.
@@ -131,6 +160,9 @@ impl Kind {
             Kind::GoldenSection => "Golden Section".into(),
             Kind::HalfCircle => "Half Circle".into(),
             Kind::Tangent => "Tangent at Vertex".into(),
+            Kind::OnSection => "On Section".into(),
+            Kind::PerpendicularToFace => "Perpendicular to Face".into(),
+            Kind::ExtendEdge => "Extend Edge".into(),
         }
     }
 
@@ -153,6 +185,10 @@ impl Kind {
             // tangent arc is cyan in SketchUp.
             Kind::Square | Kind::GoldenSection | Kind::HalfCircle => [220, 0, 220],
             Kind::Tangent => [0, 200, 220],
+            // Unverified: On Section's marker color; the other two are magenta like
+            // the edge-related directions.
+            Kind::OnSection => [230, 120, 0],
+            Kind::PerpendicularToFace | Kind::ExtendEdge => [220, 0, 220],
         }
     }
 
@@ -185,6 +221,7 @@ impl Kind {
                 | Kind::OnEdge
                 | Kind::OnGuide
                 | Kind::OnAxis(_)
+                | Kind::OnSection
         )
     }
 }
@@ -204,6 +241,28 @@ pub struct Inference {
     pub normal: Option<DVec3>,
     /// The edge segment `edge` refers to, in world space.
     pub segment: Option<[DVec3; 2]>,
+    /// The point is on geometry inside a group or component (not the open context's
+    /// own geometry).
+    pub container: Option<Container>,
+}
+
+impl Inference {
+    /// Tooltip text: the kind's label, plus "in Group" / "in Component".
+    pub fn label(&self) -> String {
+        let label = self.kind.label();
+        match self.container {
+            Some(c) if !label.is_empty() => format!("{label} {}", c.label()),
+            _ => label,
+        }
+    }
+
+    /// Marker color: magenta inside a group or component.
+    pub fn color(&self) -> [u8; 3] {
+        match self.container {
+            Some(_) => CONTAINER_COLOR,
+            None => self.kind.color(),
+        }
+    }
 }
 
 /// An arc or circle curve, for the "center" inference.
@@ -228,6 +287,14 @@ pub struct Geometry {
     /// The arc (index into `arcs`) each edge is a segment of; may be shorter than
     /// `edges` (missing entries are `None`).
     pub edge_arc: Vec<Option<usize>>,
+    /// The group or component each edge lies in (relative to the open context); may
+    /// be shorter than `edges` (missing entries are `None`).
+    pub edge_container: Vec<Option<Container>>,
+    /// The group or component each triangle of the ray index lies in, by triangle
+    /// index; may be shorter (missing entries are `None`).
+    pub tri_container: Vec<Option<Container>>,
+    /// Cut lines of the active section plane ("On Section").
+    pub section_lines: Vec<[DVec3; 2]>,
 }
 
 impl Geometry {
@@ -264,6 +331,16 @@ impl Geometry {
     /// The arc curve edge `edge` belongs to.
     pub fn arc_of(&self, edge: usize) -> Option<usize> {
         self.edge_arc.get(edge).copied().flatten()
+    }
+
+    /// The group or component edge `edge` lies in.
+    pub fn container_of_edge(&self, edge: usize) -> Option<Container> {
+        self.edge_container.get(edge).copied().flatten()
+    }
+
+    /// The group or component ray-index triangle `tri` lies in.
+    pub fn container_of_triangle(&self, tri: usize) -> Option<Container> {
+        self.tri_container.get(tri).copied().flatten()
     }
 }
 
@@ -349,6 +426,8 @@ pub struct Engine {
     pub acquired: Option<DVec3>,
     /// Last arc or circle hovered (index into `Geometry::arcs`): its center is snappable.
     pub arc: Option<usize>,
+    /// Normal of the face hovered last: the reference for "Perpendicular to Face".
+    pub reference_face: Option<DVec3>,
     /// Locked direction and the inference kind that locked it.
     lock: Option<(DVec3, Kind)>,
     /// The acquirable point under the cursor and since when (seconds), for delayed
@@ -382,6 +461,7 @@ impl Engine {
     /// model changed.
     pub fn geometry_changed(&mut self) {
         self.reference_edge = None;
+        self.reference_face = None;
         self.arc = None;
     }
 
@@ -412,7 +492,7 @@ impl Engine {
         if d.length() > 1e-9
             && matches!(
                 inference.kind,
-                Kind::Along(_) | Kind::Parallel | Kind::Perpendicular
+                Kind::Along(_) | Kind::Parallel | Kind::Perpendicular | Kind::PerpendicularToFace
             )
         {
             self.lock = Some((d.normalize(), inference.kind));
@@ -508,6 +588,9 @@ impl Engine {
     ) -> Inference {
         let mut i = self.infer_point(geom, bvh, view, cursor, anchor);
         i.segment = i.edge.and_then(|e| geom.edges.get(e).copied());
+        if matches!(i.kind, Kind::Endpoint | Kind::Midpoint | Kind::OnEdge) {
+            i.container = i.edge.and_then(|e| geom.container_of_edge(e));
+        }
         i
     }
 
@@ -526,6 +609,7 @@ impl Engine {
             let [a, b, c] = bvh.triangle(h.triangle);
             (b - a).cross(c - a).normalize_or_zero()
         });
+        let face_container = hit.and_then(|h| geom.container_of_triangle(h.triangle));
         let visible = |p: DVec3| (p - ray.origin).dot(ray.dir) <= face_t * (1.0 + 1e-4) + 1e-2;
 
         let point = self.point_inference(
@@ -537,6 +621,7 @@ impl Engine {
             ray.dir,
             face_t,
             face_normal,
+            face_container,
             visible,
         );
 
@@ -555,6 +640,7 @@ impl Engine {
                     locked: true,
                     normal: None,
                     segment: None,
+                    container: None,
                 };
             }
             if let Some(p) = point.filter(|p| p.kind.is_point()) {
@@ -580,6 +666,7 @@ impl Engine {
             locked: false,
             normal: None,
             segment: None,
+            container: None,
         }
     }
 
@@ -589,6 +676,9 @@ impl Engine {
         }
         if let Some(a) = p.edge.and_then(|e| geom.arc_of(e)) {
             self.arc = Some(a);
+        }
+        if p.kind == Kind::OnFace && p.normal.is_some() {
+            self.reference_face = p.normal;
         }
     }
 
@@ -603,6 +693,7 @@ impl Engine {
         rd: DVec3,
         face_t: f64,
         face_normal: Option<DVec3>,
+        face_container: Option<Container>,
         visible: impl Fn(DVec3) -> bool,
     ) -> Option<Inference> {
         let near = |p: DVec3, r: f64| {
@@ -621,6 +712,7 @@ impl Engine {
                     locked: false,
                     normal: None,
                     segment: None,
+                    container: None,
                 })
         };
 
@@ -673,6 +765,7 @@ impl Engine {
                     locked: false,
                     normal: None,
                     segment: None,
+                    container: None,
                 })
         };
         let on_axis = || {
@@ -691,6 +784,7 @@ impl Engine {
                     locked: false,
                     normal: None,
                     segment: None,
+                    container: None,
                 })
         };
         let on_face = || {
@@ -702,7 +796,52 @@ impl Engine {
                 locked: false,
                 normal: face_normal,
                 segment: None,
+                container: face_container,
             })
+        };
+        // The cut lines of the active section plane.
+        let on_section = || {
+            geom.section_lines
+                .iter()
+                .filter_map(|[a, b]| on_line(*a, *b))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, p)| Inference {
+                    point: p,
+                    kind: Kind::OnSection,
+                    edge: None,
+                    guide: None,
+                    locked: false,
+                    normal: None,
+                    segment: None,
+                    container: None,
+                })
+        };
+        // The line through the edge hovered last, beyond its ends (up to
+        // EXTEND_FACTOR edge lengths; SketchUp's reach is unverified).
+        let extend_edge = || {
+            let e = self.reference_edge?;
+            let [a, b] = *geom.edges.get(e)?;
+            let d = b - a;
+            if d.length() <= 1e-9 {
+                return None;
+            }
+            [(b, d), (a, -d)]
+                .into_iter()
+                .filter_map(|(from, dir)| {
+                    on_line(from, from + dir * EXTEND_FACTOR).map(|(dist, p)| (dist, p, from))
+                })
+                .filter(|(_, p, from)| p.distance(*from) > 1e-6)
+                .min_by(|x, y| x.0.total_cmp(&y.0))
+                .map(|(_, p, from)| Inference {
+                    point: p,
+                    kind: Kind::ExtendEdge,
+                    edge: Some(e),
+                    guide: Some((from, p)),
+                    locked: false,
+                    normal: None,
+                    segment: None,
+                    container: None,
+                })
         };
         let guide_point = || {
             best_point(
@@ -723,6 +862,7 @@ impl Engine {
                     locked: false,
                     normal: None,
                     segment: None,
+                    container: None,
                 })
         };
         // Center of the arc or circle hovered last.
@@ -748,6 +888,7 @@ impl Engine {
                 locked: false,
                 normal: None,
                 segment: None,
+                container: None,
             })
         };
         endpoint
@@ -757,8 +898,10 @@ impl Engine {
             .or_else(guide_point)
             .or_else(origin)
             .or_else(on_edge)
+            .or_else(on_section)
             .or_else(on_guide)
             .or_else(on_axis)
+            .or_else(extend_edge)
             .or_else(on_face)
     }
 
@@ -796,6 +939,15 @@ impl Engine {
                 }
             }
         }
+        // Perpendicular to the face hovered last, unless that is an axis.
+        if let Some(n) = self.reference_face.map(|n| n.normalize_or_zero())
+            && n != DVec3::ZERO
+            && !Axis::ALL
+                .iter()
+                .any(|&ax| n.cross(self.axes.dir(ax)).length() < 1e-6)
+        {
+            dirs.push((n, Kind::PerpendicularToFace));
+        }
         let best = dirs
             .into_iter()
             .map(|(d, kind)| {
@@ -816,6 +968,7 @@ impl Engine {
             locked: false,
             normal: None,
             segment: None,
+            container: None,
         };
         // Line up with the acquired point along another axis, if close.
         if let (Kind::Along(_), Some(t)) = (kind, self.tracking(view, cursor, ro, rd, Some((a, p))))
@@ -867,6 +1020,7 @@ impl Engine {
                 locked: false,
                 normal: None,
                 segment: None,
+                container: None,
             })
     }
 }
@@ -1336,5 +1490,79 @@ mod tests {
         assert!(i.point.z.abs() < 1e-6); // The green axis, which also reaches behind the camera, is still inferred.
         let i = infer(&mut e, &g, &b, at(DVec3::new(0.0, 200.0, 0.0)), None);
         assert_eq!(i.kind, Kind::OnAxis(Axis::Green));
+    }
+
+    /// Geometry inside a group or component: point inferences carry the container
+    /// (magenta marker, "in Group" / "in Component" tooltip).
+    #[test]
+    fn points_inside_groups_and_components_say_so() {
+        let (mut g, b) = square();
+        // Edges 0 and 1 are in a group, the face is in a component.
+        g.edge_container = vec![Some(Container::Group), Some(Container::Group)];
+        g.tri_container = vec![Some(Container::Component); 2];
+        let mut e = Engine::default();
+        let off = DVec2::new(3.0, -2.0);
+        let i = infer(&mut e, &g, &b, at(DVec3::new(50.0, 0.0, 0.0)) + off, None);
+        assert_eq!(i.kind, Kind::Midpoint);
+        assert_eq!(i.container, Some(Container::Group));
+        assert_eq!(i.label(), "Midpoint in Group");
+        assert_eq!(i.color(), CONTAINER_COLOR);
+        let i = infer(&mut e, &g, &b, at(DVec3::new(100.0, 0.0, 0.0)) + off, None);
+        assert_eq!(
+            (i.kind, i.container),
+            (Kind::Endpoint, Some(Container::Group))
+        );
+        let i = infer(&mut e, &g, &b, at(DVec3::new(60.0, 70.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::OnFace);
+        assert_eq!(i.label(), "On Face in Component");
+        // Edge 2 (top) is loose geometry of the open context.
+        let i = infer(&mut e, &g, &b, at(DVec3::new(50.0, 100.0, 0.0)), None);
+        assert_eq!((i.kind, i.container), (Kind::Midpoint, None));
+        assert_eq!(i.label(), "Midpoint");
+        assert_eq!(i.color(), Kind::Midpoint.color());
+    }
+
+    #[test]
+    fn on_section_line() {
+        let (mut g, b) = square();
+        g.section_lines = vec![[DVec3::new(20.0, 0.0, 0.0), DVec3::new(20.0, 100.0, 0.0)]];
+        let mut e = Engine::default();
+        let i = infer(&mut e, &g, &b, at(DVec3::new(20.0, 60.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::OnSection);
+        assert!((i.point.x - 20.0).abs() < 1e-6);
+        assert_eq!(i.label(), "On Section");
+    }
+
+    #[test]
+    fn extend_edge_beyond_its_end() {
+        let (g, b) = square();
+        let mut e = Engine::default();
+        // Hover the top edge, then go past its right end along its line.
+        let i = infer(&mut e, &g, &b, at(DVec3::new(30.0, 100.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::OnEdge);
+        let i = infer(&mut e, &g, &b, at(DVec3::new(170.0, 100.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::ExtendEdge);
+        assert!((i.point - DVec3::new(170.0, 100.0, 0.0)).length() < 1e-6);
+        assert_eq!(i.guide.map(|g| g.0), Some(DVec3::new(100.0, 100.0, 0.0)));
+    }
+
+    #[test]
+    fn perpendicular_to_a_sloped_face() {
+        // A face tilted 30 degrees about the red axis.
+        let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+        let q = |x: f64, y: f64| DVec3::new(x, y * c, y * s);
+        let pts = [q(0.0, 0.0), q(100.0, 0.0), q(100.0, 100.0), q(0.0, 100.0)];
+        let edges = (0..4).map(|i| [pts[i], pts[(i + 1) % 4]]).collect();
+        let b = Bvh::build(vec![[pts[0], pts[1], pts[2]], [pts[0], pts[2], pts[3]]]);
+        let g = Geometry::from_edges(edges);
+        let mut e = Engine::default();
+        let a = q(50.0, 50.0);
+        let i = infer(&mut e, &g, &b, at(a), None);
+        assert_eq!(i.kind, Kind::OnFace);
+        let n = DVec3::new(0.0, -s, c);
+        let target = a + n * 60.0;
+        let i = infer(&mut e, &g, &b, at(target), Some(a));
+        assert_eq!(i.kind, Kind::PerpendicularToFace);
+        assert!((i.point - target).length() < 1e-3, "{:?}", i.point);
     }
 }

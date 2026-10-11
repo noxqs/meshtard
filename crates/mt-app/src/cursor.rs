@@ -84,6 +84,7 @@ pub fn cursor_for(tool: Tool, mods: Mods, state: State) -> Cursor {
             // Placing pasted entities, components and images: the Move cursor.
             "edit.paste" | "tool.place_component" | "tool.place_image" => Cursor::new(Kind::Move),
             "tool.scale" => Cursor::new(Kind::Scale),
+            "tool.flip" => Cursor::with(Kind::Flip, copy),
             "tool.offset" => Cursor::new(Kind::Offset),
             "tool.follow_me" => Cursor::new(Kind::FollowMe),
             "tool.paint_bucket" if mods.alt => Cursor::new(Kind::Eyedropper),
@@ -229,6 +230,7 @@ mod tests {
             "tool.offset",
             "tool.follow_me",
             "tool.paint_bucket",
+            "tool.flip",
             "tool.section_plane",
             "tool.axes",
             "tool.sandbox_from_scratch",
@@ -366,6 +368,7 @@ mod tests {
         assert_eq!(k("tool.move"), Kind::Move);
         assert_eq!(k("tool.rotate"), Kind::Rotate);
         assert_eq!(k("tool.push_pull"), Kind::PushPull);
+        assert_eq!(k("tool.flip"), Kind::Flip);
         assert_eq!(k("tool.tape_measure"), Kind::TapeMeasure);
         assert_eq!(k("camera.orbit"), Kind::Orbit);
         assert_eq!(k("camera.pan"), Kind::Pan);

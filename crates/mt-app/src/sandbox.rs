@@ -332,6 +332,7 @@ mod tests {
             locked: false,
             normal: None,
             segment: None,
+            container: None,
         }
     }
 

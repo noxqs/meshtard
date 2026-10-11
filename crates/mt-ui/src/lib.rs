@@ -57,7 +57,7 @@
 //! | Panel     | Shows                                         | Events |
 //! |-----------|-----------------------------------------------|--------|
 //! | Tags      | [`TrayData::tags`] (0 = "Untagged"), eye, color swatch, pencil on [`TrayData::active_tag`]; double-click renames | [`Event::TagAdd`], [`Event::TagDelete`], [`Event::TagRename`], [`Event::TagVisible`], [`Event::TagActive`], [`Event::TagColor`] |
-//! | Materials | "In Model" grid of [`TrayData::materials`], current material preview, Edit tab (name, color, opacity) | [`Event::MaterialPick`], [`Event::MaterialEdit`] |
+//! | Materials | "In Model" grid of [`TrayData::materials`], current material preview, Edit tab (name, color, opacity) | [`Event::MaterialPick`], [`Event::MaterialDefault`], [`Event::MaterialEdit`] |
 //! | Components | Select tab: "In Model" list of [`TrayData::components`] (icon, name, instance count; groups are not definitions and not listed), Details menu with Purge Unused; header and Edit tab (name, description) for [`TrayData::current_component`] | [`Event::ComponentPick`], [`Event::ComponentEdit`], [`Event::ComponentPurge`] |
 //! | Outliner  | [`TrayData::outliner`] tree under [`TrayData::outliner_root`], filter field | [`Event::OutlinerSelect`] |
 //! | Scenes    | [`TrayData::scenes`], [`TrayData::active_scene`] | [`Event::SceneAdd`], [`Event::SceneDelete`], [`Event::SceneUpdate`], [`Event::SceneActivate`] |
@@ -203,6 +203,9 @@ pub enum Event {
     /// Materials: swatch clicked in the "In Model" grid; make it the Paint Bucket's
     /// current material. The shell also shows it as current at once.
     MaterialPick(usize),
+    /// Materials: the Default swatch (no material) clicked in the "In Model" grid; the
+    /// Paint Bucket then removes materials.
+    MaterialDefault,
     /// Materials: the Create Material button. The app adds a material and makes it
     /// current.
     MaterialCreate,

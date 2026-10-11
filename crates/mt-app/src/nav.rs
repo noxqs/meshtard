@@ -55,6 +55,7 @@ impl Tool {
             "tool.offset" => Self::Modify("tool.offset"),
             "tool.follow_me" => Self::Modify("tool.follow_me"),
             "tool.paint_bucket" => Self::Modify("tool.paint_bucket"),
+            "tool.flip" => Self::Modify("tool.flip"),
             "tool.section_plane" => Self::Modify("tool.section_plane"),
             "tool.axes" => Self::Modify("tool.axes"),
             "tool.sandbox_from_scratch" => Self::Modify("tool.sandbox_from_scratch"),

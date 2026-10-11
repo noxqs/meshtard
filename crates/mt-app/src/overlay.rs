@@ -28,7 +28,11 @@ pub fn paint(
     }
     let directional = matches!(
         inf.kind,
-        Kind::Along(_) | Kind::Parallel | Kind::Perpendicular | Kind::FromPoint(_)
+        Kind::Along(_)
+            | Kind::Parallel
+            | Kind::Perpendicular
+            | Kind::FromPoint(_)
+            | Kind::PerpendicularToFace
     );
     for line in previews {
         let rubber_band = previews.len() == 1 && line.len() == 2 && Some(line[0]) == anchor;
@@ -49,8 +53,9 @@ pub fn paint(
         }
     }
 
-    // Marker: dot for points, square for "on" inferences, diamond on faces.
-    let fill = color32(inf.kind.color());
+    // Marker: dot for points, square for "on" inferences, diamond on faces; magenta
+    // inside a group or component.
+    let fill = color32(inf.color());
     let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
     match inf.kind {
         Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::GuidePoint | Kind::Center => {
@@ -63,7 +68,7 @@ pub fn paint(
             painter.line_segment([p + egui::vec2(-d, -d), p + egui::vec2(d, d)], stroke);
             painter.line_segment([p + egui::vec2(-d, d), p + egui::vec2(d, -d)], stroke);
         }
-        Kind::OnEdge | Kind::OnAxis(_) | Kind::OnGuide => {
+        Kind::OnEdge | Kind::OnAxis(_) | Kind::OnGuide | Kind::OnSection => {
             painter.rect(
                 egui::Rect::from_center_size(p, egui::vec2(8.0, 8.0)),
                 0.0,
@@ -90,13 +95,15 @@ pub fn paint(
         | Kind::Square
         | Kind::GoldenSection
         | Kind::HalfCircle
-        | Kind::Tangent => {
+        | Kind::Tangent
+        | Kind::PerpendicularToFace
+        | Kind::ExtendEdge => {
             painter.circle_stroke(p, 2.5, egui::Stroke::new(1.0, egui::Color32::BLACK));
         }
     }
 
     // Tooltip, like SketchUp's yellow inference tooltip.
-    let label = inf.kind.label();
+    let label = inf.label();
     if !label.is_empty() {
         let text = if inf.locked {
             format!("{label} (locked)")
@@ -139,5 +146,37 @@ pub fn markers(
             egui::Stroke::new(1.0, egui::Color32::BLACK),
             egui::StrokeKind::Middle,
         );
+    }
+}
+
+/// Flip's translucent planes; the hot one more opaque and outlined (opacities are
+/// guesses; SketchUp's are unverified).
+pub fn planes(
+    painter: &egui::Painter,
+    to_screen: impl Fn(DVec3) -> Option<egui::Pos2>,
+    planes: &[crate::modify::Plane],
+) {
+    // The hot plane last, on top.
+    let order = planes
+        .iter()
+        .filter(|p| !p.hot)
+        .chain(planes.iter().filter(|p| p.hot));
+    for p in order {
+        let Some(pts) = p
+            .corners
+            .iter()
+            .map(|c| to_screen(*c))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let [r, g, b] = p.color;
+        let alpha = if p.hot { 110 } else { 45 };
+        let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
+        let stroke = egui::Stroke::new(
+            if p.hot { 2.0 } else { 1.0 },
+            egui::Color32::from_rgba_unmultiplied(r, g, b, if p.hot { 255 } else { 140 }),
+        );
+        painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
     }
 }
