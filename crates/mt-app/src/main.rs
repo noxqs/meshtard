@@ -38,6 +38,7 @@ mod snap;
 mod soften;
 mod solid_tools;
 mod splash;
+mod spring;
 mod templates;
 mod text3d;
 mod tools;
@@ -373,6 +374,8 @@ struct App {
     animation: animation::Animation,
     /// The Solid Tools or Tag tool, when `tool` is `Tool::Pick`.
     pick: Option<pick_tool::PickTool>,
+    /// A camera tool held by its shortcut key (see `spring`).
+    spring: Option<spring::Spring>,
     /// Window > Soften Edges.
     soften: soften::SoftenPanel,
     /// Position Camera, Walk, Look Around and Field of View.
@@ -473,6 +476,7 @@ impl App {
             mesh_import: None,
             animation: Default::default(),
             pick: None,
+            spring: None,
             soften: Default::default(),
             camera_tools: Default::default(),
             model_info: None,
@@ -1338,10 +1342,11 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context, frame: &eframe::Frame, typing: bool) {
+        self.spring_update(ctx);
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let pressed: Vec<&'static str> = ctx.input(|i| {
+        let pressed: Vec<(&'static str, Option<egui::Key>)> = ctx.input(|i| {
             self.shortcuts
                 .iter()
                 .filter(|(s, key, _)| {
@@ -1359,7 +1364,7 @@ impl App {
                         && m.shift == s.shift
                         && m.alt == s.alt
                 })
-                .map(|(_, _, id)| *id)
+                .map(|(_, key, id)| (*id, Some(*key)))
                 .chain(
                     // egui turns Ctrl+X, Ctrl+C and Ctrl+V into clipboard events instead
                     // of key presses (Ctrl+V only while the system clipboard holds
@@ -1368,15 +1373,20 @@ impl App {
                         .iter()
                         .filter(|_| !cfg!(target_os = "macos"))
                         .filter_map(|e| match e {
-                            egui::Event::Cut => Some("edit.cut"),
-                            egui::Event::Copy => Some("edit.copy"),
-                            egui::Event::Paste(_) => Some("edit.paste"),
+                            egui::Event::Cut => Some(("edit.cut", None)),
+                            egui::Event::Copy => Some(("edit.copy", None)),
+                            egui::Event::Paste(_) => Some(("edit.paste", None)),
                             _ => None,
                         }),
                 )
                 .collect()
         });
-        for id in pressed {
+        for (id, key) in pressed {
+            if let Some(key) = key
+                && !self.spring_press(ctx, id, key)
+            {
+                continue;
+            }
             self.run_command(ctx, frame, id);
         }
     }

@@ -184,3 +184,4 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 ## Grey menu items
 
 Menu items that are shown but not yet implemented are listed in `spec/parity/FEATURES.md`.
+| Camera | Spring-loaded O / H / Z | differs | Meshtard addition: tapping switches to Orbit / Pan / Zoom as in SketchUp; holding the key uses the tool while it is down and releasing returns to the previous tool with its operation kept (held = camera moved or down 0.3 s) |
