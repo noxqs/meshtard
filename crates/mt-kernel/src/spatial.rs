@@ -21,7 +21,8 @@
 //! `Entities::set_vertex_positions` or `Entities::invalidate_index`. Cloning `Entities`
 //! does not copy the index (undo snapshots stay small); the clone rebuilds it on first use.
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use glam::DVec3;
@@ -138,10 +139,27 @@ type Cells<K> = HashMap<Cell, Vec<K>, BuildHasherDefault<FxHasher>>;
 /// Deepest level: cells of `cell * 2^MAX_LEVEL` hold anything.
 const MAX_LEVEL: usize = 62;
 
+/// One level of a layer: occupied cells, and the cells of each slab (cells with the same
+/// coordinate along an axis), so a plane query visits only the slabs the plane crosses.
+#[derive(Debug, Clone)]
+struct Level<K: Key> {
+    cells: Cells<K>,
+    slabs: [BTreeMap<i64, Vec<Cell>>; 3],
+}
+
+impl<K: Key> Default for Level<K> {
+    fn default() -> Self {
+        Self {
+            cells: Cells::default(),
+            slabs: Default::default(),
+        }
+    }
+}
+
 /// One kind of item (vertices, edges or faces) in the grid.
 #[derive(Debug, Clone)]
 struct Layer<K: Key> {
-    levels: Vec<Cells<K>>,
+    levels: Vec<Level<K>>,
     /// Where each item is stored and its box.
     loc: SecondaryMap<K, (u8, Cell, Aabb)>,
 }
@@ -176,6 +194,16 @@ fn in_range(c: &Cell, lo: &Cell, hi: &Cell) -> bool {
     (0..3).all(|i| lo[i] <= c[i] && c[i] <= hi[i])
 }
 
+/// A cell's box grown by half a cell: where the boxes of its items lie.
+fn grown_box(c: &Cell, cs: f64) -> Aabb {
+    let min = DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64) * cs;
+    Aabb {
+        min,
+        max: min + DVec3::splat(cs),
+    }
+    .expand(cs / 2.0)
+}
+
 impl<K: Key + Ord> Layer<K> {
     fn len(&self) -> usize {
         self.loc.len()
@@ -197,7 +225,16 @@ impl<K: Key + Ord> Layer<K> {
         if self.levels.len() <= level {
             self.levels.resize_with(level + 1, Default::default);
         }
-        self.levels[level].entry(c).or_default().push(k);
+        let lv = &mut self.levels[level];
+        match lv.cells.entry(c) {
+            Entry::Occupied(mut o) => o.get_mut().push(k),
+            Entry::Vacant(v) => {
+                v.insert(vec![k]);
+                for (axis, slabs) in lv.slabs.iter_mut().enumerate() {
+                    slabs.entry(c[axis]).or_default().push(c);
+                }
+            }
+        }
         self.loc.insert(k, (level as u8, c, b));
     }
 
@@ -205,13 +242,24 @@ impl<K: Key + Ord> Layer<K> {
         let Some((level, c, _)) = self.loc.remove(k) else {
             return;
         };
-        let cells = &mut self.levels[level as usize];
-        if let Some(list) = cells.get_mut(&c) {
-            if let Some(i) = list.iter().position(|x| *x == k) {
-                list.swap_remove(i);
-            }
-            if list.is_empty() {
-                cells.remove(&c);
+        let lv = &mut self.levels[level as usize];
+        let Some(list) = lv.cells.get_mut(&c) else {
+            return;
+        };
+        if let Some(i) = list.iter().position(|x| *x == k) {
+            list.swap_remove(i);
+        }
+        if list.is_empty() {
+            lv.cells.remove(&c);
+            for (axis, slabs) in lv.slabs.iter_mut().enumerate() {
+                if let Some(slab) = slabs.get_mut(&c[axis]) {
+                    if let Some(i) = slab.iter().position(|x| *x == c) {
+                        slab.swap_remove(i);
+                    }
+                    if slab.is_empty() {
+                        slabs.remove(&c[axis]);
+                    }
+                }
             }
         }
     }
@@ -219,7 +267,8 @@ impl<K: Key + Ord> Layer<K> {
     /// Items whose box meets `b`, unsorted.
     fn query(&self, cell: f64, b: &Aabb, out: &mut Vec<K>) {
         let keep = |k: &K| self.loc[*k].2.overlaps(b);
-        for (level, cells) in self.levels.iter().enumerate() {
+        for (level, lv) in self.levels.iter().enumerate() {
+            let cells = &lv.cells;
             if cells.is_empty() {
                 continue;
             }
@@ -251,7 +300,8 @@ impl<K: Key + Ord> Layer<K> {
         let whole = Aabb::segment(a, b).expand(margin);
         let len = a.distance(b);
         let mut visit: Vec<Cell> = Vec::new();
-        for (level, cells) in self.levels.iter().enumerate() {
+        for (level, lv) in self.levels.iter().enumerate() {
+            let cells = &lv.cells;
             if cells.is_empty() {
                 continue;
             }
@@ -299,22 +349,54 @@ impl<K: Key + Ord> Layer<K> {
         }
     }
 
-    /// Items whose box comes within `tol` of the plane `normal . p = d`, unsorted.
+    /// Items whose box comes within `tol` of the plane `normal . p = d`, unsorted. Only
+    /// the slabs (along the normal's main axis) that the plane crosses within the level's
+    /// occupied range are visited.
     fn query_plane(&self, cell: f64, normal: DVec3, d: f64, tol: f64, out: &mut Vec<K>) {
-        for (level, cells) in self.levels.iter().enumerate() {
+        let n = normal.to_array();
+        let axis = (0..3)
+            .max_by(|&i, &j| n[i].abs().total_cmp(&n[j].abs()))
+            .unwrap_or(2);
+        if n[axis] == 0.0 || !n[axis].is_finite() {
+            return;
+        }
+        for (level, lv) in self.levels.iter().enumerate() {
+            if lv.cells.is_empty() {
+                continue;
+            }
             let cs = cell * (level as f64).exp2();
-            for (c, list) in cells {
-                let min = DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64) * cs;
-                let grown = Aabb {
-                    min,
-                    max: min + DVec3::splat(cs),
-                }
-                .expand(cs / 2.0);
-                if grown.meets_plane(normal, d, tol) {
-                    out.extend(
-                        list.iter()
-                            .filter(|k| self.loc[**k].2.meets_plane(normal, d, tol)),
-                    );
+            // Extremes of the other two terms of the plane equation over the occupied
+            // (grown) range, so the range of the main coordinate on the plane.
+            let (mut lo, mut hi) = (d - tol, d + tol);
+            for other in (0..3).filter(|&i| i != axis) {
+                let (Some(first), Some(last)) = (
+                    lv.slabs[other].first_key_value(),
+                    lv.slabs[other].last_key_value(),
+                ) else {
+                    continue;
+                };
+                let a = *first.0 as f64 * cs - cs / 2.0;
+                let b = (*last.0 + 1) as f64 * cs + cs / 2.0;
+                let (t0, t1) = (n[other] * a, n[other] * b);
+                lo -= t0.max(t1);
+                hi -= t0.min(t1);
+            }
+            let (x0, x1) = if n[axis] > 0.0 {
+                (lo / n[axis], hi / n[axis])
+            } else {
+                (hi / n[axis], lo / n[axis])
+            };
+            let first = ((x0 - 1.5 * cs) / cs).floor() as i64;
+            let last = ((x1 + 0.5 * cs) / cs).ceil() as i64;
+            for (_, slab) in lv.slabs[axis].range(first..=last) {
+                for c in slab {
+                    if grown_box(c, cs).meets_plane(normal, d, tol) {
+                        out.extend(
+                            lv.cells[c]
+                                .iter()
+                                .filter(|k| self.loc[**k].2.meets_plane(normal, d, tol)),
+                        );
+                    }
                 }
             }
         }
@@ -444,7 +526,9 @@ impl Entities {
     /// without the editing methods) or sized for a much smaller model. Kernel operations
     /// call this; queries on an `Entities` without an index fall back to scans.
     pub fn ensure_index(&mut self) {
-        if std::env::var_os("MT_NO_INDEX").is_some() { return; } // TEMP
+        if std::env::var_os("MT_NO_INDEX").is_some() {
+            return;
+        } // TEMP
         let items = self.vertices.len() + self.edges.len() + self.faces.len();
         let fresh = self
             .grid()
@@ -588,14 +672,14 @@ impl Entities {
         }
     }
 
-    /// Candidate edges within `tol` of the plane, in key order.
+    /// Candidate edges within `tol` of the plane, in no particular order.
     pub fn edges_near_plane(&self, plane: &crate::geom::Plane, tol: f64) -> Vec<EdgeId> {
         match self.grid() {
             Some(g) => {
                 let mut out = Vec::new();
                 g.edges
                     .query_plane(g.cell, plane.normal, plane.d, tol, &mut out);
-                sorted(out)
+                out
             }
             None => self.edges.keys().collect(),
         }

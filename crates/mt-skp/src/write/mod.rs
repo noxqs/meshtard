@@ -111,6 +111,12 @@ const ISO_CAMERA_TAIL_PATCH_A: (usize, [u8; 16]) =
 const ISO_CAMERA_TAIL_PATCH_B: (usize, [u8; 15]) =
     (1390, hex_bytes("4e53c84477029246bba95827bba7e2"));
 
+/// Where the scaffold stores its style's front and back face colors (RGB, then an
+/// unused byte): once before the material section and in each of the two style
+/// records of the tail. Found by searching the scaffold for its colors; checked by
+/// reading a patched file back (tests/write.rs).
+const STYLE_COLOR_POS: [(usize, usize); 3] = [(3227, 3231), (4317, 4333), (5198, 5214)];
+
 /// The unbounded side of a construction line (SketchUp's own sentinel).
 const CLINE_INFINITE: f64 = 1e30;
 
@@ -699,6 +705,8 @@ pub struct SkpBuilder {
     /// `max(span, 1) * 1e-6`.
     plane_tolerance: Option<f64>,
     allow_empty_root: bool,
+    /// Front and back face colors written into the scaffold's style.
+    face_colors: Option<([u8; 3], [u8; 3])>,
     font_slot: Option<u32>,
 }
 
@@ -741,6 +749,7 @@ impl SkpBuilder {
             root_items: 0,
             plane_tolerance: None,
             allow_empty_root: false,
+            face_colors: None,
             font_slot: None,
         }
     }
@@ -1661,6 +1670,12 @@ impl SkpBuilder {
         Ok(())
     }
 
+    /// The style's default front and back face colors (sRGB). Without this the file
+    /// keeps the scaffold's (225, 225, 200) / (128, 128, 200).
+    pub fn set_face_colors(&mut self, front: [u8; 3], back: [u8; 3]) {
+        self.face_colors = Some((front, back));
+    }
+
     /// Write a file with nothing at the root (after [`begin_root`](Self::begin_root)).
     pub fn set_allow_empty_root(&mut self, allow: bool) {
         self.allow_empty_root = allow;
@@ -1670,6 +1685,16 @@ impl SkpBuilder {
     /// least one entity to splice in).
     pub fn empty_document() -> Vec<u8> {
         SCAFFOLD.to_vec()
+    }
+
+    /// [`empty_document`](Self::empty_document) with the style's face colors set.
+    pub fn empty_document_with_colors(front: [u8; 3], back: [u8; 3]) -> Vec<u8> {
+        let mut v = SCAFFOLD.to_vec();
+        for &(f, b) in &STYLE_COLOR_POS {
+            v[f..f + 3].copy_from_slice(&front);
+            v[b..b + 3].copy_from_slice(&back);
+        }
+        v
     }
 
     /// Accept faces whose points are up to `tol` (inches) off their fitted
@@ -1698,7 +1723,19 @@ impl SkpBuilder {
         let definition_shift = self.definition_shift();
         let geometry_start = SCAFFOLD_NEXT_SLOT + material_shift + layer_shift + definition_shift;
         let geometry_shift = geometry.next_slot - geometry_start;
-        let d = SCAFFOLD;
+        let patched;
+        let d: &[u8] = match self.face_colors {
+            None => SCAFFOLD,
+            Some((front, back)) => {
+                let mut v = SCAFFOLD.to_vec();
+                for &(f, b) in &STYLE_COLOR_POS {
+                    v[f..f + 3].copy_from_slice(&front);
+                    v[b..b + 3].copy_from_slice(&back);
+                }
+                patched = v;
+                &patched
+            }
+        };
         let mut out =
             Vec::with_capacity(d.len() + self.material_writer.buf.len() + geometry.buf.len());
 

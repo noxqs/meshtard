@@ -445,3 +445,45 @@ fn annotations_round_trip() {
     assert_eq!((d.a, d.b), (dim.a, dim.b));
     assert!((d.offset - dim.offset).length() < 1e-12, "{:?}", d.offset);
 }
+
+/// The model's face colors survive save and reopen (written into the file's style).
+#[test]
+fn face_colors_round_trip() {
+    for with_geometry in [false, true] {
+        let mut m = Model::default();
+        m.front_color = [250, 240, 230];
+        m.back_color = [10, 20, 30];
+        if with_geometry {
+            square(&mut m.root, DVec3::ZERO, 10.0);
+        }
+        let r = round_trip(&m);
+        assert_eq!(
+            (r.front_color, r.back_color),
+            (m.front_color, m.back_color),
+            "geometry: {with_geometry}"
+        );
+    }
+}
+
+/// A dimension offset to either side reopens on the same side.
+#[test]
+fn dimension_offset_sign_round_trips() {
+    for side in [1.0, -1.0] {
+        let mut m = Model::default();
+        square(&mut m.root, DVec3::ZERO, 10.0);
+        m.root
+            .dimensions
+            .push(mt_kernel::annotation::Dimension::linear(
+                DVec3::ZERO,
+                DVec3::X * 10.0,
+                DVec3::Y * 4.0 * side,
+            ));
+        let r = round_trip(&m);
+        let d = r.root.dimensions.first().expect("dimension reopened");
+        assert!(
+            (d.offset - DVec3::Y * 4.0 * side).length() < 1e-6,
+            "side {side}: {:?}",
+            d.offset
+        );
+    }
+}

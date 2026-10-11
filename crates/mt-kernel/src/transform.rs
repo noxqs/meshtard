@@ -19,6 +19,7 @@ use crate::entities::{
 };
 use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
 use crate::ops::{face_from_cell, face_is_sound, insert_line, update_faces};
+use crate::spatial::Aabb;
 
 /// Vertices used by the given edges and faces (all loops), without duplicates.
 pub fn vertices_of(ents: &Entities, edges: &[EdgeId], faces: &[FaceId]) -> Vec<VertexId> {
@@ -76,8 +77,8 @@ pub fn transform_vertices(ents: &mut Entities, vertices: &[VertexId], xf: DMat4)
     };
     update_arcs(ents, &moves, xf);
     if !try_in_place(ents, &moves, &flip) {
-        rebuild(ents, &moves, &flip);
-        drop_unsound_faces(ents);
+        let region = rebuild(ents, &moves, &flip);
+        drop_unsound_faces(ents, &region);
     }
 }
 
@@ -172,7 +173,8 @@ pub fn copy_geometry(
     // Loops closed by copied edges alone get faces, as when drawing.
     created.retain(|&e| ents.edges.contains_key(e));
     update_faces(ents, &created, true);
-    drop_unsound_faces(ents);
+    let region = Aabb::of(segments.iter().flat_map(|(a, b, _)| [*a, *b]));
+    drop_unsound_faces(ents, &region);
 
     let on_copy = |p: DVec3| {
         segments
@@ -440,11 +442,14 @@ pub(crate) fn face_sample(ents: &Entities, f: FaceId) -> DVec3 {
 /// Removes faces that tolerance effects left unsound: a loop visiting a vertex twice (a
 /// sliver folded onto itself), off its plane, or wound the wrong way. Removing a face
 /// never breaks the other invariants; these faces are narrower than the tolerance.
-pub(crate) fn drop_unsound_faces(ents: &mut Entities) {
-    if std::env::var_os("MT_NO_DROP").is_some() { return; } // TEMP
+///
+/// Only faces meeting `region` (the box of everything an operation inserted, moved or
+/// rebuilt) are looked at: other faces were not changed by the operation.
+pub(crate) fn drop_unsound_faces(ents: &mut Entities, region: &Aabb) {
     let bad: Vec<FaceId> = ents
-        .faces
-        .iter()
+        .faces_in(&region.expand(4.0 * TOL))
+        .into_iter()
+        .map(|f| (f, &ents.faces[f]))
         .filter(|(f, face)| {
             let repeats = face.loops().any(|l| {
                 let mut vs = ents.loop_vertices(l);
@@ -684,7 +689,8 @@ fn in_place_ok(
 
 /// Takes out every edge and face touching the moved vertices and inserts them again at
 /// the new positions through the sticky-geometry path.
-fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId]) {
+/// Returns the box of the rebuilt geometry.
+fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId]) -> Aabb {
     let pos = |ents: &Entities, v: VertexId| moves.get(&v).copied().unwrap_or(ents.pos(v));
     let mut edges: Vec<EdgeId> = moves
         .keys()
@@ -754,4 +760,10 @@ fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId
 
     let live: HashSet<CurveId> = ents.edges.values().filter_map(|e| e.attrs.curve).collect();
     ents.curves.retain(|c, _| live.contains(&c));
+    Aabb::of(
+        segments
+            .iter()
+            .flat_map(|(a, b, _)| [*a, *b])
+            .chain(records.iter().flat_map(|r| r.loops.iter().flatten().copied())),
+    )
 }

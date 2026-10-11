@@ -80,6 +80,7 @@ fn main() {
         ents.faces.len(),
         t.elapsed().as_secs_f64() * 1e3
     );
+    if std::env::var_os("STATS").is_some() { plane_stats(&mut ents); return; }
     let mut rng = Rng(7);
 
     let vs = verts(&ents);
@@ -89,7 +90,10 @@ fn main() {
     let mut e0 = ents.clone();
     time("build_index", 1, &e0.clone(), || e0.ensure_index());
     time("find_vertex", probes.len(), &e0, || {
-        let found = probes.iter().filter(|p| e0.find_vertex(**p).is_some()).count();
+        let found = probes
+            .iter()
+            .filter(|p| e0.find_vertex(**p).is_some())
+            .count();
         assert_eq!(found, probes.len());
     });
 
@@ -103,11 +107,16 @@ fn main() {
             (pts.len() >= 4).then(|| (pts[0], pts[pts.len() / 2]))
         })
         .collect();
-    time("add_line (chords of faces)", chords.len(), &ents.clone(), || {
-        for &(a, b) in &chords {
-            add_line(&mut ents, a, b);
-        }
-    });
+    time(
+        "add_line (chords of faces)",
+        chords.len(),
+        &ents.clone(),
+        || {
+            for &(a, b) in &chords {
+                add_line(&mut ents, a, b);
+            }
+        },
+    );
 
     // Lines between nearby vertices (new edges, often closing loops).
     let vs = verts(&ents);
@@ -117,11 +126,16 @@ fn main() {
             (ents.pos(vs[i]), ents.pos(vs[i + 1]))
         })
         .collect();
-    time("add_line (vertex to vertex)", lines.len(), &ents.clone(), || {
-        for &(a, b) in &lines {
-            add_line(&mut ents, a, b);
-        }
-    });
+    time(
+        "add_line (vertex to vertex)",
+        lines.len(),
+        &ents.clone(),
+        || {
+            for &(a, b) in &lines {
+                add_line(&mut ents, a, b);
+            }
+        },
+    );
 
     // Free lines in empty space above the model.
     let (lo, hi) = bounds(&ents);
@@ -131,11 +145,16 @@ fn main() {
             (DVec3::new(lo.x, lo.y, z), DVec3::new(hi.x, hi.y, z))
         })
         .collect();
-    time("add_line (free, above model)", free.len(), &ents.clone(), || {
-        for &(a, b) in &free {
-            add_line(&mut ents, a, b);
-        }
-    });
+    time(
+        "add_line (free, above model)",
+        free.len(),
+        &ents.clone(),
+        || {
+            for &(a, b) in &free {
+                add_line(&mut ents, a, b);
+            }
+        },
+    );
 
     let n = 50;
     let fs = faces(&ents);
@@ -179,4 +198,21 @@ fn main() {
     );
     let errs = validate(&ents, Checks::TOPOLOGY);
     println!("topology errors: {}", errs.len());
+}
+
+#[allow(dead_code)]
+pub fn plane_stats(ents: &mut Entities) {
+    ents.ensure_index();
+    let fs = faces(ents);
+    for f in fs.iter().step_by(fs.len() / 10) {
+        let pl = ents.face_plane(*f);
+        let n = pl.normal;
+        let cand = ents.edges_near_plane(&pl, 4e-3).len();
+        let real = mt_kernel::arrangement::edges_in_plane(ents, &pl).len();
+        let fc = ents.faces_near_plane(&pl, 4e-3).len();
+        let side = mt_kernel::geom::Plane::new(n.cross(DVec3::X).normalize_or(DVec3::Y), ents.pos(ents.edges[ents.faces[*f].outer.coedges[0].edge].start));
+        let sc = ents.edges_near_plane(&side, 4e-3).len();
+        let sr = mt_kernel::arrangement::edges_in_plane(ents, &side).len();
+        println!("normal {n:.3?} cand {cand} real {real} faces {fc} | side cand {sc} real {sr}");
+    }
 }

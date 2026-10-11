@@ -33,6 +33,7 @@ pub fn push_pull(
     if !ents.faces.contains_key(face) || distance.abs() <= TOL {
         return None;
     }
+    ents.ensure_index();
     let n = ents.faces[face].normal;
     let t = n * distance;
     let edges = face_edges(ents, face);
@@ -101,7 +102,8 @@ pub fn push_pull(
         }
     }
     let made = fill(ents, &desired, true);
-    drop_unsound_faces(ents);
+    let region = crate::spatial::Aabb::of(loops.iter().flatten().flat_map(|&p| [p, p + t]));
+    drop_unsound_faces(ents, &region);
     made[0]
         .first()
         .copied()

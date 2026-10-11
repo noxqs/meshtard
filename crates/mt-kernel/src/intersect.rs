@@ -32,7 +32,7 @@ pub fn intersect_faces(ents: &mut Entities, faces: &[FaceId], with: &[FaceId]) -
             }
         }
     }
-    let before = EdgeSnapshot::of(ents);
+    let before = EdgeSnapshot::near(ents, &segments);
     for &(a, b) in &segments {
         add_line(ents, a, b);
     }

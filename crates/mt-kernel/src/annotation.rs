@@ -169,15 +169,25 @@ pub fn dimensions_from_skp(dims: &[skp::Dimension]) -> Vec<Dimension> {
 
 /// Writes root dimensions and leader texts. The writer has no text override for
 /// dimensions, no radial dimensions (they are written as linear ones between their
-/// points) and no screen texts (left out); the offset is written as a distance, its
-/// direction chosen by SketchUp (unverified which).
+/// points) and no screen texts (left out); the offset is written signed in the
+/// horizontal plane (see below).
 pub fn write_root(
     b: &mut skp::write::SkpBuilder,
     ents: &crate::Entities,
 ) -> Result<(), skp::write::WriteError> {
     for d in &ents.dimensions {
         if d.a.distance(d.b) > crate::TOL {
-            b.add_dimension(d.a.to_array(), d.b.to_array(), d.offset.length())?;
+            // The writer's dimension plane is horizontal (normal +Z) and the reader
+            // takes the offset direction as normal x (b - a): write the signed offset
+            // along that direction so it reopens on the same side. An offset out of
+            // the horizontal plane keeps only its in-plane part.
+            let side = DVec3::Z.cross(d.b - d.a).normalize_or_zero();
+            let signed = if side == DVec3::ZERO {
+                d.offset.length()
+            } else {
+                d.offset.dot(side)
+            };
+            b.add_dimension(d.a.to_array(), d.b.to_array(), signed)?;
         }
     }
     for t in ents.texts.iter().filter(|t| !t.screen) {

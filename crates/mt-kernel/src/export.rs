@@ -27,7 +27,10 @@ use crate::model::Model;
 pub fn to_skp(model: &Model) -> Result<Vec<u8>, WriteError> {
     // A model with nothing at all is saved as the blank document.
     if is_empty(model) {
-        return Ok(SkpBuilder::empty_document());
+        return Ok(SkpBuilder::empty_document_with_colors(
+            model.front_color,
+            model.back_color,
+        ));
     }
     let mut b = SkpBuilder::new();
     write_model(&mut b, model)?;
@@ -55,6 +58,7 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
     // 0.01" accepts them while still rejecting real warps.
     b.set_plane_tolerance(0.01);
     b.set_allow_empty_root(true);
+    b.set_face_colors(model.front_color, model.back_color);
     let mut materials = Vec::new();
     for (i, m) in model.materials.iter().enumerate() {
         // Names must be unique in the file; duplicates get a suffix.

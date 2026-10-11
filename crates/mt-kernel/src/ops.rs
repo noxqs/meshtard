@@ -360,6 +360,27 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
         }
     }
     for plane in planes {
+        // A cell can only touch a new edge that survives pruning of dangling edges, so
+        // one with both ends on other edges of the plane: when there is none, the plane's
+        // cells need not be computed.
+        let in_plane = |e: EdgeId| {
+            let edge = &ents.edges[e];
+            plane.contains(ents.pos(edge.start)) && plane.contains(ents.pos(edge.end))
+        };
+        let anchored = |v: VertexId, e: EdgeId| {
+            ents.vertices[v]
+                .edges
+                .iter()
+                .any(|&x| x != e && in_plane(x))
+        };
+        let live = new_edges.iter().any(|&e| {
+            ents.edges.get(e).is_some_and(|edge| {
+                in_plane(e) && anchored(edge.start, e) && anchored(edge.end, e)
+            })
+        });
+        if !live {
+            continue;
+        }
         let edges = arrangement::edges_in_plane(ents, &plane);
         let cells = arrangement::cells(ents, &plane, &edges);
         let touches_new = |c: &Cell| cell_edges(c).iter().any(|e| new_edges.contains(e));
@@ -537,8 +558,10 @@ pub fn add_curve(
         // Edges covering the segment that existed before it was added lie along it, so
         // only edges near it need remembering.
         ents.ensure_index();
-        let before: std::collections::HashSet<EdgeId> =
-            ents.edges_near_segment(w[0], w[1], 4.0 * TOL).into_iter().collect();
+        let before: std::collections::HashSet<EdgeId> = ents
+            .edges_near_segment(w[0], w[1], 4.0 * TOL)
+            .into_iter()
+            .collect();
         for e in add_line(ents, w[0], w[1]) {
             if !before.contains(&e)
                 && let Some(edge) = ents.edges.get_mut(e)
