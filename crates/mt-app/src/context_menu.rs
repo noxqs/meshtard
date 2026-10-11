@@ -34,6 +34,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "edit.select_all_connected",
     "edit.select_same_tag",
     "edit.select_same_material",
+    "edit.select_connected_by_snaps",
     "edit.deselect_edges",
     "edit.deselect_faces",
     "edit.reverse_faces",
@@ -149,6 +150,8 @@ impl Facts {
             "edit.select_bounding_edges" | "edit.deselect_faces" => !self.faces.is_empty(),
             "edit.deselect_edges" => !self.edges.is_empty(),
             "edit.select_same_material" => !self.faces.is_empty() || !self.instances.is_empty(),
+            "edit.select_connected_by_snaps" => !self.instances.is_empty(),
+            "tool.snaps" => self.context_open || self.instances.len() == 1,
             "edit.reverse_faces"
             | "edit.orient_faces"
             | "edit.intersect_model"
@@ -230,11 +233,16 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
         ];
     }
     if empty {
-        return vec![
+        let mut v = vec![
             cmd("edit.select_all", "Select All"),
             sep(),
             cmd("edit.create_group", "Make Group"),
         ];
+        // Inside a group or component (help: Snaps; position unverified).
+        if f.context_open {
+            v.push(cmd("tool.snaps", "Make/Edit Snaps"));
+        }
+        return v;
     }
     let mut v = vec![
         cmd("window.entity_info", "Entity Info"),
@@ -267,6 +275,7 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
             cmd("edit.select_all_connected", "All Connected"),
             cmd("edit.select_same_tag", "All with Same Tag"),
             cmd("edit.select_same_material", "All with Same Material"),
+            cmd("edit.select_connected_by_snaps", "Connected by Snaps"),
             sep(),
             cmd("edit.deselect_edges", "Deselect Edges"),
             cmd("edit.deselect_faces", "Deselect Faces"),
@@ -347,6 +356,9 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
         v.push(cmd("edit.component_save_as", "Save As..."));
         v.push(cmd("edit.select_instances", "Select Instances"));
         v.push(cmd("edit.replace_selected", "Replace Selected"));
+    }
+    if !f.instances.is_empty() || f.context_open {
+        v.push(cmd("tool.snaps", "Make/Edit Snaps"));
     }
     v.push(cmd("edit.make_component", "Make Component..."));
     v.push(cmd("edit.create_group", "Make Group"));
@@ -714,6 +726,11 @@ impl App {
             "edit.select_all_connected" => Some(all_connected(ents, &items)),
             "edit.select_same_tag" => Some(same(ents, &items, false)),
             "edit.select_same_material" => Some(same(ents, &items, true)),
+            "edit.select_connected_by_snaps" => Some(crate::component_snaps::connected(
+                &doc.model.definitions,
+                ents,
+                &items,
+            )),
             "edit.deselect_edges" => Some(
                 items
                     .iter()

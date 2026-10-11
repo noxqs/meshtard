@@ -189,6 +189,7 @@ pub fn transform_entities(src: &Entities, xf: DMat4) -> Entities {
         })
         .collect();
     out.active_section = src.active_section;
+    out.snaps = src.snaps.iter().map(|s| s.transformed(xf)).collect();
     out.dimensions = src
         .dimensions
         .iter()

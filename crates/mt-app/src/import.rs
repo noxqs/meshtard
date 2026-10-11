@@ -129,6 +129,7 @@ impl App {
         self.modify = Some(Box::new(crate::modify::PlaceComponent {
             definition,
             glue: mt_kernel::GlueTo::None,
+            ..Default::default()
         }));
         self.selection.clear();
         self.rebuild(device);

@@ -57,6 +57,20 @@ pub fn set_arc_segments(ents: &mut Entities, c: CurveId, segments: usize) -> Opt
     if segments == arc.segments {
         return None;
     }
+    arc.segments = segments;
+    replace_arc(ents, c, arc)
+}
+
+/// Redraws the curve `c` as `arc` (the Move tool dragging an arc's midpoint or end).
+/// Faces it bounded are recreated and keep their materials and other attributes; its
+/// edges keep theirs. Edges meeting the curve's ends are not moved: the caller moves
+/// an end vertex first when the arc's end changes. Returns the new curve's edges.
+pub fn replace_arc(
+    ents: &mut Entities,
+    c: CurveId,
+    arc: crate::entities::Arc,
+) -> Option<Vec<EdgeId>> {
+    ents.curves.get(c)?;
     let old_edges = ents.curve_edges(c);
     let edge_attrs: EdgeAttrs = old_edges
         .first()
@@ -80,7 +94,6 @@ pub fn set_arc_segments(ents: &mut Entities, c: CurveId, segments: usize) -> Opt
         .collect();
 
     crate::ops::erase_curve(ents, c);
-    arc.segments = segments;
     let edges = crate::ops::add_curve(ents, &arc.points(), Some(arc));
     for &e in &edges {
         if let Some(x) = ents.edges.get_mut(e) {

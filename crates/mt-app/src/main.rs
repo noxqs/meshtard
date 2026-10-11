@@ -8,6 +8,7 @@ mod camera_cmd;
 mod camera_tools;
 mod commands;
 mod component_dialog;
+mod component_snaps;
 mod confirm;
 mod context_extra;
 mod context_menu;
@@ -30,6 +31,7 @@ mod material_edit;
 mod model_axes;
 mod model_info;
 mod modify;
+mod move_extra;
 mod nav;
 mod overlay;
 mod paint;
@@ -91,6 +93,8 @@ const IMPLEMENTED: &[&str] = &[
     "file.exit",
     "tool.select",
     "tool.lasso",
+    "tool.snaps",
+    "edit.select_connected_by_snaps",
     "tool.line",
     "tool.rectangle",
     "tool.rotated_rectangle",
@@ -447,6 +451,8 @@ struct App {
     lasso: lasso::Lasso,
     /// The Move tool's grips on group and component boxes.
     grips: grips::Grips,
+    /// Faces and edges stretched by the running Move, Rotate or Scale (drawn live).
+    stretch: move_extra::Stretch,
 }
 
 impl App {
@@ -547,6 +553,7 @@ impl App {
             extra: Default::default(),
             lasso: Default::default(),
             grips: Default::default(),
+            stretch: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -727,6 +734,11 @@ impl App {
             let mut seg = *seg;
             let selected = owner.is_some_and(|o| self.selection.contains(&o));
             let color = if selected { highlight(owner) } else { SELECTED };
+            if let Some(o) = owner
+                && let (Some(a), Some(b)) = (self.stretch.map(o, seg.a), self.stretch.map(o, seg.b))
+            {
+                (seg.a, seg.b) = (a, b);
+            }
             match moved(owner) {
                 Some((xf, copy)) => {
                     let mut c = seg;
@@ -760,6 +772,7 @@ impl App {
                 if let Some(xf) = xf {
                     v.position = tp(xf, v.position);
                 }
+                v.position = self.stretch.map(&owner, v.position).unwrap_or(v.position);
                 vertices.push(v);
             }
         }
@@ -816,6 +829,7 @@ impl App {
         if want == self.live {
             return;
         }
+        let stretch = move_extra::live_stretch(self.document.as_ref(), &want, self.ctx_xf);
         let hidden = |l: &Option<(Vec<Owner>, glam::DMat4, bool)>| {
             l.as_ref().filter(|l| !l.2).map(|l| l.0.clone())
         };
@@ -829,7 +843,9 @@ impl App {
                         .indices
                         .chunks(3)
                         .zip(&self.scene.tri_owner)
-                        .filter(|(_, o)| !o.is_some_and(|o| set.contains(&o)))
+                        .filter(|(_, o)| {
+                            !o.is_some_and(|o| set.contains(&o) || stretch.contains(&o))
+                        })
                         .flat_map(|(t, _)| t.iter().copied())
                         .collect();
                     self.viewport
@@ -848,6 +864,12 @@ impl App {
                 let f = |p: [f32; 3]| glam::Vec3::from(p).as_dvec3();
                 let mut vertices = Vec::new();
                 for (t, owner) in self.scene.tri_owner.iter().enumerate() {
+                    if let Some(o) = owner.filter(|o| stretch.contains(o)) {
+                        let tri = [0, 1, 2]
+                            .map(|k| self.scene.vertices[self.scene.indices[3 * t + k] as usize]);
+                        vertices.extend(stretch.triangle(&o, tri));
+                        continue;
+                    }
                     if !owner.is_some_and(|o| set.contains(&o)) {
                         continue;
                     }
@@ -864,6 +886,7 @@ impl App {
             None => self.viewport.set_preview_faces(device, &[], &[]),
         }
         self.live = want;
+        self.stretch = stretch;
         self.update_highlight(device);
     }
 
@@ -961,6 +984,12 @@ impl App {
     }
 
     fn run_command(&mut self, ctx: &egui::Context, frame: &eframe::Frame, id: &str) {
+        if id == "tool.snaps"
+            && let Some(rs) = frame.wgpu_render_state()
+            && !self.snaps_command(&rs.device.clone())
+        {
+            return;
+        }
         if let Some(tool) = Tool::from_command(id) {
             self.tool = tool;
             self.draw = tools::for_command(id);
@@ -1574,6 +1603,7 @@ impl App {
         self.pick_overlay(ui, rect);
         self.context_extra_paint(ui, rect);
         self.grips_paint(ui, rect, viewport_px, &render_state.device);
+        self.snaps_paint(ui, rect, viewport_px);
         self.texture_position_paint(ui, rect, viewport_px);
         if self.annotations(ui, rect, viewport_px) {
             self.rebuild(&render_state.device);
@@ -1937,6 +1967,19 @@ impl App {
                 project: &|p| camera.project(xf.transform_point3(p), viewport_px),
                 cursor,
             });
+        }
+        let snaps = component_snaps::Frame {
+            camera: &self.camera,
+            ctx_xf: self.ctx_xf,
+            scene: &self.scene,
+            bvh: self.bvh.as_ref(),
+            cursor,
+            viewport_px,
+            alt,
+        };
+        if component_snaps::frame(tool.as_mut(), self.document.as_mut(), snaps) {
+            self.rebuild(device);
+            return;
         }
         let (Some(inf), Some(c), Some(doc)) = (self.inference, cursor, self.document.as_mut())
         else {

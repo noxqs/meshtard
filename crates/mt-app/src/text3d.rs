@@ -467,6 +467,7 @@ impl App {
         self.modify = Some(Box::new(crate::modify::PlaceComponent {
             definition,
             glue: mt_kernel::GlueTo::Any,
+            ..Default::default()
         }));
         self.selection.clear();
         if let Some(rs) = frame.wgpu_render_state() {

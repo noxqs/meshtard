@@ -102,6 +102,8 @@ pub struct DrawHover {
     /// definition's), when the cursor is over one.
     pub instance_name: Option<String>,
     pub units: LengthUnit,
+    /// Alt is held (2 Point Arc: pressing it locks the tangent).
+    pub alt: bool,
 }
 
 /// A typed point: `[x,y,z]` absolute (context coordinates) or `<x,y,z>` relative to
@@ -885,9 +887,22 @@ pub struct TwoPointArc {
     lock: PlaneLock,
     /// Radius of the last arc, repeated by a double click on a corner.
     last_radius: Option<f64>,
+    /// Alt pressed: the arc stays tangent to the edge at its start ("To lock your
+    /// tangent inference, press the Alt key" [doc ARC]); the end click then finishes
+    /// the arc (that it skips the bulge click is from memory, unverified).
+    tangent_lock: bool,
+    alt_was: bool,
 }
 
 impl TwoPointArc {
+    /// The locked tangent arc's bulge to `b`, when the lock applies.
+    fn locked_bulge(&self, b: DVec3) -> Option<f64> {
+        let (true, [a], Some(t)) = (self.tangent_lock, &self.points[..], self.tangent) else {
+            return None;
+        };
+        mt_infer::hints::tangent_bulge(*a, b, self.normal, t)
+    }
+
     /// A double click on a corner where two straight edges meet: the last arc's radius
     /// rounds it (a fillet tangent to both edges) and the corner's waste goes, as
     /// SketchUp's "double-click to repeat the 2-point arc" [doc] (exact cleanup
@@ -969,12 +984,23 @@ impl DrawTool for TwoPointArc {
     }
 
     fn status(&self) -> String {
-        match self.points.len() {
-            0 => "Select start point.",
-            1 => "Select end point or enter value.",
+        let text = match self.points.len() {
+            0 => "Select start point. Click outside a rounded corner to unround it.",
+            1 => "Select end point or enter value. Alt = lock tangent.",
             _ => "Select bulge amount or enter value.",
+        };
+        if self.tangent_lock {
+            format!("{text} (Tangent locked)")
+        } else {
+            text.into()
         }
-        .into()
+    }
+
+    fn hover(&mut self, h: &DrawHover) {
+        if h.alt && !self.alt_was && self.points.len() <= 1 {
+            self.tangent_lock = !self.tangent_lock;
+        }
+        self.alt_was = h.alt;
     }
 
     fn measurement(&self, cur: Option<&Inference>, units: LengthUnit) -> (&'static str, String) {
@@ -993,6 +1019,9 @@ impl DrawTool for TwoPointArc {
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         match self.points.len() {
             0 => {
+                if unround_at(ents, inf.point) {
+                    return true;
+                }
                 self.normal = plane_normal(self.lock.get(), inf);
                 self.tangent = mt_infer::hints::tangent_at(inf);
                 self.points.push(inf.point);
@@ -1000,6 +1029,11 @@ impl DrawTool for TwoPointArc {
             }
             1 => {
                 if self.points[0].distance(inf.point) > mt_kernel::TOL {
+                    if let Some(bulge) = self.locked_bulge(inf.point) {
+                        self.points.push(inf.point);
+                        self.tangent_lock = false;
+                        return self.make(ents, bulge);
+                    }
                     self.points.push(inf.point);
                 }
                 false
@@ -1043,6 +1077,12 @@ impl DrawTool for TwoPointArc {
     }
 
     fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
+        if let Some(bulge) = self.locked_bulge(cur.point)
+            && let Some(a) =
+                arc_from_bulge(self.points[0], cur.point, bulge, self.normal, ARC_SEGMENTS)
+        {
+            return vec![self.segments.apply(a).points()];
+        }
         match self.points.len() {
             1 => vec![vec![self.points[0], cur.point]],
             2 => {
@@ -1122,6 +1162,68 @@ pub fn fillet_arc(
         segments: ARC_SEGMENTS,
     };
     Some((t1, t2, segments.apply(arc)))
+}
+
+/// Unrounds a rounded corner (RN 2025: "unround a corner by clicking on the convex
+/// side of an arc"): when `p` lies between an arc and the corner its two tangent
+/// straight edges would meet at (outside the arc's circle, inside the triangle of the
+/// arc's ends and the corner), the arc is erased and the edges run to the corner
+/// again. Which tool does it and the click region are from memory, unverified.
+/// Returns whether the model changed.
+pub fn unround_at(ents: &mut Entities, p: DVec3) -> bool {
+    let found = ents.curves.iter().find_map(|(c, curve)| {
+        let arc = curve.arc.filter(|a| !a.is_circle() && !curve.polygon)?;
+        let n = arc.normal.normalize_or_zero();
+        let q = p - n * (p - arc.center).dot(n);
+        if q.distance(arc.center) <= arc.radius + mt_kernel::TOL {
+            return None;
+        }
+        let pts = arc.points();
+        let (t1, t2) = (pts[0], *pts.last()?);
+        let (d1, d2) = (
+            crate::move_extra::start_tangent(&arc),
+            crate::move_extra::end_tangent(&arc),
+        );
+        // The corner: where the tangents from both ends meet, ahead of each.
+        let w = t2 - t1;
+        let c12 = d1.cross(d2);
+        if c12.length() < 1e-9 {
+            return None;
+        }
+        let s = w.cross(d2).dot(c12) / c12.length_squared();
+        let u = w.cross(d1).dot(c12) / c12.length_squared();
+        if s <= mt_kernel::TOL || u <= mt_kernel::TOL {
+            return None;
+        }
+        let v = t1 + d1 * s;
+        // Each end carries a straight edge going on away from the corner.
+        let straight = |t: DVec3, d: DVec3| {
+            ents.find_vertex(t).is_some_and(|x| {
+                ents.vertices[x].edges.iter().any(|&e| {
+                    let edge = &ents.edges[e];
+                    edge.attrs.curve != Some(c)
+                        && (ents.pos(edge.other(x)) - t).normalize_or_zero().dot(-d) > 1.0 - 1e-6
+                })
+            })
+        };
+        if !straight(t1, d1) || !straight(t2, d2) {
+            return None;
+        }
+        // Inside the triangle t1, v, t2 (in the arc's plane).
+        let inside = [(t1, v), (v, t2), (t2, t1)].iter().all(|(a, b)| {
+            let centroid = (t1 + v + t2) / 3.0;
+            let side = |x: DVec3| (*b - *a).cross(x - *a).dot(n);
+            side(q) * side(centroid) > 0.0
+        });
+        inside.then_some((c, t1, v, t2))
+    });
+    let Some((c, t1, v, t2)) = found else {
+        return false;
+    };
+    add_line(ents, t1, v);
+    add_line(ents, v, t2);
+    mt_kernel::erase_curve(ents, c);
+    true
 }
 
 /// Arc (center, start, end) or Pie (the same, closed with two radii into a face).
