@@ -222,8 +222,9 @@ impl<'a> Dialog<'a> {
                     })
                     .inner
             });
-        if self.modal {
-            // A click on the backdrop must not raise it over the dialog.
+        if self.modal && !egui::Popup::is_any_open(ctx) {
+            // A click on the backdrop must not raise it over the dialog. Not while a
+            // popup (a combo box's list) is open: that would cover the popup.
             ctx.move_to_top(egui::LayerId::new(Order::Foreground, self.id));
         }
         ctx.data_mut(|d| {

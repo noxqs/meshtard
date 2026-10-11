@@ -1587,11 +1587,13 @@ name = "mt-kernel"
 version = "0.1.0"
 dependencies = [
  "earcutr",
+ "flate2",
  "glam",
  "gltf",
  "mt-skp",
  "proptest",
  "slotmap",
+ "zip",
 ]
 
 [[package]]

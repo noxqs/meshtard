@@ -11,10 +11,14 @@
 //! (painted over the view by the UI) are not in the image.
 //!
 //! 3D Model writes OBJ (+ MTL and texture images next to it), binary STL or COLLADA
-//! through [`mt_kernel::mesh_export`]; the options dialog picks the format and its
-//! options before the file dialog.
+//! through [`mt_kernel::mesh_export`], glTF / GLB through [`mt_kernel::gltf_io`],
+//! and FBX, PLY, 3MF, VRML or KMZ through
+//! [`mt_kernel::formats`]; the options dialog picks the format and its options
+//! before the file dialog. Per-format option defaults (two-sided faces for COLLADA
+//! and KMZ, Y up for OBJ and VRML) are from memory, unverified.
 
 use eframe::egui;
+use mt_kernel::formats::{self, ExportKind};
 use mt_kernel::mesh_export::{self, Units};
 
 use crate::App;
@@ -49,14 +53,26 @@ pub(crate) enum Format3d {
     Dae,
     Glb,
     Gltf,
+    Other(ExportKind),
 }
 
 impl Format3d {
-    const ALL: [Self; 5] = [Self::Dae, Self::Glb, Self::Gltf, Self::Obj, Self::Stl];
+    const ALL: [Self; 10] = [
+        Self::Dae,
+        Self::Other(ExportKind::Fbx),
+        Self::Glb,
+        Self::Gltf,
+        Self::Other(ExportKind::Kmz),
+        Self::Obj,
+        Self::Other(ExportKind::Ply),
+        Self::Stl,
+        Self::Other(ExportKind::ThreeMf),
+        Self::Other(ExportKind::Vrml),
+    ];
 
-    /// Formats that keep the model's units and hierarchy (no units choice).
-    fn fixed_units(self) -> bool {
-        matches!(self, Self::Dae | Self::Glb | Self::Gltf)
+    /// glTF keeps groups and components as nodes (meters, Y up).
+    fn keeps_hierarchy(self) -> bool {
+        matches!(self, Self::Glb | Self::Gltf)
     }
 
     fn label(self) -> &'static str {
@@ -66,6 +82,11 @@ impl Format3d {
             Self::Dae => "COLLADA File (*.dae)",
             Self::Glb => "glTF Binary (*.glb)",
             Self::Gltf => "glTF File (*.gltf)",
+            Self::Other(ExportKind::Fbx) => "FBX File (*.fbx)",
+            Self::Other(ExportKind::Kmz) => "Google Earth File (*.kmz)",
+            Self::Other(ExportKind::Ply) => "PLY File (*.ply)",
+            Self::Other(ExportKind::ThreeMf) => "3MF File (*.3mf)",
+            Self::Other(ExportKind::Vrml) => "VRML File (*.wrl)",
         }
     }
 
@@ -76,6 +97,46 @@ impl Format3d {
             Self::Dae => "dae",
             Self::Glb => "glb",
             Self::Gltf => "gltf",
+            Self::Other(k) => k.extension(),
+        }
+    }
+
+    /// Whether the format has a length unit to choose (COLLADA and KMZ are inches,
+    /// glTF meters).
+    fn has_units(self) -> bool {
+        !matches!(
+            self,
+            Self::Dae | Self::Glb | Self::Gltf | Self::Other(ExportKind::Kmz)
+        )
+    }
+
+    fn has_two_sided(self) -> bool {
+        !matches!(
+            self,
+            Self::Stl | Self::Other(ExportKind::Ply | ExportKind::ThreeMf)
+        )
+    }
+
+    fn has_y_up(self) -> bool {
+        matches!(
+            self,
+            Self::Obj | Self::Other(ExportKind::Fbx | ExportKind::Vrml | ExportKind::Ply)
+        )
+    }
+
+    fn has_textures(self) -> bool {
+        matches!(
+            self,
+            Self::Other(ExportKind::Fbx | ExportKind::Vrml | ExportKind::ThreeMf)
+        )
+    }
+
+    /// The options a format starts with when picked: two-sided faces and Y up.
+    fn defaults(self) -> (bool, bool) {
+        match self {
+            Self::Dae | Self::Other(ExportKind::Kmz) => (true, false),
+            Self::Obj | Self::Other(ExportKind::Vrml) => (false, true),
+            _ => (false, false),
         }
     }
 }
@@ -88,6 +149,8 @@ pub(crate) struct Export3d {
     pub units: Option<Units>,
     pub two_sided: bool,
     pub y_up: bool,
+    /// Write texture images and coordinates (FBX, VRML, 3MF).
+    pub textures: bool,
 }
 
 impl Default for Export3d {
@@ -100,6 +163,7 @@ impl Default for Export3d {
             // per-format defaults are from memory, unverified).
             two_sided: true,
             y_up: true,
+            textures: true,
         }
     }
 }
@@ -224,6 +288,25 @@ pub(crate) fn export_3d(
                 },
             );
             write_files(path, &bytes, &[])
+        }
+        Format3d::Other(kind) => {
+            let files = formats::export(
+                kind,
+                model,
+                &formats::ExportOptions {
+                    units,
+                    two_sided: opts.two_sided,
+                    y_up: opts.y_up,
+                    textures: opts.textures,
+                    base_name: base,
+                },
+            )?;
+            let others: Vec<(String, &[u8])> = files
+                .others
+                .iter()
+                .map(|(n, d)| (n.clone(), &d[..]))
+                .collect();
+            write_files(path, &files.main, &others)
         }
     }
 }
@@ -407,12 +490,12 @@ impl App {
                             .show_ui(ui, |ui| {
                                 for f in Format3d::ALL {
                                     if ui.selectable_value(&mut d.format, f, f.label()).changed() {
-                                        d.two_sided = f == Format3d::Dae;
+                                        (d.two_sided, d.y_up) = f.defaults();
                                     }
                                 }
                             });
                         ui.end_row();
-                        if !d.format.fixed_units() {
+                        if d.format.has_units() {
                             ui.label("Units:");
                             let label = |u: Option<Units>| match u {
                                 None => format!("Model Units ({})", model_units.name()),
@@ -430,14 +513,24 @@ impl App {
                         }
                     });
                 ui.add_space(8.0);
-                if d.format != Format3d::Stl {
+                if d.format == Format3d::Other(ExportKind::Vrml) {
+                    // SketchUp's VRML wording: the inverse of two-sided faces.
+                    let mut ignore = !d.two_sided;
+                    ui.checkbox(&mut ignore, "Ignore back of face material");
+                    d.two_sided = !ignore;
+                } else if d.format.has_two_sided() {
                     ui.checkbox(&mut d.two_sided, "Export two-sided faces");
                 }
-                if d.format == Format3d::Obj {
+                if d.format.has_textures() {
+                    ui.checkbox(&mut d.textures, "Export texture maps");
+                }
+                if d.format == Format3d::Other(ExportKind::Vrml) {
+                    ui.checkbox(&mut d.y_up, "Use VRML standard orientation");
+                } else if d.format.has_y_up() {
                     ui.checkbox(&mut d.y_up, "Swap YZ coordinates (Y is up)");
                 }
                 ui.add_space(8.0);
-                ui.weak(if d.format.fixed_units() && d.format != Format3d::Dae {
+                ui.weak(if d.format.keeps_hierarchy() {
                     "Hidden geometry is not exported; groups and components are kept as nodes (meters, Y up)."
                 } else {
                     "Hidden geometry is not exported; groups and components are flattened."
@@ -518,6 +611,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::metadata(&stl).unwrap().len(), 84 + 2 * 50);
+        // The other formats write files the importers read back.
+        for kind in ExportKind::ALL {
+            let path = dir.join(format!("square.{}", kind.extension()));
+            export_3d(
+                &m,
+                &Export3d {
+                    format: Format3d::Other(kind),
+                    ..opts.clone()
+                },
+                Units::Inches,
+                &path,
+            )
+            .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let none = |_: &str| None;
+            let back = match kind {
+                ExportKind::Fbx => Some(formats::Kind::Fbx),
+                ExportKind::Ply => Some(formats::Kind::Ply),
+                ExportKind::ThreeMf => Some(formats::Kind::ThreeMf),
+                ExportKind::Vrml | ExportKind::Kmz => None,
+            };
+            match back {
+                Some(k) => {
+                    let (mesh, _) = formats::read_mesh(k, &bytes, &none, true).unwrap();
+                    assert_eq!(mesh.polygons.len(), 2, "{kind:?}");
+                }
+                None => assert!(!bytes.is_empty()),
+            }
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

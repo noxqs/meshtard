@@ -320,7 +320,7 @@ pub(crate) fn tri_sides(
 
 /// The sides to export (both sides of each triangle with `two_sided`, the back one
 /// reversed), with their materials. `base` prefixes texture file names.
-fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
+pub(crate) fn sides(model: &Model, two_sided: bool, base: &str) -> (Vec<Side>, Materials) {
     let mut mats = Materials::new();
     let out = tri_sides(model, triangles(model), two_sided, base, &mut mats);
     (out, mats)

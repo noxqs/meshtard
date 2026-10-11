@@ -3,16 +3,17 @@
 //!
 //! - Vertices closer than the kernel tolerance are welded; edges shared by faces are
 //!   shared. Degenerate polygons and repeated faces are skipped; non-planar polygons
-//!   are split into a triangle fan.
+//!   and polygons that pass a vertex twice (a hole joined to the outline by a bridge
+//!   edge) are ear-clipped into triangles (merging joins the planar ones again).
 //! - "Merge coplanar faces" (SketchUp's STL importer option, from memory) joins
 //!   neighboring coplanar faces of the same material into one face, removing the edges
 //!   between them; a region that would not give one simple outer loop is left as is.
-//! - OBJ groups, objects, smoothing groups, normals and texture coordinates are
-//!   ignored; MTL diffuse colors and opacity become materials (texture maps are not
-//!   read).
-//! - Polygons with texture coordinates whose material has a texture (glTF, see
-//!   [`crate::gltf_io`]) get a face texture position fitted to them
-//!   ([`uv_from_corners`]); merging keeps faces with different positions apart.
+//! - OBJ groups, objects, smoothing groups and normals are ignored; MTL diffuse colors
+//!   and opacity become materials. Texture coordinates and `map_Kd` textures are added
+//!   by [`crate::formats::obj`].
+//! - Polygons with texture coordinates whose material has a texture get a face texture
+//!   position fitted to them ([`uv_from_corners`]); merging keeps faces with different
+//!   positions apart.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -48,7 +49,7 @@ pub struct MeshMaterial {
     /// sRGB.
     pub color: [u8; 3],
     pub opacity: f64,
-    /// A texture image (glTF base color textures; OBJ maps are not read).
+    /// A texture image.
     pub texture: Option<MeshTexture>,
 }
 
@@ -272,7 +273,7 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
             continue;
         };
         let distinct: BTreeSet<VertexId> = vs.iter().copied().collect();
-        if distinct.len() != vs.len() || vs.len() < 3 {
+        if distinct.len() < 3 {
             continue;
         }
         // Texture coordinates, when the polygon has them and its material a texture.
@@ -298,12 +299,14 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
                 ents.faces[f].attrs.uv = crate::FaceUv::boxed(Some(m), None);
             }
         };
-        if points.iter().all(|&p| plane.contains(p)) {
+        if distinct.len() == vs.len() && points.iter().all(|&p| plane.contains(p)) {
             let f = add_face(&mut ents, &vs, plane.normal, material, &mut seen);
             map(&mut ents, f);
         } else {
-            for k in 1..vs.len() - 1 {
-                let tri = [vs[0], vs[k], vs[k + 1]];
+            // Non-planar polygons and polygons through a vertex twice (a hole joined
+            // to the outline by a bridge) become triangles.
+            for t in polygon_triangles(&points, &plane) {
+                let tri = t.map(|k| vs[k]);
                 let pts = tri.map(|v| ents.pos(v));
                 if let Some(p) = Plane::from_polygon(&pts) {
                     let f = add_face(&mut ents, &tri, p.normal, material, &mut seen);
@@ -316,6 +319,35 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
         merge_coplanar(&mut ents);
     }
     ents
+}
+
+/// Triangles (corner indices, counter-clockwise around `plane`'s normal) of a
+/// polygon by ear clipping in `plane`, which handles concave polygons and outlines
+/// that visit a vertex twice; a fan when ear clipping fails.
+fn polygon_triangles(points: &[DVec3], plane: &Plane) -> Vec<[usize; 3]> {
+    let flat: Vec<f64> = points
+        .iter()
+        .flat_map(|&p| plane.project(p).to_array())
+        .collect();
+    let fan = || (1..points.len() - 1).map(|k| [0, k, k + 1]).collect();
+    let Ok(idx) = earcutr::earcut(&flat, &[], 2) else {
+        return fan();
+    };
+    if idx.is_empty() {
+        return fan();
+    }
+    idx.as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&[a, b, c]| {
+            let n = (points[b] - points[a]).cross(points[c] - points[a]);
+            if n.dot(plane.normal) < 0.0 {
+                [a, c, b]
+            } else {
+                [a, b, c]
+            }
+        })
+        .collect()
 }
 
 /// Adds a face through `vs` (counter-clockwise around `normal`), reusing edges.

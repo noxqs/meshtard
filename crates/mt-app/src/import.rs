@@ -1,4 +1,5 @@
-//! File > Import: SketchUp models, glTF/GLB, DXF, OBJ, STL and images.
+//! File > Import: SketchUp models, glTF/GLB, DXF, OBJ, STL, FBX, PLY, 3MF, 3DS and
+//! images.
 //!
 //! - A `.skp` becomes a component definition of the open model (with the imported
 //!   model's own components, materials and tags; see
@@ -13,10 +14,13 @@
 //!   becomes one component instance at the origin of the open context (drawings are
 //!   often far from the origin), selected, in one undo step. DWG is a closed format and
 //!   is not read; PDF import is not done.
-//! - OBJ and STL ask for options (units, Y up, merge coplanar faces), then become one
-//!   group at the open context's origin, in one undo step, selected. Default units
-//!   (STL millimeters, OBJ meters) and Y up for OBJ are guesses (unverified); MTL
-//!   colors become materials, texture maps are not read.
+//! - Mesh files (OBJ, STL, FBX, PLY, 3MF, 3DS) ask for options (units, Y up, merge
+//!   coplanar faces; PLY: colors as materials), then become one group at the open
+//!   context's origin, in one undo step, selected. Units and axes default to what the
+//!   file records (FBX, 3MF), else to per-format guesses
+//!   ([`formats::Kind::default_hints`], unverified). Materials come with their colors
+//!   and PNG/JPEG textures (OBJ `map_Kd`, FBX, PLY, 3MF, 3DS); a textured material's
+//!   color becomes the image's average color. See [`mt_kernel::formats`].
 //! - PNG and JPEG images ask "Use as: Image / Texture" (SketchUp has this choice in its
 //!   import dialog; the default Image is from memory). Image: an image entity placed
 //!   with two clicks (`image_entity`). Texture: two clicks on a face set the size and
@@ -27,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use mt_kernel::dxf::LayerMode;
+use mt_kernel::formats;
 use mt_kernel::mesh_export::Units;
 use mt_kernel::mesh_import;
 
@@ -37,8 +42,8 @@ use crate::selection::Mode;
 /// What an import options dialog is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
-    Obj,
-    Stl,
+    /// OBJ, STL, FBX, PLY, 3MF, 3DS.
+    Mesh(formats::Kind),
     Gltf,
     Dxf,
     Image,
@@ -49,7 +54,7 @@ pub(crate) enum Kind {
 pub(crate) struct MeshImport {
     path: PathBuf,
     kind: Kind,
-    /// OBJ / STL units; DXF units when `units_from_file` is off.
+    /// Mesh units; DXF units when `units_from_file` is off.
     units: Units,
     units_from_file: bool,
     y_up: bool,
@@ -57,31 +62,37 @@ pub(crate) struct MeshImport {
     layers: LayerMode,
     /// Images: "Use as texture" (else an image entity).
     as_texture: bool,
+    /// PLY: vertex and face colors become materials.
+    colors: bool,
 }
 
 impl MeshImport {
     fn new(path: PathBuf, kind: Kind) -> Self {
+        let (units, y_up) = match kind {
+            Kind::Mesh(k) => k.default_hints(),
+            Kind::Dxf => (Units::Millimeters, false),
+            Kind::Gltf | Kind::Image => (Units::Meters, false),
+        };
         Self {
             path,
             kind,
-            units: match kind {
-                Kind::Stl | Kind::Dxf => Units::Millimeters,
-                _ => Units::Meters,
-            },
+            units,
             units_from_file: true,
-            y_up: kind == Kind::Obj,
+            y_up,
             merge: true,
             layers: LayerMode::Groups,
             as_texture: false,
+            colors: true,
         }
     }
 }
 
-const FILTERS: [(&str, &[&str]); 7] = [
+const FILTERS: [(&str, &[&str]); 11] = [
     (
         "All Supported Types",
         &[
-            "skp", "gltf", "glb", "dxf", "obj", "stl", "png", "jpg", "jpeg",
+            "skp", "gltf", "glb", "dxf", "obj", "stl", "fbx", "ply", "3mf", "3ds", "png", "jpg",
+            "jpeg",
         ],
     ),
     ("Meshtard Models (*.skp)", &["skp"]),
@@ -89,30 +100,65 @@ const FILTERS: [(&str, &[&str]); 7] = [
     ("AutoCAD DXF Files (*.dxf)", &["dxf"]),
     ("OBJ Files (*.obj)", &["obj"]),
     ("STL Files (*.stl)", &["stl"]),
+    ("FBX Files (*.fbx)", &["fbx"]),
+    ("PLY Files (*.ply)", &["ply"]),
+    ("3MF Files (*.3mf)", &["3mf"]),
+    ("3DS Files (*.3ds)", &["3ds"]),
     ("Images (*.png, *.jpg)", &["png", "jpg", "jpeg"]),
 ];
 
-/// Reads and converts an OBJ or STL file. Returns the mesh materials and the faces
-/// built with `first_material` as the model index of the first mesh material.
+/// Reads `path` as `kind`, with files it names (MTL libraries, textures) read
+/// relative to its folder.
+fn read_file(
+    path: &Path,
+    kind: formats::Kind,
+    colors: bool,
+) -> Result<(mesh_import::Mesh, formats::Hints), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let read = move |name: &str| {
+        let p = Path::new(name);
+        let p = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            dir.join(p)
+        };
+        std::fs::read(p).ok()
+    };
+    formats::read_mesh(kind, &bytes, &read, colors)
+}
+
+/// Reads and converts a mesh file. Returns the model materials and the faces built
+/// with `first_material` as the model index of the first mesh material.
 pub(crate) fn read_mesh(
     path: &Path,
-    stl: bool,
+    kind: formats::Kind,
     opts: &mesh_import::MeshOptions,
     first_material: usize,
-) -> Result<(Vec<mesh_import::MeshMaterial>, mt_kernel::Entities), String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let mesh = if stl {
-        mesh_import::parse_stl(&bytes)?
-    } else {
-        let text = String::from_utf8_lossy(&bytes);
-        let dir = path.parent().unwrap_or(Path::new("."));
-        mesh_import::parse_obj(&text, |name| std::fs::read_to_string(dir.join(name)).ok())?
-    };
+    colors: bool,
+) -> Result<(Vec<mt_kernel::Material>, mt_kernel::Entities), String> {
+    let (mesh, _) = read_file(path, kind, colors)?;
     let ids: Vec<usize> = (0..mesh.materials.len())
         .map(|i| first_material + i)
         .collect();
     let ents = mesh_import::to_entities(&mesh, opts, &ids);
-    Ok((mesh.materials, ents))
+    let materials = mesh
+        .materials
+        .iter()
+        .map(|m| {
+            let mut mat = formats::model_material(m);
+            // Shaded mode shows a textured material's color: the image's average.
+            if let Some(img) = mat
+                .texture
+                .as_ref()
+                .and_then(|t| image::load_from_memory(&t.data).ok())
+            {
+                mat.color = crate::image_entity::average_color(&img.to_rgb8());
+            }
+            mat
+        })
+        .collect();
+    Ok((materials, ents))
 }
 
 /// Reads a `.gltf` / `.glb` file (buffers and images next to it) into a model, with
@@ -185,8 +231,6 @@ impl App {
         let kind = match ext.as_str() {
             "skp" => return self.import_skp(&path, device),
             "png" | "jpg" | "jpeg" => Kind::Image,
-            "obj" => Kind::Obj,
-            "stl" => Kind::Stl,
             "gltf" | "glb" => Kind::Gltf,
             "dxf" => Kind::Dxf,
             "dwg" => {
@@ -194,12 +238,29 @@ impl App {
                     Some("DWG is a closed format and cannot be imported; save it as DXF.".into());
                 return;
             }
-            _ => {
-                self.message = Some(format!("Cannot import {}.", path.display()));
-                return;
-            }
+            other => match formats::Kind::from_extension(other) {
+                Some(k) => Kind::Mesh(k),
+                None => {
+                    self.message = Some(format!("Cannot import {}.", path.display()));
+                    return;
+                }
+            },
         };
-        self.mesh_import = Some(MeshImport::new(path, kind));
+        let mut d = MeshImport::new(path, kind);
+        // FBX and 3MF record their units and axes.
+        if let Kind::Mesh(k @ (formats::Kind::Fbx | formats::Kind::ThreeMf)) = kind {
+            match read_file(&d.path, k, false) {
+                Ok((_, hints)) => {
+                    d.units = hints.units.unwrap_or(d.units);
+                    d.y_up = hints.y_up.unwrap_or(d.y_up);
+                }
+                Err(e) => {
+                    self.file_error("import", &d.path, e);
+                    return;
+                }
+            }
+        }
+        self.mesh_import = Some(d);
     }
 
     fn import_skp(&mut self, path: &Path, device: &egui_wgpu::wgpu::Device) {
@@ -251,13 +312,12 @@ impl App {
             return;
         };
         let title = match d.kind {
-            Kind::Obj => "OBJ Import Options",
-            Kind::Stl => "STL Import Options",
-            Kind::Gltf => "glTF Import Options",
-            Kind::Dxf => "DXF Import Options",
-            Kind::Image => "Import Image",
+            Kind::Mesh(k) => format!("{} Import Options", k.name()),
+            Kind::Gltf => "glTF Import Options".into(),
+            Kind::Dxf => "DXF Import Options".into(),
+            Kind::Image => "Import Image".into(),
         };
-        let r = mt_ui::Dialog::new("import_mesh", title)
+        let r = mt_ui::Dialog::new("import_mesh", &title)
             .width(320.0)
             .show(ctx, |ui| {
                 crate::export::dialog_visuals(ui);
@@ -268,11 +328,14 @@ impl App {
                 );
                 ui.add_space(8.0);
                 match d.kind {
-                    Kind::Obj | Kind::Stl => {
+                    Kind::Mesh(k) => {
                         units_row(ui, &mut d.units, None);
                         ui.add_space(6.0);
                         ui.checkbox(&mut d.y_up, "File is Y up (swap YZ)");
                         ui.checkbox(&mut d.merge, "Merge coplanar faces");
+                        if k == formats::Kind::Ply {
+                            ui.checkbox(&mut d.colors, "Import colors as materials");
+                        }
                     }
                     Kind::Gltf => {
                         ui.checkbox(&mut d.merge, "Merge coplanar faces");
@@ -301,7 +364,7 @@ impl App {
                 if let Some(rs) = frame.wgpu_render_state() {
                     let device = rs.device.clone();
                     match d.kind {
-                        Kind::Obj | Kind::Stl => self.import_mesh(&d, &device),
+                        Kind::Mesh(_) => self.import_mesh(&d, &device),
                         Kind::Gltf => match read_gltf(&d.path, d.merge) {
                             Ok(m) if m.root.instances.is_empty() => {
                                 self.message = Some(format!("No faces in {}.", d.path.display()));
@@ -367,8 +430,11 @@ impl App {
             y_up: d.y_up,
             merge_coplanar: d.merge,
         };
-        let stl = d.kind == Kind::Stl;
-        let (materials, ents) = match read_mesh(&d.path, stl, &opts, doc.model.materials.len()) {
+        let Kind::Mesh(kind) = d.kind else {
+            return;
+        };
+        let first = doc.model.materials.len();
+        let (materials, ents) = match read_mesh(&d.path, kind, &opts, first, d.colors) {
             Ok(x) => x,
             Err(e) => {
                 self.file_error("import", &d.path, e);
@@ -382,13 +448,7 @@ impl App {
         let faces = ents.faces.len();
         let mut placed = None;
         doc.edit_model(|m, active| {
-            m.materials
-                .extend(materials.into_iter().map(|x| mt_kernel::Material {
-                    name: x.name,
-                    color: x.color,
-                    opacity: x.opacity,
-                    texture: None,
-                }));
+            m.materials.extend(materials);
             let name = m.unique_definition_name("Group#1");
             let def = m.definitions.insert(mt_kernel::Definition {
                 name,
@@ -473,7 +533,8 @@ mod tests {
             y_up: false,
             merge_coplanar: true,
         };
-        let (mats, ents) = read_mesh(&dir.join("t.obj"), false, &opts, 3).unwrap();
+        let (mats, ents) =
+            read_mesh(&dir.join("t.obj"), formats::Kind::Obj, &opts, 3, true).unwrap();
         assert_eq!(mats.len(), 1);
         assert_eq!(mats[0].color, [0, 0, 255]);
         assert_eq!(ents.faces.len(), 1);

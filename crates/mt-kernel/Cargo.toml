@@ -10,6 +10,8 @@ glam.workspace = true
 slotmap = "1"
 earcutr = "0.5"
 gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
+flate2 = "1"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 mt-skp.workspace = true
 
 [dev-dependencies]
