@@ -465,6 +465,14 @@ pub struct TrayPanel {
     pub id: String,
     pub title: String,
     pub expanded: bool,
+    /// Whether the panel is in the tray at start; a hidden panel appears when its
+    /// Window menu command is chosen. Default true.
+    #[serde(default = "yes")]
+    pub shown: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// sRGB color.

@@ -74,6 +74,11 @@ impl App {
             edges: m.style.edges,
             profiles: m.style.profiles,
             profile_width: m.style.profile_width.round() as u8,
+            back_edges: m.style.back_edges,
+            depth_cue: m.style.depth_cue,
+            depth_cue_width: m.style.depth_cue_width.round() as u8,
+            extension: m.style.extension,
+            extension_length: m.style.extension_length.round() as u8,
             section_cut_width: m.style.section_cut_width.round() as u8,
             section_fill: m.style.section_fill,
             section_fill_color: m.style.section_fill_color,
@@ -85,6 +90,15 @@ impl App {
                 mt_kernel::FaceStyle::Monochrome => mt_ui::FaceStyle::Monochrome,
             },
             x_ray: m.style.xray,
+        };
+        let fog = &m.style.fog;
+        let percent = |x: f32| (x * 100.0).round().clamp(0.0, 100.0) as u8;
+        data.fog = mt_ui::FogSettings {
+            enabled: fog.enabled,
+            start: percent(fog.start),
+            end: percent(fog.end),
+            use_background: fog.use_background,
+            color: fog.color,
         };
         let layer_of = |o: &Owner| -> Option<usize> {
             let ents = doc.active();
@@ -397,6 +411,11 @@ impl App {
                 st.edges = s.edges;
                 st.profiles = s.profiles;
                 st.profile_width = f32::from(s.profile_width);
+                st.back_edges = s.back_edges;
+                st.depth_cue = s.depth_cue;
+                st.depth_cue_width = f32::from(s.depth_cue_width);
+                st.extension = s.extension;
+                st.extension_length = f32::from(s.extension_length);
                 st.section_cut_width = f32::from(s.section_cut_width);
                 st.section_fill = s.section_fill;
                 st.section_fill_color = s.section_fill_color;
@@ -409,6 +428,17 @@ impl App {
                         mt_kernel::FaceStyle::ShadedWithTextures
                     }
                     mt_ui::FaceStyle::Monochrome => mt_kernel::FaceStyle::Monochrome,
+                };
+                true
+            }
+            Event::FogChanged(f) => {
+                // A display setting like the Styles panel's; not an undo step.
+                doc.model.style.fog = mt_kernel::FogSettings {
+                    enabled: f.enabled,
+                    start: f32::from(f.start) / 100.0,
+                    end: f32::from(f.end) / 100.0,
+                    use_background: f.use_background,
+                    color: f.color,
                 };
                 true
             }

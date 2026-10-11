@@ -13,5 +13,6 @@ pub use section::{SectionCut, section_fill, section_lines};
 pub use sun::sun_direction;
 pub use texture::{TextureImage, TextureSource};
 pub use viewport::{
-    FaceStyle, Light, Segment, ShadingStyle, Shadows, Style, Viewport, XRAY_OPACITY,
+    BACK_EDGE_DASH, FaceStyle, Fog, Light, Segment, ShadingStyle, Shadows, Style, Viewport,
+    XRAY_OPACITY, depth_cue_width, extend_segment, fog_amount,
 };

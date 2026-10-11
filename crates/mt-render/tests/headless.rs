@@ -1143,3 +1143,239 @@ fn textured_faces_show_texture_pixels() {
         "yellow, got {yellow:?}"
     );
 }
+
+// ---------------------------------------------------------------- edge style and fog
+
+/// The cube with model edges (profiles flagged as the app does), 1 point wide.
+fn model_edge_cube(device: &wgpu::Device, style: Style) -> (Viewport, Camera) {
+    let mut viewport = Viewport::new(device, style);
+    let white = [1.0; 4];
+    let (vertices, indices) = quads_mesh(&cube_quads(), white, white);
+    viewport.set_faces(device, &vertices, &indices);
+    let segments: Vec<Segment> = cube_edges()
+        .iter()
+        .map(|(a, b, n)| model_edge(*a, *b, *n))
+        .collect();
+    viewport.set_edges(device, &segments);
+    (viewport, cube_camera(600.0, true))
+}
+
+fn model_edge(a: DVec3, b: DVec3, n: [DVec3; 2]) -> Segment {
+    let mut s = Segment::line(
+        a.as_vec3().into(),
+        b.as_vec3().into(),
+        [0.0, 0.0, 0.0, 1.0],
+        [1.0, 0.0],
+    );
+    s.n1 = n[0].as_vec3().into();
+    s.n2 = n[1].as_vec3().into();
+    s.profile = Segment::SILHOUETTE;
+    s.flags = Segment::MODEL_EDGE;
+    s
+}
+
+/// Dark pixels among the pixels along the projected segment `a`-`b`, between 30% and
+/// 70% of its length (away from the visible edges at its ends), and the sample count.
+fn dark_along(img: &image::RgbaImage, camera: &Camera, a: DVec3, b: DVec3) -> (usize, usize) {
+    let pa = camera.project(a, viewport_px()).unwrap();
+    let pb = camera.project(b, viewport_px()).unwrap();
+    let n = (pa.distance(pb) * 0.4).round() as usize;
+    let dark = (0..n)
+        .filter(|&i| {
+            let p = pa.lerp(pb, 0.3 + 0.4 * i as f64 / n as f64);
+            luma(img.get_pixel(p.x.round() as u32, p.y.round() as u32)) < 150
+        })
+        .count();
+    (dark, n)
+}
+
+#[test]
+fn back_edges_draw_hidden_edges_dashed() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = face_style();
+    style.profiles = None;
+    let (mut viewport, camera) = model_edge_cube(&device, style.clone());
+    viewport.set_face_style(FaceStyle::HiddenLine, false);
+    let a = HIDDEN_EDGE - DVec3::X * HALF;
+    let b = HIDDEN_EDGE + DVec3::X * HALF;
+    let img = render(&device, &queue, &mut viewport, &camera, "back_edges_off");
+    let (dark, n) = dark_along(&img, &camera, a, b);
+    // It crosses the near vertical edge once.
+    assert!(dark <= 2, "hidden edge covered ({dark}/{n})");
+
+    style.back_edges = true;
+    viewport.set_style(&device, style);
+    let img = render(&device, &queue, &mut viewport, &camera, "back_edges_on");
+    let (dark, n) = dark_along(&img, &camera, a, b);
+    assert!(
+        dark * 5 > n && dark * 5 < n * 4,
+        "hidden edge dashed: {dark}/{n} dark"
+    );
+    // Visible edges stay solid.
+    let near = pixel_at(&img, &camera, NEAR_EDGE);
+    assert!(luma(&near) < 100, "visible edge, got {near:?}");
+}
+
+#[test]
+fn edges_off_keeps_only_profiles() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = face_style();
+    style.edges = false;
+    let (mut viewport, camera) = model_edge_cube(&device, style.clone());
+    let img = render(&device, &queue, &mut viewport, &camera, "edges_off");
+    // The near vertical edge has both faces towards the camera: not a profile.
+    let near = pixel_at(&img, &camera, NEAR_EDGE);
+    assert!(luma(&near) > 100, "non-profile edge hidden, got {near:?}");
+    // The top's far edge along X (y = 50, z = 50) is on the silhouette.
+    let silhouette = DVec3::new(0.0, HALF, HALF);
+    let (dark, n) = dark_along(
+        &img,
+        &camera,
+        silhouette - DVec3::X * HALF,
+        silhouette + DVec3::X * HALF,
+    );
+    assert!(dark * 10 > n * 9, "profile drawn: {dark}/{n}");
+
+    // Profiles off too: nothing.
+    style.profiles = None;
+    viewport.set_style(&device, style);
+    let img = render(
+        &device,
+        &queue,
+        &mut viewport,
+        &camera,
+        "edges_profiles_off",
+    );
+    let (dark, n) = dark_along(
+        &img,
+        &camera,
+        silhouette - DVec3::X * HALF,
+        silhouette + DVec3::X * HALF,
+    );
+    assert_eq!(dark, 0, "no edges: {dark}/{n}");
+}
+
+/// Looking straight down at horizontal model lines without faces.
+fn top_down() -> Camera {
+    Camera {
+        eye: DVec3::new(0.0, 0.0, 500.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    }
+}
+
+fn flat_line(a: [f32; 3], b: [f32; 3]) -> Segment {
+    let mut s = Segment::line(a, b, [0.0, 0.0, 0.0, 1.0], [1.0, 0.0]);
+    s.flags = Segment::MODEL_EDGE;
+    s
+}
+
+#[test]
+fn extension_overshoots_line_ends() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let camera = top_down();
+    let mut style = face_style();
+    style.sky = None;
+    style.ground = None;
+    let mut viewport = Viewport::new(&device, style.clone());
+    viewport.set_edges(&device, &[flat_line([-50.0, 0.0, 0.0], [50.0, 0.0, 0.0])]);
+    let end = camera
+        .project(DVec3::new(50.0, 0.0, 0.0), viewport_px())
+        .unwrap();
+    // 4 pixels past the end, on the line (darkest of three rows: the line is 1 px).
+    let past = |img: &image::RgbaImage| {
+        (-1..=1)
+            .map(|dy| luma(img.get_pixel(end.x as u32 + 4, (end.y.round() as i32 + dy) as u32)))
+            .min()
+            .unwrap()
+    };
+    let img = render(&device, &queue, &mut viewport, &camera, "extension_off");
+    assert!(past(&img) > 200, "no overshoot: {}", past(&img));
+    style.extension = Some(8.0);
+    viewport.set_style(&device, style);
+    let img = render(&device, &queue, &mut viewport, &camera, "extension_on");
+    // Half covered at least (a 1 px line on a pixel boundary covers two rows by half).
+    assert!(past(&img) < 160, "overshoot: {}", past(&img));
+}
+
+#[test]
+fn depth_cue_draws_near_edges_wider() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let camera = top_down();
+    let mut style = face_style();
+    style.sky = None;
+    style.ground = None;
+    style.depth_cue = Some(6.0);
+    let mut viewport = Viewport::new(&device, style);
+    // Near line (z = 200) at y > 0, far line (z = -200) at y < 0.
+    viewport.set_edges(
+        &device,
+        &[
+            flat_line([-50.0, 30.0, 200.0], [50.0, 30.0, 200.0]),
+            flat_line([-50.0, -60.0, -200.0], [50.0, -60.0, -200.0]),
+        ],
+    );
+    let img = render(&device, &queue, &mut viewport, &camera, "depth_cue");
+    let x = SIZE[0] / 2;
+    let mid = SIZE[1] / 2;
+    let dark =
+        |range: std::ops::Range<u32>| range.filter(|&y| luma(img.get_pixel(x, y)) < 150).count();
+    let (near, far) = (dark(0..mid), dark(mid..SIZE[1]));
+    eprintln!("depth cue: near {near} px, far {far} px");
+    assert!(near >= 5 && far <= 2, "near {near} px, far {far} px");
+}
+
+#[test]
+fn fog_fades_faces_towards_fog_color() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = face_style();
+    style.sky = None;
+    style.ground = None;
+    let background = style.background;
+    let (mut viewport, camera) = face_style_cube(&device, style.clone(), RED, RED);
+    let img = render(&device, &queue, &mut viewport, &camera, "fog_off");
+    let clear = pixel_at(&img, &camera, FRONT_FACE);
+    assert!(!close(&clear, background, 30), "no fog, got {clear:?}");
+
+    // Fully fogged from the near side of the model: background color.
+    style.fog = Some(mt_render::Fog {
+        start: 0.0,
+        end: 0.0,
+        color: None,
+    });
+    viewport.set_style(&device, style.clone());
+    let img = render(&device, &queue, &mut viewport, &camera, "fog_full");
+    let px = pixel_at(&img, &camera, FRONT_FACE);
+    assert!(close(&px, background, 2), "background, got {px:?}");
+
+    // A given color, halfway through the fog at the cube's center depth.
+    let green = [0.0, 1.0, 0.0];
+    style.fog = Some(mt_render::Fog {
+        start: 0.0,
+        end: 1.0,
+        color: Some(green),
+    });
+    viewport.set_style(&device, style);
+    let img = render(&device, &queue, &mut viewport, &camera, "fog_green");
+    let px = pixel_at(&img, &camera, FRONT_FACE);
+    assert!(
+        px[1] > clear[1] + 40 && px[0] < clear[0],
+        "towards green: {px:?} from {clear:?}"
+    );
+}

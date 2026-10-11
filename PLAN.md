@@ -192,8 +192,8 @@ Reading first means real SketchUp models are available for testing everything el
 - Ruby plugin API (kept in view).
 
 ### M10: Everyday commands (FEATURES.md Tier 1)
-- [ ] Items 1-12 of `spec/parity/FEATURES.md`: camera commands, Hide/Lock, Cut/Copy/Paste, Invert Selection, View and Edge Style toggles, Window menu panels, Zoom Window (plus Fog, item 26).
-- One commit and push when the whole tier passes fmt, clippy, tests and a GUI check.
+- [x] Items 1-12 of `spec/parity/FEATURES.md`: camera commands, Hide/Lock, Cut/Copy/Paste, Invert Selection, View and Edge Style toggles, Window menu panels, Zoom Window (plus Fog, item 26).
+- Model-only for now (not in the .skp): lock flag, Axes/Guides/Hidden Geometry, edge style options, fog.
 
 ### M11: File exchange (FEATURES.md items 14-17)
 - [ ] Export 2D, Export 3D, Import, View > Animation commands.

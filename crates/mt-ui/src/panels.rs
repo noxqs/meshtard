@@ -104,6 +104,10 @@ impl Shell {
                 self.shadows_panel(ui, &mut data);
                 true
             }
+            "window.fog" => {
+                self.fog_panel(ui, &mut data);
+                true
+            }
             _ => false,
         };
         self.data = data;
@@ -830,13 +834,17 @@ impl Shell {
             StylesPage::Edge => {
                 ui.label(RichText::new("Edge Settings").strong());
                 ui.checkbox(&mut s.edges, "Edges");
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut s.profiles, "Profiles");
-                    ui.add_enabled(
-                        s.profiles,
-                        egui::DragValue::new(&mut s.profile_width).range(1..=99),
-                    );
-                });
+                ui.checkbox(&mut s.back_edges, "Back Edges");
+                for (on, value, label) in [
+                    (&mut s.profiles, &mut s.profile_width, "Profiles"),
+                    (&mut s.depth_cue, &mut s.depth_cue_width, "Depth Cue"),
+                    (&mut s.extension, &mut s.extension_length, "Extension"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(on, label);
+                        ui.add_enabled(*on, egui::DragValue::new(value).range(1..=99));
+                    });
+                }
             }
             StylesPage::Face => {
                 ui.label(RichText::new("Face Settings").strong());
@@ -901,6 +909,43 @@ impl Shell {
         });
         if data.shadows != before {
             self.pending.push(Event::ShadowsChanged(data.shadows));
+        }
+    }
+
+    /// Fog panel: Display Fog, the Distance sliders (start and end, in percent of the
+    /// model's depth) and the color (background or own). Unverified: SketchUp draws
+    /// one two-handled Distance slider labeled 0 and infinity.
+    fn fog_panel(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
+        let before = data.fog;
+        let f = &mut data.fog;
+        ui.checkbox(&mut f.enabled, "Display Fog");
+        let slider_w = (ui.available_width() - 90.0).max(60.0);
+        egui::Grid::new("mt_ui_fog")
+            .num_columns(2)
+            .spacing(vec2(6.0, 4.0))
+            .show(ui, |ui| {
+                ui.spacing_mut().slider_width = slider_w;
+                ui.label("Start");
+                ui.add(egui::Slider::new(&mut f.start, 0..=100).suffix("%"));
+                ui.end_row();
+                ui.label("End");
+                ui.add(egui::Slider::new(&mut f.end, 0..=100).suffix("%"));
+                ui.end_row();
+            });
+        // The end never comes before the start: the slider being dragged wins.
+        if f.start != before.start {
+            f.end = f.end.max(f.start);
+        } else {
+            f.start = f.start.min(f.end);
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut f.use_background, "Use Background Color");
+            ui.add_enabled_ui(!f.use_background, |ui| {
+                ui.color_edit_button_srgb(&mut f.color);
+            });
+        });
+        if data.fog != before {
+            self.pending.push(Event::FogChanged(data.fog));
         }
     }
 
@@ -1337,6 +1382,37 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    /// The Fog panel is not in the tray until Window > Fog; then Display Fog turns
+    /// fog on.
+    #[test]
+    fn window_fog_opens_panel_and_turns_fog_on() {
+        let spec = Spec::builtin().unwrap();
+        let ctx = egui::Context::default();
+        let mut s = Shell::new(&spec);
+        assert!(!s.panel_expanded("window.fog"));
+        assert!(s.panels.iter().any(|p| p.id == "window.fog" && !p.shown));
+        s.command("window.fog");
+        assert!(s.panel_expanded("window.fog"));
+        let mut changed = None;
+        for y in (40..600).step_by(4) {
+            // Only the Fog panel, expanded (a click may hit its header).
+            for p in &mut s.panels {
+                p.shown = p.id == "window.fog";
+                p.expanded = p.shown;
+            }
+            let ev = run(&ctx, &mut s, &spec, click(pos2(1360.0, y as f32)));
+            if let Some(Event::FogChanged(f)) =
+                ev.into_iter().find(|e| matches!(e, Event::FogChanged(_)))
+            {
+                changed = Some(f);
+                break;
+            }
+        }
+        let f = changed.expect("a click in the panel changes the fog");
+        assert!(f.enabled, "Display Fog is the first control: {f:?}");
+        assert_eq!((f.start, f.end), (0, 100));
     }
 
     /// Expands only the Components panel (clicks while scanning may toggle headers).

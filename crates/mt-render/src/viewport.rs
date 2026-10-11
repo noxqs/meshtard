@@ -64,7 +64,21 @@ struct Globals {
     /// Monochrome front and back colors (rgb, w unused).
     mono_front: [f32; 4],
     mono_back: [f32; 4],
+    /// Edge Style: x: 1 when Edges is on (off draws only the profiles of model edges),
+    /// y: depth cue width in logical points (0 = off), z: extension in logical points
+    /// (0 = off), w: back edge dash in logical points (0 = no back edges).
+    edge_style: [f32; 4],
+    /// View depth of a world point p is dot(xyz, p) + w.
+    view_axis: [f32; 4],
+    /// x, y: view depth of the model's nearest and farthest point (bounding sphere),
+    /// z, w: fog start and end view depth (z >= w: no fog).
+    depth_range: [f32; 4],
+    /// rgb: fog color, w: 1 to fade towards the background (sky, ground) instead.
+    fog_color: [f32; 4],
 }
+
+/// Back edge dash length in logical points (SketchUp's dash pattern is unverified).
+pub const BACK_EDGE_DASH: f32 = 3.0;
 
 /// Face opacity in X-ray mode. SketchUp's X-ray looks like about 50% (unverified).
 pub const XRAY_OPACITY: f32 = 0.5;
@@ -122,6 +136,8 @@ pub struct Segment {
     pub n2: [f32; 3],
     /// Profile rule: [`Segment::NO_PROFILE`], [`Segment::SILHOUETTE`] or [`Segment::BORDER`].
     pub profile: f32,
+    /// [`Segment::MODEL_EDGE`] or 0.
+    pub flags: u32,
 }
 
 impl Segment {
@@ -131,6 +147,9 @@ impl Segment {
     pub const SILHOUETTE: f32 = 1.0;
     /// Always a profile: the edge borders a single face.
     pub const BORDER: f32 = 2.0;
+    /// A model edge: the Edge Style settings of [`Style`] (Edges, Back Edges, Depth Cue,
+    /// Extension) apply to it. Guides, axes, section cut lines and overlays leave it off.
+    pub const MODEL_EDGE: u32 = 1;
 
     pub fn line(a: [f32; 3], b: [f32; 3], color: [f32; 4], style: [f32; 2]) -> Self {
         Self {
@@ -154,6 +173,60 @@ pub struct Style {
     pub shading: ShadingStyle,
     /// Profile edge width in logical points, or `None` when profiles are off.
     pub profiles: Option<f32>,
+    /// Edge Style > Edges. Off: of the [`Segment::MODEL_EDGE`] segments only profiles
+    /// are drawn (none when `profiles` is `None` too).
+    pub edges: bool,
+    /// Edge Style > Back Edges: model edges hidden behind faces are drawn dashed
+    /// ([`BACK_EDGE_DASH`]).
+    pub back_edges: bool,
+    /// Edge Style > Depth Cue: the width in logical points of the model's nearest edges;
+    /// the width falls linearly to 1 at the farthest (see [`depth_cue_width`]).
+    pub depth_cue: Option<f32>,
+    /// Edge Style > Extension: model edges overshoot both ends by this many logical
+    /// points (see [`extend_segment`]).
+    pub extension: Option<f32>,
+    pub fog: Option<Fog>,
+}
+
+/// View > Fog: faces and model edges fade linearly towards the fog color from `start`
+/// to `end`, both fractions of the model's view depth range (0 at the near side of the
+/// bounding sphere of faces and model edges, 1 at the far side), so the fog spans the
+/// model however far the camera is. SketchUp's distance scale is unverified.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fog {
+    pub start: f32,
+    pub end: f32,
+    /// sRGB; `None` fades towards the background behind the point (sky, ground or
+    /// background color).
+    pub color: Option<[f32; 3]>,
+}
+
+/// Depth cue edge width: `max_width` at view depth `near` falling linearly to 1 at
+/// `far` (clamped). Mirrors `depth_cue_width` in the shader.
+pub fn depth_cue_width(depth: f32, near: f32, far: f32, max_width: f32) -> f32 {
+    let t = ((depth - near) / (far - near).max(1e-6)).clamp(0.0, 1.0);
+    max_width + (1.0 - max_width) * t
+}
+
+/// Fog amount (0 clear, 1 fully fogged) at view depth `depth` for fog from `start` to
+/// `end`. Mirrors `fog_amount` in the shader.
+pub fn fog_amount(depth: f32, start: f32, end: f32) -> f32 {
+    if end <= start {
+        return f32::from(u8::from(depth >= end));
+    }
+    ((depth - start) / (end - start)).clamp(0.0, 1.0)
+}
+
+/// The screen segment `a`-`b` lengthened by `by` at both ends (Extension). A
+/// degenerate segment is returned unchanged. Mirrors the extension in `line_vs`.
+pub fn extend_segment(a: glam::Vec2, b: glam::Vec2, by: f32) -> (glam::Vec2, glam::Vec2) {
+    let d = b - a;
+    let len = d.length();
+    if len < 1e-6 {
+        return (a, b);
+    }
+    let dir = d / len;
+    (a - dir * by, b + dir * by)
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +287,11 @@ impl Style {
             // Profile width 2 matches item 1007 of SketchUp's default style seen in OpenSKP's
             // fixtures (unverified that 1007 is the profile width).
             profiles: Some(2.0),
+            edges: true,
+            back_edges: false,
+            depth_cue: None,
+            extension: None,
+            fog: None,
             shading: ShadingStyle {
                 ambient: spec.shading.ambient,
                 light: if spec.shading.light_from_camera {
@@ -393,6 +471,7 @@ pub struct Viewport {
     lines: wgpu::RenderPipeline,
     /// Lines the section plane does not clip (axes).
     overlay_lines: wgpu::RenderPipeline,
+    back_lines: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_layout: wgpu::BindGroupLayout,
     shadow_sampler: wgpu::Sampler,
@@ -418,6 +497,8 @@ pub struct Viewport {
     axes_count: u32,
     edges: Option<wgpu::Buffer>,
     edges_count: u32,
+    /// Bounds of the [`Segment::MODEL_EDGE`] segments.
+    edge_bounds: Option<(Vec3, Vec3)>,
     style: Style,
     targets: Option<Targets>,
 }
@@ -491,43 +572,60 @@ impl Viewport {
 
         // Default primitive state: triangle list, counter-clockwise front (in y-up NDC,
         // which matches `FaceVertex` winding), no culling, so faces are two-sided.
+        let pipeline_cmp = |label,
+                            vs,
+                            fs,
+                            buffers: &[Option<wgpu::VertexBufferLayout>],
+                            depth_write,
+                            blend,
+                            depth_compare| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(depth_compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: SAMPLES,
+                    ..Default::default()
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: COLOR_FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Reverse Z: nearer is larger.
         let pipeline =
             |label, vs, fs, buffers: &[Option<wgpu::VertexBufferLayout>], depth_write, blend| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some(vs),
-                        compilation_options: Default::default(),
-                        buffers,
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: DEPTH_FORMAT,
-                        depth_write_enabled: Some(depth_write),
-                        // Reverse Z: nearer is larger.
-                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: SAMPLES,
-                        ..Default::default()
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(fs),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: COLOR_FORMAT,
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
+                pipeline_cmp(
+                    label,
+                    vs,
+                    fs,
+                    buffers,
+                    depth_write,
+                    blend,
+                    wgpu::CompareFunction::GreaterEqual,
+                )
             };
 
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
@@ -537,7 +635,7 @@ impl Viewport {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![
                 0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2,
-            4 => Float32x3, 5 => Float32x3, 6 => Float32
+            4 => Float32x3, 5 => Float32x3, 6 => Float32, 7 => Uint32
             ],
         };
         let lines = pipeline(
@@ -552,9 +650,20 @@ impl Viewport {
             "overlay lines",
             "line_vs",
             "overlay_line_fs",
-            &[Some(segment_layout)],
+            &[Some(segment_layout.clone())],
             true,
             alpha,
+        );
+        // Back edges: only the fragments behind what is already drawn (strictly
+        // farther), so visible edges, which wrote their own depth, are not drawn twice.
+        let back_lines = pipeline_cmp(
+            "back edges",
+            "back_line_vs",
+            "back_line_fs",
+            &[Some(segment_layout)],
+            false,
+            alpha,
+            wgpu::CompareFunction::Less,
         );
         let faces = [Some(FaceVertex::LAYOUT)];
         let faces_opaque = pipeline(
@@ -642,6 +751,7 @@ impl Viewport {
             background,
             lines,
             overlay_lines,
+            back_lines,
             shadow_pipeline,
             shadow_layout,
             shadow_sampler,
@@ -664,6 +774,7 @@ impl Viewport {
             axes_count: 0,
             edges: None,
             edges_count: 0,
+            edge_bounds: None,
             style: style.clone(),
             targets: None,
         };
@@ -673,6 +784,14 @@ impl Viewport {
 
     /// Replaces the model's edges.
     pub fn set_edges(&mut self, device: &wgpu::Device, segments: &[Segment]) {
+        self.edge_bounds = segments
+            .iter()
+            .filter(|s| s.flags & Segment::MODEL_EDGE != 0)
+            .flat_map(|s| [Vec3::from(s.a), Vec3::from(s.b)])
+            .fold(None, |acc, p| match acc {
+                None => Some((p, p)),
+                Some((lo, hi)) => Some((p.min(lo), p.max(hi))),
+            });
         self.edges_count = segments.len() as u32;
         self.edges = (!segments.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -840,6 +959,24 @@ impl Viewport {
         let aspect = f64::from(size[0]) / f64::from(size[1]);
         let view_proj = camera.view_proj(aspect).as_mat4();
         let style = &self.style;
+        // View depth range of the model (faces and model edges), for depth cue and fog.
+        let forward = camera.forward().as_vec3();
+        let eye = camera.eye.as_vec3();
+        let bounds = [self.faces.as_ref().map(|f| f.bounds), self.edge_bounds]
+            .into_iter()
+            .flatten()
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let (near, far) = bounds.map_or((0.0, 1.0), |(lo, hi)| {
+            let center = forward.dot((lo + hi) * 0.5 - eye);
+            let radius = (hi - lo).length() * 0.5;
+            let near = center - radius;
+            let near = if camera.perspective {
+                near.max(0.0)
+            } else {
+                near
+            };
+            (near, (center + radius).max(near + 1e-3))
+        });
         let rgb_w = |c: [f32; 3], w: bool| [c[0], c[1], c[2], f32::from(u8::from(w))];
         let (zenith, horizon) = style.sky.unwrap_or(([0.0; 3], [0.0; 3]));
         let globals = Globals {
@@ -939,6 +1076,27 @@ impl Viewport {
             ],
             mono_front: rgb_w(self.mono_colors.0, false),
             mono_back: rgb_w(self.mono_colors.1, false),
+            edge_style: [
+                f32::from(u8::from(style.edges)),
+                style.depth_cue.unwrap_or(0.0).max(0.0),
+                style.extension.unwrap_or(0.0).max(0.0),
+                if style.back_edges && !wireframe && !xray {
+                    BACK_EDGE_DASH
+                } else {
+                    0.0
+                },
+            ],
+            view_axis: [forward.x, forward.y, forward.z, -forward.dot(eye)],
+            depth_range: [
+                near,
+                far,
+                style.fog.map_or(1.0, |f| near + f.start * (far - near)),
+                style.fog.map_or(0.0, |f| near + f.end * (far - near)),
+            ],
+            fog_color: match style.fog.and_then(|f| f.color) {
+                Some(c) => rgb_w(c, false),
+                None => rgb_w([0.0; 3], true),
+            },
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1040,6 +1198,15 @@ impl Viewport {
                 pass.set_vertex_buffer(0, edges.slice(..));
                 pass.draw(0..6, 0..self.edges_count);
             }
+            if let Some(edges) = self
+                .edges
+                .as_ref()
+                .filter(|_| style.back_edges && !wireframe && !xray)
+            {
+                pass.set_pipeline(&self.back_lines);
+                pass.set_vertex_buffer(0, edges.slice(..));
+                pass.draw(0..6, 0..self.edges_count);
+            }
             if let Some(axes) = &self.axes {
                 pass.set_pipeline(&self.overlay_lines);
                 pass.set_vertex_buffer(0, axes.slice(..));
@@ -1073,5 +1240,55 @@ impl Viewport {
 
     pub fn color_view(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.resolve_view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec2;
+
+    #[test]
+    fn depth_cue_width_falls_from_near_to_far() {
+        assert_eq!(depth_cue_width(100.0, 100.0, 300.0, 4.0), 4.0);
+        assert_eq!(depth_cue_width(300.0, 100.0, 300.0, 4.0), 1.0);
+        assert_eq!(depth_cue_width(200.0, 100.0, 300.0, 4.0), 2.5);
+        // Clamped outside the model's depth range.
+        assert_eq!(depth_cue_width(0.0, 100.0, 300.0, 4.0), 4.0);
+        assert_eq!(depth_cue_width(1e6, 100.0, 300.0, 4.0), 1.0);
+        // A flat range does not divide by zero.
+        assert!(depth_cue_width(5.0, 5.0, 5.0, 4.0).is_finite());
+    }
+
+    #[test]
+    fn fog_is_linear_between_start_and_end() {
+        assert_eq!(fog_amount(10.0, 20.0, 40.0), 0.0);
+        assert_eq!(fog_amount(30.0, 20.0, 40.0), 0.5);
+        assert_eq!(fog_amount(50.0, 20.0, 40.0), 1.0);
+        // Start at the end: a step.
+        assert_eq!(fog_amount(19.0, 20.0, 20.0), 0.0);
+        assert_eq!(fog_amount(20.0, 20.0, 20.0), 1.0);
+    }
+
+    #[test]
+    fn extension_overshoots_both_ends() {
+        let (a, b) = extend_segment(Vec2::new(10.0, 10.0), Vec2::new(10.0, 30.0), 2.0);
+        assert_eq!(a, Vec2::new(10.0, 8.0));
+        assert_eq!(b, Vec2::new(10.0, 32.0));
+        let (a, b) = extend_segment(Vec2::ZERO, Vec2::new(3.0, 4.0), 5.0);
+        assert!((a - Vec2::new(-3.0, -4.0)).length() < 1e-6);
+        assert!((b - Vec2::new(6.0, 8.0)).length() < 1e-6);
+        // A point stays a point.
+        assert_eq!(
+            extend_segment(Vec2::ONE, Vec2::ONE, 2.0),
+            (Vec2::ONE, Vec2::ONE)
+        );
+    }
+
+    #[test]
+    fn segment_layout_matches_the_shader() {
+        // 19 floats, then the flags word; the vertex layout in `Viewport::new` reads them.
+        assert_eq!(std::mem::size_of::<Segment>(), 80);
+        assert_eq!(std::mem::offset_of!(Segment, flags), 76);
     }
 }

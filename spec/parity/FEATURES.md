@@ -22,7 +22,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
    Everything visible in the active context minus the selection.
 8. [x] **View toggles: Axes, Guides, Hidden Geometry, Scene Tabs** (`view.axes|guides|hidden_geometry|scene_tabs`) S.
    Flags in `StyleSettings` (axes/guides per model, hidden geometry draws hidden edges dashed and faces as a mesh). Save in the file where the format has it. Check marks via `view_checked`.
-9. [ ] **Edge Style toggles: Edges, Back Edges, Profiles, Depth Cue, Extension** (`view.edges` …) M.
+9. [x] **Edge Style toggles: Edges, Back Edges, Profiles, Depth Cue, Extension** (`view.edges` …) M.
    `profiles` exists in `StyleSettings`; renderer needs: edges off, back edges dashed through faces (second pass without depth test, dashed shader), profile width, depth cue (width by distance), extension (lines overshoot). Trial: default widths and dash pattern.
 10. [x] **Window menu opens tray panels** (`window.entity_info|components|materials|styles|tags|scenes|shadows|outliner|soften_edges|fog|environments|instructor`, `window.tray_show`) S.
     Shell API to show the tray and expand a panel; panels not built yet (Fog, Soften Edges, Environments, Instructor) get stubs or stay grey until built. Done for the built panels and Show Tray (check mark); the others stay grey.
@@ -59,7 +59,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     Edit context exists; renderer fades or hides everything outside the context path.
 25. [ ] **Intersect With Context** (`edit.intersect_context`) S.
     Same as Intersect With Selection limited to the active context; `intersect.rs` already has the core.
-26. [ ] **Fog** (`view.fog`, `window.fog`) S.
+26. [x] **Fog** (`view.fog`, `window.fog`) S.
     Fog start/end distance and color in the style; a fragment shader term. Trial: default distances.
 27. [ ] **Soften Edges panel** (`window.soften_edges`) S.
     Angle slider; soften/smooth selected edges whose face angle is under it (Eraser Ctrl already softens single edges).
