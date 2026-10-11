@@ -121,6 +121,7 @@ fn negative_axis_is_dotted() {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let mut viewport = Viewport::new(&device, Style::from_spec(&spec));
     let texture = viewport.render(&device, &queue, &camera, SIZE, 1.0).clone();
@@ -268,6 +269,7 @@ fn faces_show_front_outside_and_back_inside() {
         target: DVec3::new(50.0, 10.0, 0.0),
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(&device, &queue, &mut viewport, &inside, "faces_inside");
     let px = img.get_pixel(SIZE[0] / 2, SIZE[1] / 2);
@@ -417,6 +419,7 @@ fn cube_camera(distance: f64, perspective: bool) -> Camera {
         target: DVec3::ZERO,
         fov_deg: (2.0 * half_angle).to_degrees(),
         perspective,
+        two_point: false,
     }
 }
 
@@ -431,6 +434,7 @@ fn edges_on_faces_near() {
             target: corner,
             fov_deg: 35.0,
             perspective: true,
+            two_point: false,
         },
         "edges_near",
     );
@@ -477,6 +481,7 @@ fn translucent_face_blends() {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(&device, &queue, &mut viewport, &camera, "faces_translucent");
     let red = pixel_at(&img, &camera, DVec3::new(-50.0, 0.0, 0.0));
@@ -510,6 +515,7 @@ fn border_and_silhouette_edges_draw_as_profiles() {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let mut style = face_style();
     style.axes = None;
@@ -592,6 +598,7 @@ fn section_plane_clips_faces_edges_and_selection() {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(&device, &queue, &mut viewport, &camera, "section");
     // The kept half of the top shows its red front and the kept edge.
@@ -654,6 +661,7 @@ fn section_fill_caps_a_cut_cube() {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(&device, &queue, &mut viewport, &camera, "section_fill");
     for p in [
@@ -704,6 +712,7 @@ fn shadow_scene(device: &wgpu::Device) -> (Viewport, Camera) {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     (viewport, camera)
 }
@@ -809,6 +818,7 @@ fn translucent_faces_sort_back_to_front() {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(
         &device,
@@ -872,6 +882,7 @@ fn box_shadow_with_app_sun() {
         target: DVec3::new(50.0, 50.0, 0.0),
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(&device, &queue, &mut viewport, &camera, "shadow_app_box");
     let at = |p: DVec3| luma(&pixel_at(&img, &camera, p));
@@ -1022,6 +1033,7 @@ fn monochrome_ignores_material_color() {
         target: DVec3::new(50.0, 10.0, 0.0),
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     let img = render(
         &device,
@@ -1268,6 +1280,7 @@ fn top_down() -> Camera {
         target: DVec3::ZERO,
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     }
 }
 

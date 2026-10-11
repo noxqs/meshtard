@@ -47,11 +47,11 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     Click to move entities to the active tag (SketchUp 2026 Tag Tool: Alt to sample, Ctrl to keep selection). Trial: its exact keys. Done (`pick_tool.rs`): click tags, Alt+click samples; Ctrl not done.
 19. [x] **Axes tool** (`tool.axes`) S.
     Reuse `AxesPick` from the Make Component dialog; store model axes in the file (model-level transformation) and drive drawing directions/inference from it. Done (`model_axes.rs`, `mt_infer::Axes`): axes drawn and inferred there; not saved in the file (mt-skp does not expose model axes); shape tools' default planes stay world-aligned.
-20. [ ] **Position Camera, Walk, Look Around, Field of View** (`camera.position|walk|look_around|field_of_view`) M.
+20. [x] **Position Camera, Walk, Look Around, Field of View** (`camera.position|walk|look_around|field_of_view`) M.
     Eye height 5' 6" (verify), walking with collision off, look around rotates about the eye; Field of View is a drag tool plus typed degrees (`35deg`) or focal length (`50mm`).
-21. [ ] **Model Info** (`window.model_info`) M.
+21. [x] **Model Info** (`window.model_info`) M.
     Dialog pages: Units (format, precision, snapping), Dimensions, Text, Statistics (purge unused), Geo-location (read only), Credits, File. Units already exist in the model; wire to the dialog. Trial: screenshots of every page.
-22. [ ] **Preferences** (`window.preferences`) M.
+22. [x] **Preferences** (`window.preferences`) M.
     Shortcuts page (rebind and save to user config like `toolbars.toml`), Drawing (click-drag-click), Graphics, General (auto-save, backup). Trial: shortcut export file.
 23. [x] **Revert** (`file.revert`) S.
     Reopen the file from disk after a confirm prompt (reuse `confirm.rs`).
@@ -63,7 +63,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     Fog start/end distance and color in the style; a fragment shader term. Trial: default distances.
 27. [x] **Soften Edges panel** (`window.soften_edges`) S.
     Angle slider; soften/smooth selected edges whose face angle is under it (Eraser Ctrl already softens single edges). Done (`soften.rs`, Soften Edges tray panel).
-28. [ ] **Two-Point Perspective** (`camera.two_point`) M.
+28. [x] **Two-Point Perspective** (`camera.two_point`) M.
     Keep vertical lines vertical: shifted-lens projection; orbit switches it off.
 
 ## Tier 3: presentation and less frequent work

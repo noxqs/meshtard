@@ -22,7 +22,7 @@ const MAX_HISTORY: usize = 50;
 
 impl History {
     /// Records `before` when a camera move starts.
-    fn push(&mut self, before: Camera) {
+    pub(crate) fn push(&mut self, before: Camera) {
         if self.back.last() != Some(&before) {
             self.back.push(before);
             if self.back.len() > MAX_HISTORY {
@@ -73,8 +73,10 @@ pub(crate) fn scene_bounds(scene: &crate::document::Scene) -> Option<(DVec3, DVe
 
 pub(crate) fn is_checked(camera: &Camera, id: &str) -> bool {
     match id {
+        // A radio group: exactly one of the three is checked.
         "camera.parallel" => !camera.perspective,
-        "camera.perspective" => camera.perspective,
+        "camera.perspective" => camera.perspective && !camera.two_point,
+        "camera.two_point" => camera.perspective && camera.two_point,
         _ => false,
     }
 }
@@ -95,10 +97,17 @@ impl App {
             }
             "camera.parallel" => Camera {
                 perspective: false,
+                two_point: false,
                 ..current.clone()
             },
             "camera.perspective" => Camera {
                 perspective: true,
+                two_point: false,
+                ..current.clone()
+            },
+            "camera.two_point" => Camera {
+                perspective: true,
+                two_point: true,
                 ..current.clone()
             },
             "camera.previous" => {
@@ -122,7 +131,11 @@ impl App {
                     return false;
                 };
                 // A standard view also fits the model, as SketchUp's do (unverified).
-                let mut c = current.looking(view);
+                // Standard views leave Two-Point Perspective (unverified).
+                let mut c = Camera {
+                    two_point: false,
+                    ..current.looking(view)
+                };
                 if let Some((min, max)) = bounds {
                     c.fit(min, max, aspect);
                 }
@@ -190,7 +203,9 @@ impl App {
     /// Moves to `to` with the scene transition animation; a projection change is
     /// immediate.
     fn go(&mut self, to: Camera) {
-        if to.perspective != self.camera.perspective && to.eye == self.camera.eye {
+        let projection_only =
+            to.perspective != self.camera.perspective || to.two_point != self.camera.two_point;
+        if projection_only && to.eye == self.camera.eye {
             self.camera = to;
             self.transition = None;
         } else {
@@ -217,6 +232,7 @@ mod tests {
             target: DVec3::ZERO,
             fov_deg: 35.0,
             perspective: true,
+            two_point: false,
         }
     }
 
@@ -238,5 +254,19 @@ mod tests {
         h.track(&cam(1.0), &cam(1.0));
         h.track(&cam(1.0), &cam(2.0));
         assert!(!h.can_go_forward());
+    }
+
+    #[test]
+    fn projection_checks_are_a_radio_group() {
+        let ids = ["camera.parallel", "camera.perspective", "camera.two_point"];
+        for (perspective, two_point) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let c = Camera {
+                perspective,
+                two_point,
+                ..cam(0.0)
+            };
+            assert_eq!(ids.iter().filter(|id| is_checked(&c, id)).count(), 1);
+        }
     }
 }

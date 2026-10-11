@@ -72,6 +72,7 @@ fn main() {
         target: DVec3::new(0.0, 0.0, 30.0),
         fov_deg: 35.0,
         perspective: true,
+        two_point: false,
     };
     // Boulder, CO, 2024-06-21 09:00 MDT.
     let sun = sun_direction(40.0, -105.0, -6.0, 2024, 6, 21, 9, 0);

@@ -200,6 +200,8 @@ Reading first means real SketchUp models are available for testing everything el
 - Not done: glTF export, image import (waits for the image entity, item 30), OBJ texture import, animation settings saved in the file.
 
 ### M12: Solid Tools and modeling extras (FEATURES.md items 13, 18-28)
+- [x] Solid Tools (kernel booleans, about 0.7% of near-degenerate random cases refused), Tag and Axes tools, camera tools, Two-Point Perspective, Model Info, Preferences, Revert, Component Edit hiding, Intersect With Context, Soften Edges.
+- Not saved in the .skp yet: model axes, units (writer keeps its template's units), two-point.
 
 ### M13: Presentation and the rest (FEATURES.md Tier 3)
 

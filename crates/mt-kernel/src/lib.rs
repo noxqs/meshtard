@@ -19,6 +19,7 @@ pub mod mesh_import;
 pub mod model;
 pub mod offset;
 pub mod ops;
+pub mod purge;
 pub mod push_pull;
 pub mod solid;
 pub mod spatial;
