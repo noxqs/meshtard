@@ -16,7 +16,16 @@ pub enum Tool {
     Pan,
     Zoom,
     ZoomWindow,
+    /// Camera > Position Camera, Walk, Look Around and Field of View (see
+    /// `camera_tools`).
+    PositionCamera,
+    Walk,
+    LookAround,
+    FieldOfView,
 }
+
+/// Degrees of field of view per pixel of Field of View drag (unverified).
+pub const FOV_DEG_PER_PX: f64 = 0.1;
 
 impl Tool {
     pub fn from_command(id: &str) -> Option<Self> {
@@ -49,6 +58,10 @@ impl Tool {
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,
             "camera.zoom_window" => Self::ZoomWindow,
+            "camera.position" => Self::PositionCamera,
+            "camera.walk" => Self::Walk,
+            "camera.look_around" => Self::LookAround,
+            "camera.field_of_view" => Self::FieldOfView,
             _ => return None,
         })
     }
@@ -63,6 +76,10 @@ impl Tool {
             Self::Pan => "camera.pan",
             Self::Zoom => "camera.zoom",
             Self::ZoomWindow => "camera.zoom_window",
+            Self::PositionCamera => "camera.position",
+            Self::Walk => "camera.walk",
+            Self::LookAround => "camera.look_around",
+            Self::FieldOfView => "camera.field_of_view",
         }
     }
 
@@ -80,6 +97,12 @@ impl Tool {
             Self::Pan => "Drag in direction to pan.",
             Self::Zoom => "Drag up or down to zoom.",
             Self::ZoomWindow => "Drag a window around the area to zoom to.",
+            Self::PositionCamera => {
+                "Click to stand at a point, or drag from the eye point to the point to look at."
+            }
+            Self::Walk => "Drag to walk. Shift = move up/down and sideways, Ctrl = run.",
+            Self::LookAround => "Drag to look around. Type an eye height.",
+            Self::FieldOfView => "Drag up or down to change the field of view.",
         }
     }
 }
@@ -101,13 +124,29 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
             camera.pan(input.middle_drag, viewport);
         } else {
             camera.orbit(input.middle_drag);
+            // Orbiting leaves Two-Point Perspective (unverified).
+            camera.two_point = false;
         }
     }
     if input.left_drag != DVec2::ZERO {
         match tool {
-            Tool::Select | Tool::Draw(_) | Tool::Modify(_) | Tool::Eraser | Tool::ZoomWindow => {}
+            Tool::Select
+            | Tool::Draw(_)
+            | Tool::Modify(_)
+            | Tool::Eraser
+            | Tool::ZoomWindow
+            | Tool::PositionCamera
+            | Tool::Walk => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
-            Tool::Orbit => camera.orbit(input.left_drag),
+            Tool::Orbit => {
+                camera.orbit(input.left_drag);
+                camera.two_point = false;
+            }
+            Tool::LookAround => camera.look_around(input.left_drag),
+            // Dragging up narrows the view, as zooming in (unverified).
+            Tool::FieldOfView => {
+                camera.set_fov(camera.fov_deg + input.left_drag.y * FOV_DEG_PER_PX)
+            }
             Tool::Pan => camera.pan(input.left_drag, viewport),
             Tool::Zoom => camera.zoom_drag(input.left_drag.y, viewport),
         }
@@ -129,6 +168,7 @@ mod tests {
             target: DVec3::ZERO,
             fov_deg: 35.0,
             perspective: true,
+            two_point: false,
         }
     }
 
@@ -217,5 +257,41 @@ mod tests {
             VIEWPORT,
         );
         assert!(c.distance() < camera().distance());
+    }
+
+    #[test]
+    fn orbit_leaves_two_point() {
+        let mut c = camera();
+        c.two_point = true;
+        let input = Input {
+            left_drag: DVec2::new(10.0, 0.0),
+            ..Default::default()
+        };
+        apply(Tool::Orbit, &mut c, &input, VIEWPORT);
+        assert!(!c.two_point && c.perspective);
+    }
+
+    #[test]
+    fn field_of_view_drag_up_narrows() {
+        let mut c = camera();
+        let input = Input {
+            left_drag: DVec2::new(0.0, -50.0),
+            ..Default::default()
+        };
+        apply(Tool::FieldOfView, &mut c, &input, VIEWPORT);
+        assert!((c.fov_deg - 30.0).abs() < 1e-9);
+        assert_eq!(c.eye, camera().eye);
+    }
+
+    #[test]
+    fn camera_tool_commands_round_trip() {
+        for id in [
+            "camera.position",
+            "camera.walk",
+            "camera.look_around",
+            "camera.field_of_view",
+        ] {
+            assert_eq!(Tool::from_command(id).unwrap().command(), id);
+        }
     }
 }

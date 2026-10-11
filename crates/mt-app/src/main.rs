@@ -3,6 +3,7 @@
 mod animation;
 mod annot;
 mod camera_cmd;
+mod camera_tools;
 mod component_dialog;
 mod confirm;
 mod document;
@@ -11,9 +12,11 @@ mod filedialog;
 mod import;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod model_info;
 mod modify;
 mod nav;
 mod overlay;
+mod preferences;
 mod selection;
 mod settings;
 mod splash;
@@ -159,6 +162,13 @@ const IMPLEMENTED: &[&str] = &[
     "view.anim_next",
     "view.anim_play",
     "view.anim_settings",
+    "camera.position",
+    "camera.walk",
+    "camera.look_around",
+    "camera.field_of_view",
+    "camera.two_point",
+    "window.model_info",
+    "window.preferences",
 ];
 
 fn main() -> eframe::Result {
@@ -291,6 +301,12 @@ struct App {
     mesh_import: Option<import::MeshImport>,
     /// View > Animation settings and playback.
     animation: animation::Animation,
+    /// Position Camera, Walk, Look Around and Field of View.
+    camera_tools: camera_tools::CameraTools,
+    /// Window > Model Info while open.
+    model_info: Option<model_info::ModelInfo>,
+    /// Window > Preferences and the settings it keeps.
+    prefs: preferences::Prefs,
 }
 
 impl App {
@@ -304,14 +320,9 @@ impl App {
             info.driver,
             info.driver_info
         );
-        let shortcuts = IMPLEMENTED
-            .iter()
-            .filter_map(|&id| {
-                let shortcut = spec.keymap.shortcut(id)?;
-                let key = egui::Key::from_name(&shortcut.key)?;
-                Some((shortcut, key, id))
-            })
-            .collect();
+        let mut spec = spec;
+        let prefs = preferences::load(&mut spec);
+        let shortcuts = preferences::shortcut_table(&spec, IMPLEMENTED);
         #[cfg(target_os = "macos")]
         let native_menu = macos_menu::NativeMenu::install(&spec, VIEW_TOGGLES);
         let mut app = Self {
@@ -380,6 +391,9 @@ impl App {
             exports: Default::default(),
             mesh_import: None,
             animation: Default::default(),
+            camera_tools: Default::default(),
+            model_info: None,
+            prefs,
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -885,6 +899,10 @@ impl App {
             let device = rs.device.clone();
             self.rebuild(&device);
         } else if self.camera_command(id) {
+        } else if id == "window.model_info" {
+            self.open_model_info();
+        } else if id == "window.preferences" {
+            self.open_preferences();
         } else if id == "file.exit" {
             self.request(ctx, frame, confirm::Pending::Exit);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -1255,11 +1273,13 @@ impl App {
         let Some(path) = path else {
             return false;
         };
+        preferences::before_save(&self.prefs, &path);
         let result = mt_kernel::export::to_skp(&doc.model)
             .map_err(|e| e.to_string())
             .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
         match result {
             Ok(()) => {
+                preferences::after_save(&path);
                 if id != "file.save_copy_as" {
                     doc.mark_saved(&path);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
@@ -1374,6 +1394,10 @@ impl App {
             Tool::ZoomWindow => {
                 self.inference = None;
                 self.zoom_window_tool(ui, &response, rect, viewport_px);
+            }
+            Tool::PositionCamera | Tool::Walk => {
+                self.inference = None;
+                self.camera_tool(ui, &response, rect, viewport_px);
             }
             _ => self.inference = None,
         }
@@ -2285,7 +2309,7 @@ impl eframe::App for App {
                 .as_ref()
                 .map(|m| m.measurement(self.inference.as_ref(), units))
                 .unwrap_or_default(),
-            _ => ("Measurements", String::new()),
+            _ => self.camera_tool_measurement(units),
         };
         let shadows_on = self
             .document
@@ -2345,6 +2369,8 @@ impl eframe::App for App {
         self.export_ui(ui.ctx(), frame);
         self.import_ui(ui.ctx(), frame);
         self.animation_ui(ui.ctx(), frame);
+        self.model_info_ui(ui.ctx(), frame);
+        self.preferences_ui(ui.ctx());
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
@@ -2381,6 +2407,8 @@ impl eframe::App for App {
                         self.engine.unlock();
                         self.selection.clear();
                         self.rebuild(&device);
+                    } else {
+                        self.camera_tool_typed(&text, units);
                     }
                 }
                 e => {

@@ -400,6 +400,7 @@ impl App {
                     target: p.target,
                     fov_deg: p.fov_deg,
                     perspective: p.perspective,
+                    two_point: false,
                 };
                 self.transition = Some(Transition::with_secs(
                     self.camera.clone(),
@@ -615,6 +616,7 @@ mod tests {
             target: DVec3::ZERO,
             fov_deg: fov,
             perspective: true,
+            two_point: false,
         }
     }
 

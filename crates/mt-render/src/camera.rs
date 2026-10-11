@@ -23,6 +23,10 @@ pub struct Camera {
     /// at the target distance, so switching projection keeps the target the same size.
     pub fov_deg: f64,
     pub perspective: bool,
+    /// Camera > Two-Point Perspective (with `perspective`): the view looks
+    /// horizontally and the lens shifts vertically so the target stays at the view
+    /// center, which keeps vertical lines vertical.
+    pub two_point: bool,
 }
 
 /// The Camera > Standard Views.
@@ -78,6 +82,7 @@ impl Camera {
             target: spec.target.into(),
             fov_deg: spec.fov_deg,
             perspective: spec.perspective,
+            two_point: false,
         }
     }
 
@@ -104,7 +109,24 @@ impl Camera {
     }
 
     pub fn view(&self) -> DMat4 {
-        look_at_rh(self.eye, self.target, self.up())
+        match self.two_point_dir() {
+            Some((horizontal, _)) => look_at_rh(self.eye, self.eye + horizontal, DVec3::Z),
+            None => look_at_rh(self.eye, self.target, self.up()),
+        }
+    }
+
+    /// Two-point perspective in effect: the horizontal view direction and the
+    /// tangent of the angle the target is above (or below) it. `None` when off, in
+    /// parallel projection, or looking (almost) straight up or down.
+    fn two_point_dir(&self) -> Option<(DVec3, f64)> {
+        if !(self.two_point && self.perspective) {
+            return None;
+        }
+        let d = self.target - self.eye;
+        let flat = DVec3::new(d.x, d.y, 0.0);
+        let len = flat.length();
+        // Beyond about 85 degrees the lens shift grows without bound.
+        (len > d.z.abs() * 0.09).then(|| (flat / len, d.z / len))
     }
 
     /// Reverse-Z projection: depth 1 at the near plane, 0 at infinity (perspective)
@@ -112,7 +134,14 @@ impl Camera {
     pub fn projection(&self, aspect: f64) -> DMat4 {
         let near = self.near();
         if self.perspective {
-            perspective_infinite_reverse_rh(self.fov_deg.to_radians(), aspect, near)
+            let mut m = perspective_infinite_reverse_rh(self.fov_deg.to_radians(), aspect, near);
+            if let Some((_, tan_pitch)) = self.two_point_dir() {
+                // Vertical lens shift: ndc.y += shift, so the target (at view-space
+                // slope `tan_pitch`) lands on the center line.
+                let h = m.y_axis.y;
+                m.z_axis.y = h * tan_pitch;
+            }
+            m
         } else {
             let half_h = self.half_height_at_target();
             let half_w = half_h * aspect;
@@ -374,7 +403,97 @@ impl Camera {
             target,
             fov_deg: self.fov_deg + (to.fov_deg - self.fov_deg) * t,
             perspective: self.perspective,
+            two_point: self.two_point,
         }
+    }
+}
+
+/// Height of a 35 mm film frame in millimeters: focal lengths typed into Field of
+/// View convert to the vertical field of view of this frame (unverified that
+/// SketchUp uses the frame height rather than its width or diagonal).
+pub const FILM_HEIGHT_MM: f64 = 24.0;
+/// Field of view range the Field of View tool allows (SketchUp's limits unverified).
+pub const MIN_FOV_DEG: f64 = 1.0;
+pub const MAX_FOV_DEG: f64 = 120.0;
+/// Degrees the view turns per pixel of Look Around drag (unverified).
+pub const LOOK_DEG_PER_PX: f64 = 0.2;
+
+/// Vertical field of view, in degrees, of a lens with focal length `mm` on 35 mm film.
+pub fn fov_from_focal_length(mm: f64) -> f64 {
+    2.0 * (FILM_HEIGHT_MM / 2.0 / mm).atan().to_degrees()
+}
+
+/// Focal length in millimeters on 35 mm film giving a vertical field of view `deg`.
+pub fn focal_length_from_fov(deg: f64) -> f64 {
+    FILM_HEIGHT_MM / 2.0 / (deg.to_radians() / 2.0).tan()
+}
+
+impl Camera {
+    /// Look Around: turns the view about the eye. Dragging right turns right and
+    /// dragging up looks up (SketchUp's drag direction is unverified). The target
+    /// stays at the same distance from the eye.
+    pub fn look_around(&mut self, delta: DVec2) {
+        let d = self.target - self.eye;
+        let r = d.length().max(1e-9);
+        let yaw = d.y.atan2(d.x) - (delta.x * LOOK_DEG_PER_PX).to_radians();
+        let max = MAX_ELEVATION_DEG.to_radians();
+        let pitch = ((d.z / r).clamp(-1.0, 1.0).asin() - (delta.y * LOOK_DEG_PER_PX).to_radians())
+            .clamp(-max, max);
+        self.target = self.eye
+            + r * DVec3::new(
+                pitch.cos() * yaw.cos(),
+                pitch.cos() * yaw.sin(),
+                pitch.sin(),
+            );
+    }
+
+    /// The view direction projected on the ground (unit), or the up direction's when
+    /// looking straight down.
+    pub fn horizontal_forward(&self) -> DVec3 {
+        let f = self.forward();
+        let flat = DVec3::new(f.x, f.y, 0.0);
+        if flat.length_squared() < 1e-12 {
+            self.up().with_z(0.0).try_normalize().unwrap_or(DVec3::Y)
+        } else {
+            flat.normalize()
+        }
+    }
+
+    /// Walk: moves `ahead` along the horizontal view direction, `side` to the right
+    /// and `rise` up, and turns `turn_deg` to the right, keeping the pitch.
+    pub fn walk(&mut self, ahead: f64, side: f64, rise: f64, turn_deg: f64) {
+        let forward = self.horizontal_forward();
+        let right = forward.cross(DVec3::Z);
+        let shift = forward * ahead + right * side + DVec3::Z * rise;
+        self.eye += shift;
+        self.target += shift;
+        if turn_deg != 0.0 {
+            let rot = glam::DQuat::from_rotation_z(-turn_deg.to_radians());
+            self.target = self.eye + rot * (self.target - self.eye);
+        }
+    }
+
+    /// Moves the eye (and the target with it) to height `z`.
+    pub fn set_eye_z(&mut self, z: f64) {
+        let dz = z - self.eye.z;
+        self.eye.z += dz;
+        self.target.z += dz;
+    }
+
+    /// Sets the field of view, clamped to the tool's range.
+    pub fn set_fov(&mut self, deg: f64) {
+        self.fov_deg = deg.clamp(MIN_FOV_DEG, MAX_FOV_DEG);
+    }
+
+    /// Parallel projection's visible height at the target.
+    pub fn view_height(&self) -> f64 {
+        2.0 * self.half_height_at_target()
+    }
+
+    /// Sets the parallel projection's visible height (through the field of view).
+    pub fn set_view_height(&mut self, h: f64) {
+        let d = self.distance().max(1e-9);
+        self.fov_deg = 2.0 * (h.max(1e-6) / 2.0 / d).atan().to_degrees();
     }
 }
 
@@ -450,6 +569,7 @@ mod tests {
             target: DVec3::new(10.0, 20.0, 0.0),
             fov_deg: 35.0,
             perspective,
+            two_point: false,
         }
     }
 
@@ -540,6 +660,7 @@ mod tests {
             target: DVec3::ZERO,
             fov_deg: 35.0,
             perspective: true,
+            two_point: false,
         };
         assert_eq!(c.right(), DVec3::X);
         assert!(c.up().distance(DVec3::Y) < 1e-12);
@@ -563,12 +684,14 @@ mod tests {
             target: DVec3::ZERO,
             fov_deg: 30.0,
             perspective: true,
+            two_point: false,
         };
         let b = Camera {
             eye: DVec3::new(10.0, 400.0, 0.0),
             target: DVec3::new(10.0, 0.0, 0.0),
             fov_deg: 60.0,
             perspective: false,
+            two_point: false,
         };
         assert_eq!(a.interpolate(&b, 0.0), a);
         assert_eq!(a.interpolate(&b, 1.0), b);
@@ -596,8 +719,102 @@ mod tests {
             target: DVec3::ZERO,
             fov_deg: 35.0,
             perspective: true,
+            two_point: false,
         };
         let mid = at(170.0).interpolate(&at(-170.0), 0.5);
         assert!(mid.eye.distance(DVec3::new(-100.0, 0.0, 0.0)) < 1e-6);
+    }
+
+    #[test]
+    fn two_point_keeps_verticals_vertical() {
+        let mut c = camera(true);
+        c.two_point = true;
+        // Looking down at the target: ordinary perspective would converge verticals.
+        assert!(c.forward().z < -0.3);
+        for (x, y) in [(0.0, 0.0), (-200.0, 150.0), (300.0, -80.0), (500.0, 400.0)] {
+            let a = c.project(DVec3::new(x, y, 0.0), VIEWPORT).unwrap();
+            let b = c.project(DVec3::new(x, y, 150.0), VIEWPORT).unwrap();
+            assert!((a.x - b.x).abs() < 1e-6, "{a} {b}");
+            assert!((a.y - b.y).abs() > 1.0);
+        }
+        // The target stays at the center and picking still agrees with drawing.
+        assert_close(c.project(c.target, VIEWPORT).unwrap(), VIEWPORT / 2.0);
+        let px = DVec2::new(321.0, 654.0);
+        let ray = c.ray(px, VIEWPORT);
+        assert_close(
+            c.project(ray.origin + ray.dir * 700.0, VIEWPORT).unwrap(),
+            px,
+        );
+        // Plain perspective does converge them.
+        c.two_point = false;
+        let a = c.project(DVec3::new(300.0, -80.0, 0.0), VIEWPORT).unwrap();
+        let b = c
+            .project(DVec3::new(300.0, -80.0, 150.0), VIEWPORT)
+            .unwrap();
+        assert!((a.x - b.x).abs() > 1.0);
+    }
+
+    #[test]
+    fn two_point_off_in_parallel_and_straight_down() {
+        let mut c = camera(false);
+        c.two_point = true;
+        assert_eq!(c.view_proj(1.5), camera(false).view_proj(1.5));
+        let mut down = Camera {
+            eye: DVec3::new(0.0, 0.0, 100.0),
+            target: DVec3::ZERO,
+            fov_deg: 35.0,
+            perspective: true,
+            two_point: true,
+        };
+        let plain = down.view_proj(1.5);
+        down.two_point = false;
+        assert_eq!(plain, down.view_proj(1.5));
+    }
+
+    #[test]
+    fn focal_length_and_fov_convert() {
+        // 50 mm on 35 mm film: about 27 degrees vertically.
+        assert!((fov_from_focal_length(50.0) - 26.991).abs() < 1e-3);
+        for deg in [10.0, 35.0, 60.0, 100.0] {
+            assert!((fov_from_focal_length(focal_length_from_fov(deg)) - deg).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn look_around_turns_about_the_eye() {
+        let mut c = camera(true);
+        let (eye, d) = (c.eye, c.distance());
+        let f = c.horizontal_forward();
+        c.look_around(DVec2::new(90.0 / LOOK_DEG_PER_PX, 0.0));
+        assert_eq!(c.eye, eye);
+        assert!((c.distance() - d).abs() < 1e-9);
+        // A quarter turn to the right.
+        assert!(c.horizontal_forward().distance(f.cross(DVec3::Z)) < 1e-9);
+        c.look_around(DVec2::new(0.0, -10_000.0));
+        assert!(c.forward().z > 0.99 && c.up().z > 0.0);
+    }
+
+    #[test]
+    fn walk_moves_horizontally_and_turns() {
+        let mut c = camera(true);
+        let (eye, f) = (c.eye, c.horizontal_forward());
+        let pitch = c.forward().z;
+        c.walk(10.0, 0.0, 0.0, 0.0);
+        assert!(c.eye.distance(eye + f * 10.0) < 1e-9);
+        c.walk(0.0, 0.0, 5.0, 0.0);
+        assert!((c.eye.z - eye.z - 5.0).abs() < 1e-9);
+        c.walk(0.0, 0.0, 0.0, -90.0);
+        assert!(c.horizontal_forward().distance(-f.cross(DVec3::Z)) < 1e-9);
+        assert!((c.forward().z - pitch).abs() < 1e-9);
+        c.set_eye_z(66.0);
+        assert_eq!(c.eye.z, 66.0);
+        assert!((c.forward().z - pitch).abs() < 1e-9);
+    }
+
+    #[test]
+    fn view_height_round_trips() {
+        let mut c = camera(false);
+        c.set_view_height(250.0);
+        assert!((c.view_height() - 250.0).abs() < 1e-9);
     }
 }

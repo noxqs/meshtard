@@ -21,10 +21,13 @@ pub struct Document {
     saved_camera: Option<mt_skp::ViewCamera>,
     /// Unit for typed and displayed lengths.
     pub units: mt_infer::units::LengthUnit,
+    /// The rest of Model Info > Units (format, precision, snapping). Not written to
+    /// the .skp: the writer keeps its scaffold's units.
+    pub unit_options: mt_infer::units::UnitsOptions,
     /// The model and edit context before each edit, most recent last (Edit > Undo).
-    undo: Vec<(Model, Vec<usize>, u64)>,
+    undo: Vec<Snapshot>,
     /// Undone states, most recent last (Edit > Redo).
-    redo: Vec<(Model, Vec<usize>, u64)>,
+    redo: Vec<Snapshot>,
     /// Id of the current model state, and of the last saved one (unsaved changes when
     /// they differ).
     state: u64,
@@ -39,6 +42,11 @@ pub struct Document {
     /// Not part of undo: an undo can leave it naming other entities.
     last_hidden: Option<(Vec<usize>, Vec<Owner>)>,
 }
+
+/// A state Undo and Redo go back to: the model, the edit context, the state id and
+/// the units.
+type Snapshot = (Model, Vec<usize>, u64, Units);
+type Units = (mt_infer::units::LengthUnit, mt_infer::units::UnitsOptions);
 
 /// Undo steps kept.
 const UNDO_LIMIT: usize = 100;
@@ -160,15 +168,26 @@ const GUIDE_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 impl Document {
     pub fn open(path: &Path) -> Result<Self, mt_skp::Error> {
         let src = mt_skp::read(path)?;
+        let units = src
+            .units
+            .as_deref()
+            .and_then(mt_infer::units::LengthUnit::from_name)
+            .unwrap_or(mt_infer::units::LengthUnit::Inch);
         Ok(Self {
             path: path.to_owned(),
             model: import::from_skp(&src),
-            units: src
-                .units
-                .as_deref()
-                .and_then(mt_infer::units::LengthUnit::from_name)
-                .unwrap_or(mt_infer::units::LengthUnit::Inch),
+            units,
             saved_camera: src.camera,
+            // The reader gets only the unit; whole millimeters as in SketchUp's
+            // metric templates (unverified), two decimals otherwise.
+            unit_options: mt_infer::units::UnitsOptions {
+                precision: if units == mt_infer::units::LengthUnit::Millimeter {
+                    0
+                } else {
+                    2
+                },
+                ..Default::default()
+            },
             undo: Vec::new(),
             redo: Vec::new(),
             context: Vec::new(),
@@ -187,6 +206,7 @@ impl Document {
             model: Model::default(),
             saved_camera: None,
             units: mt_infer::units::LengthUnit::Inch,
+            unit_options: Default::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             context: Vec::new(),
@@ -281,7 +301,12 @@ impl Document {
     /// Like `edit`, with the rest of the model too. The active context's entities are
     /// taken out of the model while `f` runs (the model holds an empty one there).
     pub fn edit_model(&mut self, f: impl FnOnce(&mut Model, &mut Entities) -> bool) -> bool {
-        let before = (self.model.clone(), self.context.clone(), self.state);
+        let before = (
+            self.model.clone(),
+            self.context.clone(),
+            self.state,
+            (self.units, self.unit_options),
+        );
         let def =
             Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied());
         let mut ents = match def {
@@ -295,16 +320,64 @@ impl Document {
             None => {}
         }
         if changed {
-            self.undo.push(before);
-            if self.undo.len() > UNDO_LIMIT {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
-            self.state = self.next_state;
-            self.next_state += 1;
+            self.record(before);
             self.fix_context();
         }
         changed
+    }
+
+    /// An edit of the whole model (every definition, materials, tags) as one undo
+    /// step, whatever context is open.
+    pub fn edit_whole(&mut self, f: impl FnOnce(&mut Model) -> bool) -> bool {
+        let before = (
+            self.model.clone(),
+            self.context.clone(),
+            self.state,
+            (self.units, self.unit_options),
+        );
+        let changed = f(&mut self.model);
+        if changed {
+            self.record(before);
+            self.fix_context();
+        }
+        changed
+    }
+
+    /// Id of the current state: it changes with every edit, undo and redo.
+    pub fn state_id(&self) -> u64 {
+        self.state
+    }
+
+    fn record(&mut self, before: Snapshot) {
+        self.undo.push(before);
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.state = self.next_state;
+        self.next_state += 1;
+    }
+
+    /// Model Info > Units: sets the unit and options as one undo step. Returns
+    /// whether anything changed.
+    pub fn set_units(
+        &mut self,
+        units: mt_infer::units::LengthUnit,
+        options: mt_infer::units::UnitsOptions,
+    ) -> bool {
+        if (units, options) == (self.units, self.unit_options) {
+            return false;
+        }
+        let before = (
+            self.model.clone(),
+            self.context.clone(),
+            self.state,
+            (self.units, self.unit_options),
+        );
+        self.units = units;
+        self.unit_options = options;
+        self.record(before);
+        true
     }
 
     pub fn can_undo(&self) -> bool {
@@ -316,31 +389,35 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some((model, context, state)) = self.undo.pop() else {
+        let Some(snapshot) = self.undo.pop() else {
             return false;
         };
-        let now = (
-            std::mem::replace(&mut self.model, model),
-            std::mem::replace(&mut self.context, context),
-            std::mem::replace(&mut self.state, state),
-        );
+        let now = self.restore(snapshot);
         self.redo.push(now);
         self.fix_context();
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some((model, context, state)) = self.redo.pop() else {
+        let Some(snapshot) = self.redo.pop() else {
             return false;
         };
-        let now = (
-            std::mem::replace(&mut self.model, model),
-            std::mem::replace(&mut self.context, context),
-            std::mem::replace(&mut self.state, state),
-        );
+        let now = self.restore(snapshot);
         self.undo.push(now);
         self.fix_context();
         true
+    }
+
+    /// Makes `snapshot` current; returns the state it replaced.
+    fn restore(&mut self, (model, context, state, units): Snapshot) -> Snapshot {
+        let old_units = (self.units, self.unit_options);
+        (self.units, self.unit_options) = units;
+        (
+            std::mem::replace(&mut self.model, model),
+            std::mem::replace(&mut self.context, context),
+            std::mem::replace(&mut self.state, state),
+            old_units,
+        )
     }
 
     pub fn title(&self) -> String {
@@ -362,6 +439,7 @@ impl Document {
             target: c.target.into(),
             fov_deg: c.fov,
             perspective: !c.parallel,
+            two_point: false,
         };
         // Parallel views store their visible height; our camera derives it from the
         // field of view at the target distance.
@@ -912,6 +990,7 @@ impl Document {
             target: center,
             fov_deg,
             perspective: true,
+            two_point: false,
         })
     }
 }
@@ -943,6 +1022,29 @@ mod tests {
         doc.undo();
         doc.edit(|root| !mt_kernel::add_line(root, a, DVec3::Y).is_empty());
         assert!(!doc.can_redo(), "a new edit clears redo");
+    }
+
+    #[test]
+    fn units_change_is_one_undo_step() {
+        use mt_infer::units::{LengthFormat, LengthUnit, UnitsOptions};
+        let mut doc = Document::untitled();
+        let opts = UnitsOptions {
+            format: LengthFormat::Decimal,
+            precision: 0,
+            ..Default::default()
+        };
+        assert!(doc.set_units(LengthUnit::Millimeter, opts));
+        assert!(!doc.set_units(LengthUnit::Millimeter, opts), "no change");
+        assert!(doc.is_modified());
+        assert!(doc.undo());
+        assert_eq!(doc.units, LengthUnit::Inch);
+        assert_eq!(doc.unit_options, UnitsOptions::default());
+        assert!(!doc.can_undo());
+        assert!(doc.redo());
+        assert_eq!(
+            (doc.units, doc.unit_options),
+            (LengthUnit::Millimeter, opts)
+        );
     }
 
     #[test]

@@ -970,6 +970,7 @@ mod tests {
             target: DVec3::new(50.0, 50.0, 0.0),
             fov_deg: 35.0,
             perspective: true,
+            two_point: false,
         }
     }
 
