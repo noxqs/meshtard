@@ -9,6 +9,7 @@ mod camera_tools;
 mod commands;
 mod component_dialog;
 mod confirm;
+mod cursor;
 mod document;
 mod export;
 mod filedialog;
@@ -1465,6 +1466,7 @@ impl App {
             }
             _ => self.inference = None,
         }
+        self.tool_cursor(ui, &response, rect, viewport_px);
         self.update_live(&render_state.device);
 
         self.viewport.render(

@@ -83,6 +83,16 @@ pub trait ModifyTool {
     /// (Push/Pull) for the rest of the tool's use (SketchUp keeps the toggle while the
     /// tool is active; unverified).
     fn toggle_ctrl(&mut self) {}
+    /// The Ctrl toggle is on as copy (Move, Rotate) or new faces (Push/Pull): the
+    /// cursor shows a plus.
+    fn copy_mode(&self) -> bool {
+        false
+    }
+    /// The next click must be on a face (Push/Pull's first click): the cursor shows
+    /// "not allowed" elsewhere.
+    fn needs_face(&self) -> bool {
+        false
+    }
     /// A double click (after the click it also is). Returns whether the model changed.
     fn double_click(&mut self, _ctx: &mut Ctx, _inf: &Inference) -> bool {
         false
@@ -348,6 +358,14 @@ impl ModifyTool for PushPull {
         self.new_faces = !self.new_faces;
     }
 
+    fn copy_mode(&self) -> bool {
+        self.new_faces
+    }
+
+    fn needs_face(&self) -> bool {
+        self.start.is_none()
+    }
+
     /// SketchUp: double-clicking a face pushes or pulls it by the last distance.
     fn double_click(&mut self, ctx: &mut Ctx, _inf: &Inference) -> bool {
         let (Some(d), Some(Owner::Face(f))) = (self.last, ctx.picked) else {
@@ -591,6 +609,10 @@ impl ModifyTool for Transform {
 
     fn toggle_ctrl(&mut self) {
         self.copy = !self.copy;
+    }
+
+    fn copy_mode(&self) -> bool {
+        self.copy
     }
 
     fn cancel(&mut self) {

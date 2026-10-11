@@ -215,7 +215,9 @@ Reading first means real SketchUp models are available for testing everything el
 
 ### M15: Toolbars and cursors (FEATURES.md items 40, 41)
 - [x] Item 40: the remaining View > Toolbars toolbars (Standard, Views, Camera, Styles, Edit, Drawing, Principal, Construction, Section, Solid Tools, Tags, Shadows, Sandbox, Measurements), hidden by default, dockable and floating like the others, with own icons for every button; widget items (tag dropdown, shadow sliders, Measurements box) in `toolbars.toml`.
-- [ ] Item 41: mouse cursors per tool and modifier (drawn by meshtard over the viewport).
+- [x] Item 41: mouse cursors per tool and modifier (drawn by meshtard over the viewport); left: Paint Bucket fill-mode badges, Follow Me path, Scale grip resize, busy cursor.
+- [x] Dialogs: one Windows-11-style dialog (draggable title bar, close button, border, shadow, dimmed backdrop) for every dialog in mt-app; Toolbars and Manage Trays windows still to convert.
+- [x] Splash at the image's size; "Meshtard" in UI text.
 
 ## Risks
 
