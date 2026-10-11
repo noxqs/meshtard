@@ -10,6 +10,7 @@ mod confirm;
 mod document;
 mod export;
 mod filedialog;
+mod image_entity;
 mod import;
 #[cfg(target_os = "macos")]
 mod macos_menu;
@@ -20,11 +21,13 @@ mod nav;
 mod overlay;
 mod pick_tool;
 mod preferences;
+mod sandbox;
 mod selection;
 mod settings;
 mod soften;
 mod solid_tools;
 mod splash;
+mod text3d;
 mod tools;
 mod tray;
 
@@ -187,6 +190,9 @@ const IMPLEMENTED: &[&str] = &[
     "camera.two_point",
     "window.model_info",
     "window.preferences",
+    "tool.sandbox_from_scratch",
+    "tool.sandbox_from_contours",
+    "tool.text_3d",
 ];
 
 fn main() -> eframe::Result {
@@ -924,7 +930,10 @@ impl App {
             // Display settings; not undo steps in this draft.
             let device = rs.device.clone();
             self.rebuild(&device);
-        } else if self.camera_command(id) || self.extra_command(ctx, frame, id) {
+        } else if self.camera_command(id)
+            || self.extra_command(ctx, frame, id)
+            || self.m13_command(ctx, frame, id)
+        {
         } else if id == "window.model_info" {
             self.open_model_info();
         } else if id == "window.preferences" {
@@ -2250,7 +2259,14 @@ impl App {
                 let def = doc.model.definitions.get(inst.definition);
                 let group = def.is_some_and(|d| d.is_group);
                 let mut info = mt_ui::EntityInfo {
-                    title: if group { "Group" } else { "Component" }.into(),
+                    title: if def.is_some_and(|d| d.is_image) {
+                        "Image"
+                    } else if group {
+                        "Group"
+                    } else {
+                        "Component"
+                    }
+                    .into(),
                     rows: vec![
                         ("Instance".into(), inst.name.clone()),
                         (
@@ -2411,6 +2427,7 @@ impl eframe::App for App {
         self.make_component_ui(ui.ctx(), frame);
         self.export_ui(ui.ctx(), frame);
         self.import_ui(ui.ctx(), frame);
+        self.text3d_ui(ui.ctx(), frame);
         self.animation_ui(ui.ctx(), frame);
         self.model_info_ui(ui.ctx(), frame);
         self.preferences_ui(ui.ctx());
@@ -2464,6 +2481,7 @@ impl eframe::App for App {
                 }
             }
         }
+        self.apply_model_edit(frame);
     }
 }
 

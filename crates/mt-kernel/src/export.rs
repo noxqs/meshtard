@@ -14,6 +14,8 @@
 //!   shadow settings, units and the active section plane are not saved.
 //! - Guides and section planes inside definitions are not saved (the writer has no
 //!   definition-level calls for them).
+//! - Image entities are saved as groups with their textured face (they reopen as
+//!   groups; see `write_body`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -325,7 +327,10 @@ fn write_body(
             continue;
         };
         if let Some(def) = written.get(&inst.definition) {
-            sink.instance(def, &placement(inst, maps), d.is_group)?;
+            // Image entities are saved as groups holding their textured face: the
+            // writer's `add_image` must come before definitions and tags but registers
+            // a definition itself, so it cannot be mixed with them.
+            sink.instance(def, &placement(inst, maps), d.is_group || d.is_image)?;
         }
     }
     Ok(())

@@ -36,6 +36,10 @@ pub struct Definition {
     /// apart from components). Imported from the `Group#n` names SketchUp gives group
     /// definitions (unverified that every group follows this).
     pub is_group: bool,
+    /// An image entity's definition (File > Import of a PNG/JPEG, or a `CImage` read
+    /// from a file): one face painted with the image, placed like a component, not
+    /// opened for editing; Explode leaves the textured face.
+    pub is_image: bool,
     /// Component behavior "Glue to": instances placed on a face lie in its plane.
     pub glue: GlueTo,
 }

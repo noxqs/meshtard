@@ -282,6 +282,11 @@ impl Document {
         if self.active().instances.get(index).is_none_or(|i| i.locked) {
             return false;
         }
+        // Neither are images (SketchUp offers Explode instead).
+        let def = self.active().instances[index].definition;
+        if self.model.definitions.get(def).is_some_and(|d| d.is_image) {
+            return false;
+        }
         self.context.push(index);
         true
     }

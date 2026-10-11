@@ -117,7 +117,16 @@ pub trait ModifyTool {
     fn ghost(&self, _cur: &Inference) -> Option<DMat4> {
         None
     }
+    /// A change that needs the whole model (new definitions and materials: Sandbox
+    /// grids, images), made by the app as one undo step after the click or typed
+    /// value that completed it. It returns the entities to select.
+    fn take_model_edit(&mut self) -> Option<ModelEdit> {
+        None
+    }
 }
+
+/// See [`ModifyTool::take_model_edit`].
+pub type ModelEdit = Box<dyn FnOnce(&mut mt_kernel::Model, &mut Entities) -> Vec<Owner>>;
 
 pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
     Some(match id {
@@ -130,6 +139,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.paint_bucket" => Box::new(PaintBucket::default()),
         "tool.section_plane" => Box::new(SectionPlaneTool),
         "tool.axes" => Box::new(crate::component_dialog::AxesPick::model_axes()),
+        "tool.sandbox_from_scratch" => Box::new(crate::sandbox::FromScratch::default()),
         _ => return None,
     })
 }

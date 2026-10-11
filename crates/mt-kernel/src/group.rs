@@ -97,7 +97,17 @@ pub fn copy_raw(
         let normal = (normal_xf * face.normal).normalize_or_zero();
         let outer = map_loop(&face.outer);
         let holes = face.holes.iter().map(map_loop).collect();
-        dst.add_raw_face(outer, holes, normal, face.attrs.clone());
+        let mut attrs = face.attrs.clone();
+        // Positioned textures stay on the same points of the face.
+        if let Some(uv) = attrs.uv.as_deref_mut()
+            && xf != DMat4::IDENTITY
+            && let Some(&p) = src.loop_points(&face.outer).first()
+        {
+            for side in [&mut uv.front, &mut uv.back].into_iter().flatten() {
+                *side = crate::texture::transform_uv(side, face.normal, normal, p, xf);
+            }
+        }
+        dst.add_raw_face(outer, holes, normal, attrs);
     }
     vmap.into_values().collect()
 }
@@ -250,6 +260,7 @@ pub fn make_group_with_frame(
         guid: new_guid(defs.len()),
         entities: inner,
         is_group,
+        is_image: false,
         glue: crate::model::GlueTo::None,
     });
     ents.instances.push(Instance {

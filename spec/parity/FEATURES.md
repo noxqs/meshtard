@@ -40,7 +40,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 15. [x] **Export 3D Model (OBJ, STL, glTF/DAE)** (`file.export_3d`) M.
     Triangulate with `tessellate.rs`; OBJ+MTL with textures first, STL for printing, then COLLADA (SketchUp's main exchange format). Trial: export options per format. Done in `mt_kernel::mesh_export` (OBJ+MTL+textures, binary STL, COLLADA 1.4.1); glTF not done; edges, guides and annotations are not exported; colorized textures are written as the stored image.
 16. [x] **Import (OBJ, STL, images, .skp as component)** (`file.import`) M.
-    .skp import as a component definition (reader exists); OBJ/STL to faces with merge; images as image entities or textures (needs image entity, see 30). Done for .skp (Place Component), OBJ (MTL colors, no texture maps) and STL (`mt_kernel::mesh_import`, `crates/mt-app/src/import.rs`). Images are not imported yet: they wait for the image entity of item 30.
+    .skp import as a component definition (reader exists); OBJ/STL to faces with merge; images as image entities or textures (needs image entity, see 30). Done for .skp (Place Component), OBJ (MTL colors, no texture maps) and STL (`mt_kernel::mesh_import`, `crates/mt-app/src/import.rs`). PNG/JPEG images are imported as image entities (item 30).
 17. [x] **Scenes from the View > Animation menu** (`view.anim_*`) S.
     Scenes and transitions exist in the tray; add Add/Update/Delete/Previous/Next/Play and the Settings dialog (transition time, scene delay). Trial: Update Scene's property dialog. Done (`crates/mt-app/src/animation.rs`); Update Scene updates at once (no property dialog); settings are not saved in the file.
 18. [x] **Tag tool and Window > Tags shortcuts** (`tool.tag`) S.
@@ -68,9 +68,9 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 
 ## Tier 3: presentation and less frequent work
 
-29. [ ] **Sandbox From Scratch / From Contours** (`tool.sandbox_*`) M. Grid of triangles; contours via triangulation of curve points (Delaunay). Also Smoove/Stamp/Drape tools later.
-30. [ ] **Images and Match New Photo** (`camera.match_new_photo`) L. Needs an image entity type (read/write in the file), then the match-photo vanishing-point UI.
-31. [ ] **3D Text** (`tool.text_3d`) M. Font outlines (ttf-parser) to faces, extrude; dialog with font, height, extrude, filled.
+29. [x] **Sandbox From Scratch / From Contours** (`tool.sandbox_*`) M. Grid of triangles; contours via triangulation of curve points (Delaunay). Also Smoove/Stamp/Drape tools later. Done (`crates/mt-app/src/sandbox.rs`, `mt_kernel::terrain`, `mt_kernel::delaunay`): grid spacing typed first (default 10' / 3 m, unverified), three clicks; From Contours triangulates the selected edges' vertices. Smoove, Stamp, Drape, Add Detail, Flip Edge not done.
+30. [ ] **Images and Match New Photo** (`camera.match_new_photo`) L. Needs an image entity type (read/write in the file), then the match-photo vanishing-point UI. Part 1 done (`crates/mt-app/src/image_entity.rs`): image entities from File > Import of PNG/JPEG, placed with two clicks, textured, Explode to a textured face; read from .skp files but saved as groups with their textured face (the writer cannot mix `add_image` with definitions). Match New Photo is still grey.
+31. [x] **3D Text** (`tool.text_3d`) M. Font outlines (ttf-parser) to faces, extrude; dialog with font, height, extrude, filled. Done (`crates/mt-app/src/text3d.rs`, `mt_kernel::text3d`): bundled fonts Ubuntu Light (Ubuntu Font Licence 1.0) and Hack (MIT / Bitstream Vera) from `epaint_default_fonts`, plus system fonts; the result is a component placed with Place Component.
 32. [ ] **Export Section Slice (DXF/DWG)** (`file.export_section`) M. Section cut lines to DXF (DWG is proprietary: DXF only).
 33. [ ] **Export Animation (MP4/image sequence)** (`file.export_animation`) M. Offscreen render each frame of scene transitions; image sequence first, video via an encoder later.
 34. [ ] **Print / Print Preview / Print Setup** (`file.print*`) M. Offscreen render to PDF (printpdf) or the OS print dialog. Trial: scale options.

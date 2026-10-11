@@ -57,6 +57,7 @@ impl Tool {
             "tool.paint_bucket" => Self::Modify("tool.paint_bucket"),
             "tool.section_plane" => Self::Modify("tool.section_plane"),
             "tool.axes" => Self::Modify("tool.axes"),
+            "tool.sandbox_from_scratch" => Self::Modify("tool.sandbox_from_scratch"),
             "tool.tag" => Self::Pick("tool.tag"),
             "tool.outer_shell" => Self::Pick("tool.outer_shell"),
             "tool.solid_intersect" => Self::Pick("tool.solid_intersect"),

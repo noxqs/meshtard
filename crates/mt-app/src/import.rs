@@ -9,7 +9,8 @@
 //!   group at the open context's origin, in one undo step, selected. Default units
 //!   (STL millimeters, OBJ meters) and Y up for OBJ are guesses (unverified); MTL
 //!   colors become materials, texture maps are not read.
-//! - Images (as image entities or textures) are not imported yet (FEATURES.md item 30).
+//! - PNG and JPEG images become image entities placed with two clicks
+//!   (`image_entity`); importing an image as a texture or a matched photo is not done.
 
 use std::path::PathBuf;
 
@@ -31,11 +32,15 @@ pub(crate) struct MeshImport {
     merge: bool,
 }
 
-const FILTERS: [(&str, &[&str]); 4] = [
-    ("All Supported Types", &["skp", "obj", "stl"]),
+const FILTERS: [(&str, &[&str]); 5] = [
+    (
+        "All Supported Types",
+        &["skp", "obj", "stl", "png", "jpg", "jpeg"],
+    ),
     ("SketchUp Models (*.skp)", &["skp"]),
     ("OBJ Files (*.obj)", &["obj"]),
     ("STL Files (*.stl)", &["stl"]),
+    ("Images (*.png, *.jpg)", &["png", "jpg", "jpeg"]),
 ];
 
 /// Reads and converts an OBJ or STL file. Returns the mesh materials and the faces
@@ -74,6 +79,7 @@ impl App {
             .unwrap_or_default();
         match ext.as_str() {
             "skp" => self.import_skp(&path, device),
+            "png" | "jpg" | "jpeg" => self.import_image(&path),
             "obj" | "stl" => {
                 let stl = ext == "stl";
                 self.mesh_import = Some(MeshImport {

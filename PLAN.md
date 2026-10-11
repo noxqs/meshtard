@@ -197,13 +197,15 @@ Reading first means real SketchUp models are available for testing everything el
 
 ### M11: File exchange (FEATURES.md items 14-17)
 - [x] Export 2D, Export 3D, Import, View > Animation commands.
-- Not done: glTF export, image import (waits for the image entity, item 30), OBJ texture import, animation settings saved in the file.
+- Not done: glTF export, OBJ texture import, animation settings saved in the file.
 
 ### M12: Solid Tools and modeling extras (FEATURES.md items 13, 18-28)
 - [x] Solid Tools (kernel booleans, about 0.7% of near-degenerate random cases refused), Tag and Axes tools, camera tools, Two-Point Perspective, Model Info, Preferences, Revert, Component Edit hiding, Intersect With Context, Soften Edges.
 - Not saved in the .skp yet: model axes, units (writer keeps its template's units), two-point.
 
 ### M13: Presentation and the rest (FEATURES.md Tier 3)
+- [x] Sandbox From Scratch and From Contours (Delaunay TIN), 3D Text (ttf-parser outlines, bundled Ubuntu Light and Hack), image entities from File > Import (PNG/JPEG) with Explode to a textured face (FEATURES.md items 29, 31, 30 part 1).
+- Not done: Match New Photo, Smoove/Stamp/Drape, images saved as image entities (they are saved as groups).
 
 ## Risks
 

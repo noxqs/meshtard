@@ -108,6 +108,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
             guid: d.guid.clone(),
             entities: Entities::new(),
             is_group: d.name.starts_with("Group#"),
+            is_image: d.is_image,
         });
         maps.definitions.insert(id, key);
     }
