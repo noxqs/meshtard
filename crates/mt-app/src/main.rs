@@ -12,6 +12,7 @@ mod confirm;
 mod context_menu;
 mod cursor;
 mod document;
+mod entity_info;
 mod export;
 mod filedialog;
 mod flip;
@@ -19,6 +20,7 @@ mod image_entity;
 mod import;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod material_edit;
 mod model_axes;
 mod model_info;
 mod modify;
@@ -41,6 +43,7 @@ mod splash;
 mod spring;
 mod templates;
 mod text3d;
+mod texture_position;
 mod tools;
 mod tray;
 
@@ -101,6 +104,7 @@ const IMPLEMENTED: &[&str] = &[
     "tool.follow_me",
     "tool.paint_bucket",
     "tool.flip",
+    "tool.texture_position",
     "edit.intersect_model",
     "edit.intersect_selection",
     "edit.create_group",
@@ -388,6 +392,8 @@ struct App {
     present: presentation::Presentation,
     /// The viewport's right-click menu.
     ctx_menu: context_menu::ContextMenu,
+    /// Texture Position and externally edited textures.
+    textures: texture_position::Textures,
 }
 
 impl App {
@@ -483,6 +489,7 @@ impl App {
             prefs,
             present: Default::default(),
             ctx_menu: Default::default(),
+            textures: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -944,6 +951,7 @@ impl App {
             || self.extra_command(ctx, frame, id)
             || self.m13_command(ctx, frame, id)
             || self.presentation_command(ctx, frame, id)
+            || self.texture_command(frame, id)
         {
         } else if id == "window.model_info" {
             self.open_model_info();
@@ -1433,7 +1441,11 @@ impl App {
         if self.transition.is_none() {
             self.camera_history.track(&before, &self.camera);
         }
-        match self.tool {
+        // Texture Position takes the mouse while it runs (the tools below then see a
+        // navigation tool, which does nothing here).
+        let texpos =
+            self.texture_position_input(ui, &response, rect, viewport_px, &render_state.device);
+        match if texpos { Tool::Pan } else { self.tool } {
             Tool::Select => {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
@@ -1495,6 +1507,7 @@ impl App {
         self.draw_selection_box(ui, &response, rect);
         self.draw_zoom_box(ui, &response, rect);
         self.pick_overlay(ui, rect);
+        self.texture_position_paint(ui, rect, viewport_px);
         if self.annotations(ui, rect, viewport_px) {
             self.rebuild(&render_state.device);
         }
@@ -2259,123 +2272,6 @@ fn wheel_notches(events: &[egui::Event]) -> f32 {
         .sum()
 }
 
-impl App {
-    /// What the Entity Info panel shows for the current selection.
-    fn entity_info(&self) -> mt_ui::EntityInfo {
-        let items = self.selection.items();
-        let Some(doc) = &self.document else {
-            return mt_ui::EntityInfo::no_selection();
-        };
-        let root = doc.active();
-        let inches = |v: f64| format!("{v:.3}\"");
-        // All selected edges belong to one curve: describe the curve.
-        let curve = items.first().and_then(|o| match o {
-            Owner::Edge(e) => root.edges.get(*e).and_then(|x| x.attrs.curve),
-            _ => None,
-        });
-        if let Some(c) = curve
-            && let Some(cv) = root.curves.get(c)
-            && items.iter().all(|o| matches!(o, Owner::Edge(e) if root.edges.get(*e).and_then(|x| x.attrs.curve) == Some(c)))
-        {
-            let units = doc.units;
-            let segments = ("Segments".to_owned(), items.len().to_string());
-            return match cv.arc {
-                Some(arc) => mt_ui::EntityInfo {
-                    title: if arc.is_circle() { "Circle" } else { "Arc" }.into(),
-                    rows: vec![("Radius".into(), units.format(arc.radius)), segments],
-                },
-                None => mt_ui::EntityInfo { title: "Curve".into(), rows: vec![segments] },
-            };
-        }
-        match items {
-            [] => mt_ui::EntityInfo::no_selection(),
-            [Owner::Edge(e)] if root.edges.contains_key(*e) => {
-                let edge = &root.edges[*e];
-                let len = root.pos(edge.start).distance(root.pos(edge.end));
-                mt_ui::EntityInfo {
-                    title: "Edge".into(),
-                    rows: vec![
-                        ("Length".into(), inches(len)),
-                        (
-                            "Soft".into(),
-                            if edge.attrs.soft { "Yes" } else { "No" }.into(),
-                        ),
-                    ],
-                }
-            }
-            [Owner::Face(f)] if root.faces.contains_key(*f) => {
-                let tris = mt_kernel::tessellate::triangulate(root, *f);
-                let area: f64 = tris
-                    .iter()
-                    .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() / 2.0)
-                    .sum();
-                mt_ui::EntityInfo {
-                    title: "Face".into(),
-                    rows: vec![("Area".into(), format!("{area:.3} sq in"))],
-                }
-            }
-            [Owner::Instance(i)] if *i < root.instances.len() => {
-                let inst = &root.instances[*i];
-                let def = doc.model.definitions.get(inst.definition);
-                let group = def.is_some_and(|d| d.is_group);
-                let mut info = mt_ui::EntityInfo {
-                    title: if def.is_some_and(|d| d.is_image) {
-                        "Image"
-                    } else if group {
-                        "Group"
-                    } else {
-                        "Component"
-                    }
-                    .into(),
-                    rows: vec![
-                        ("Instance".into(), inst.name.clone()),
-                        (
-                            "Definition".into(),
-                            def.map(|d| d.name.clone()).unwrap_or_default(),
-                        ),
-                        (
-                            "Locked".into(),
-                            if inst.locked { "Yes" } else { "No" }.into(),
-                        ),
-                    ],
-                };
-                solid_tools::describe(doc, inst, &mut info);
-                info
-            }
-            [Owner::Section(i)] if *i < root.section_planes.len() => mt_ui::EntityInfo {
-                title: "Section Plane".into(),
-                rows: vec![
-                    ("Name".into(), root.section_planes[*i].name.clone()),
-                    (
-                        "Active".into(),
-                        if root.active_section == Some(*i) {
-                            "Yes"
-                        } else {
-                            "No"
-                        }
-                        .into(),
-                    ),
-                ],
-            },
-            [Owner::Dimension(i)] if *i < root.dimensions.len() => mt_ui::EntityInfo {
-                title: "Dimension".into(),
-                rows: vec![(
-                    "Text".into(),
-                    annot::dimension_label(&root.dimensions[*i], doc.units),
-                )],
-            },
-            [Owner::Text(i)] if *i < root.texts.len() => mt_ui::EntityInfo {
-                title: "Text".into(),
-                rows: vec![("Text".into(), root.texts[*i].text.clone())],
-            },
-            _ => mt_ui::EntityInfo {
-                title: format!("{} Entities", items.len()),
-                rows: Vec::new(),
-            },
-        }
-    }
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let Some(mut shell) = self.shell.take() else {
@@ -2549,6 +2445,12 @@ impl eframe::App for App {
             }
         }
         self.apply_model_edit(frame);
+        if self.poll_external_texture(ui.ctx())
+            && let Some(rs) = frame.wgpu_render_state()
+        {
+            let device = rs.device.clone();
+            self.rebuild(&device);
+        }
     }
 }
 

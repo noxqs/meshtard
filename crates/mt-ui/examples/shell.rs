@@ -63,6 +63,7 @@ fn material(name: &str, color: [u8; 3], opacity: u8) -> MaterialRow {
         name: name.to_owned(),
         color,
         opacity,
+        texture: None,
     }
 }
 
@@ -219,14 +220,18 @@ impl eframe::App for Demo {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shell.capture_typing(ui.ctx());
         let info = if self.tool == "tool.line" {
-            EntityInfo {
+            let mut info = EntityInfo {
                 title: "Edge".to_owned(),
-                rows: vec![
-                    ("Tag".to_owned(), "Untagged".to_owned()),
-                    ("Length".to_owned(), "1000 mm".to_owned()),
-                    ("Soft".to_owned(), "No".to_owned()),
-                ],
-            }
+                ..Default::default()
+            };
+            info.field(
+                "length",
+                "Length",
+                mt_ui::InfoValue::Text("1000 mm".to_owned()),
+            );
+            info.field("soft", "Soft", mt_ui::InfoValue::Check(false));
+            info.field("smooth", "Smooth", mt_ui::InfoValue::Check(false));
+            info
         } else {
             EntityInfo::no_selection()
         };

@@ -43,6 +43,9 @@ pub struct TrayData {
     /// Index into `components` of the definition the panel shows and edits (last
     /// picked, or the definition of the selected instance); `None` = none.
     pub current_component: Option<usize>,
+    /// One face with a textured material is selected: the Materials panel's Position
+    /// Texture button (command `tool.texture_position`) is enabled.
+    pub can_position_texture: bool,
 }
 
 impl Default for TrayData {
@@ -68,6 +71,7 @@ impl Default for TrayData {
             entity_tag: None,
             components: Vec::new(),
             current_component: None,
+            can_position_texture: false,
         }
     }
 }
@@ -88,6 +92,107 @@ pub struct MaterialRow {
     pub color: [u8; 3],
     /// Opacity in percent, 0..=100 (SketchUp's Opacity slider works in whole percent).
     pub opacity: u8,
+    /// The texture image, `None` for a plain color.
+    pub texture: Option<TextureRow>,
+}
+
+/// A material's texture as the Materials panel's Edit tab shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureRow {
+    /// Image file name (as stored in the model).
+    pub file: String,
+    /// Tile width and height in model units, formatted by the app.
+    pub width: String,
+    pub height: String,
+    /// Colorize: the image is tinted towards the material color.
+    pub colorize: bool,
+}
+
+/// A texture control of the Materials panel's Edit tab (see
+/// [`crate::Event::MaterialTexture`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextureAction {
+    /// "Use texture image" checked, or the Browse button: pick an image file to load
+    /// (or replace the current one).
+    Load,
+    /// "Use texture image" unchecked: back to a plain color.
+    Remove,
+    /// Width or height typed (model units, parsed by the app). With `lock` the other
+    /// size follows to keep the image's aspect ratio.
+    Size {
+        width: Option<String>,
+        height: Option<String>,
+        lock: bool,
+    },
+    /// The Colorize check box.
+    Colorize(bool),
+    /// Reset Color: back to the image's own colors.
+    ResetColor,
+    /// Edit the image in the system's default image editor; the app reloads it when
+    /// the file changes.
+    EditExternally,
+}
+
+/// HSL of an sRGB color: hue in degrees 0..360, saturation and lightness in percent
+/// 0..=100 (the HSL picker's scales; SketchUp's own scales are unverified).
+pub fn rgb_to_hsl(c: [u8; 3]) -> [f64; 3] {
+    let [r, g, b] = c.map(|x| f64::from(x) / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d < 1e-12 {
+        return [0.0, 0.0, l * 100.0];
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } * 60.0;
+    [h, s * 100.0, l * 100.0]
+}
+
+/// sRGB of a hue (degrees, any value), saturation and lightness (percent, clamped).
+pub fn hsl_to_rgb(hsl: [f64; 3]) -> [u8; 3] {
+    let h = hsl[0].rem_euclid(360.0) / 60.0;
+    let s = (hsl[1] / 100.0).clamp(0.0, 1.0);
+    let l = (hsl[2] / 100.0).clamp(0.0, 1.0);
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [r, g, b].map(|v| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+/// `#RRGGBB` (upper case) of an sRGB color.
+pub fn hex_color(c: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])
+}
+
+/// Parses `#RRGGBB`, `RRGGBB`, `#RGB` or `RGB` (any case, surrounding spaces
+/// ignored).
+pub fn parse_hex_color(text: &str) -> Option<[u8; 3]> {
+    let t = text.trim();
+    let t = t.strip_prefix('#').unwrap_or(t);
+    if !t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let digit = |i: usize, n: usize| u8::from_str_radix(&t[i..i + n], 16).ok();
+    match t.len() {
+        6 => Some([digit(0, 2)?, digit(2, 2)?, digit(4, 2)?]),
+        3 => Some([digit(0, 1)? * 17, digit(1, 1)? * 17, digit(2, 1)? * 17]),
+        _ => None,
+    }
 }
 
 /// One component definition of the model.
@@ -604,6 +709,34 @@ mod tests {
             component_edit(&row, "", ""),
             Some(("Door".to_owned(), String::new()))
         );
+    }
+
+    #[test]
+    fn color_conversions() {
+        assert_eq!(rgb_to_hsl([255, 0, 0]), [0.0, 100.0, 50.0]);
+        assert_eq!(rgb_to_hsl([0, 0, 0]), [0.0, 0.0, 0.0]);
+        assert_eq!(rgb_to_hsl([255, 255, 255]), [0.0, 0.0, 100.0]);
+        let [h, s, l] = rgb_to_hsl([0, 128, 255]);
+        assert!((h - 209.88).abs() < 0.01, "{h}");
+        assert!((s - 100.0).abs() < 1e-9 && (l - 50.0).abs() < 1e-9);
+        assert_eq!(hsl_to_rgb([120.0, 100.0, 25.0]), [0, 128, 0]);
+        assert_eq!(hsl_to_rgb([480.0, 100.0, 25.0]), [0, 128, 0], "hue wraps");
+        // Every color survives a round trip through HSL.
+        for r in (0..=255).step_by(15) {
+            for g in (0..=255).step_by(17) {
+                for b in (0..=255).step_by(51) {
+                    let c = [r as u8, g as u8, b as u8];
+                    assert_eq!(hsl_to_rgb(rgb_to_hsl(c)), c, "{c:?}");
+                }
+            }
+        }
+        assert_eq!(hex_color([10, 171, 255]), "#0AABFF");
+        assert_eq!(parse_hex_color(" #0aabff "), Some([10, 171, 255]));
+        assert_eq!(parse_hex_color("0AABFF"), Some([10, 171, 255]));
+        assert_eq!(parse_hex_color("#f0a"), Some([255, 0, 170]));
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#12345g"), None);
+        assert_eq!(parse_hex_color("+1+2+3"), None);
     }
 
     #[test]

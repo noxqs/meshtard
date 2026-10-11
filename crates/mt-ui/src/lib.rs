@@ -57,7 +57,8 @@
 //! | Panel     | Shows                                         | Events |
 //! |-----------|-----------------------------------------------|--------|
 //! | Tags      | [`TrayData::tags`] (0 = "Untagged"), eye, color swatch, pencil on [`TrayData::active_tag`]; double-click renames | [`Event::TagAdd`], [`Event::TagDelete`], [`Event::TagRename`], [`Event::TagVisible`], [`Event::TagActive`], [`Event::TagColor`] |
-//! | Materials | "In Model" grid of [`TrayData::materials`], current material preview, Edit tab (name, color, opacity) | [`Event::MaterialPick`], [`Event::MaterialDefault`], [`Event::MaterialEdit`] |
+//! | Entity Info | [`Frame::entity_info`]: title, Tag dropdown ([`TrayData::entity_tag`]), typed [`InfoField`]s (text, number, check box, material swatch, collapsible sections), read-only rows | [`Event::EntityTag`], [`Event::EntityInfoEdit`] |
+//! | Materials | "In Model" grid of [`TrayData::materials`], current material preview, Edit tab (name, color in Wheel / RGB / HSL / HEX, Reset Color, opacity, texture file, size with aspect lock, Colorize, external editor, Position Texture) | [`Event::MaterialPick`], [`Event::MaterialEdit`], [`Event::MaterialTexture`], [`Event::Command`] |
 //! | Components | Select tab: "In Model" list of [`TrayData::components`] (icon, name, instance count; groups are not definitions and not listed), Details menu with Purge Unused; header and Edit tab (name, description) for [`TrayData::current_component`] | [`Event::ComponentPick`], [`Event::ComponentEdit`], [`Event::ComponentPurge`] |
 //! | Outliner  | [`TrayData::outliner`] tree under [`TrayData::outliner_root`], filter field | [`Event::OutlinerSelect`] |
 //! | Scenes    | [`TrayData::scenes`], [`TrayData::active_scene`] | [`Event::SceneAdd`], [`Event::SceneDelete`], [`Event::SceneUpdate`], [`Event::SceneActivate`] |
@@ -118,6 +119,7 @@
 pub mod cursors;
 pub mod dialog;
 pub mod dock;
+mod entity_info;
 pub mod icons;
 mod menu;
 mod panels;
@@ -138,16 +140,19 @@ pub use menu::menu_list;
 pub use theme::apply as apply_theme;
 pub use tray_data::{
     ComponentRow, FaceStyle, FogSettings, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow,
-    SelectMode, ShadowSettings, SoftenSettings, StyleSettings, TagRow, TrayData, component_edit,
-    date_label, day_of_year, instances_label, month_day, outliner_node, outliner_rows, time_label,
+    SelectMode, ShadowSettings, SoftenSettings, StyleSettings, TagRow, TextureAction, TextureRow,
+    TrayData, component_edit, date_label, day_of_year, hex_color, hsl_to_rgb, instances_label,
+    month_day, outliner_node, outliner_rows, parse_hex_color, rgb_to_hsl, time_label,
 };
 pub use trays::{TrayDef, TrayLayout};
 
-/// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection")
-/// and rows of label and value (e.g. "Length", "1000 mm").
+/// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection"),
+/// editable [`InfoField`]s and read-only rows of label and value (e.g. "Volume",
+/// "1000 mm³"), drawn after the fields.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntityInfo {
     pub title: String,
+    pub fields: Vec<InfoField>,
     pub rows: Vec<(String, String)>,
 }
 
@@ -155,9 +160,60 @@ impl EntityInfo {
     pub fn no_selection() -> Self {
         Self {
             title: "No Selection".to_owned(),
+            fields: Vec::new(),
             rows: Vec::new(),
         }
     }
+
+    /// Adds an enabled field.
+    pub fn field(&mut self, key: &str, label: &str, value: InfoValue) {
+        self.fields.push(InfoField {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            value,
+            enabled: true,
+        });
+    }
+}
+
+/// One typed row of Entity Info. Editing it emits [`Event::EntityInfoEdit`] with its
+/// `key` (the app's name for the property, e.g. `"length"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfoField {
+    pub key: String,
+    pub label: String,
+    pub value: InfoValue,
+    /// Disabled fields are shown greyed and cannot be edited.
+    pub enabled: bool,
+}
+
+/// The value of an [`InfoField`] and how it is edited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InfoValue {
+    /// A text field, committed with Enter or by leaving it (Escape cancels). Lengths
+    /// are text in model units, parsed by the app.
+    Text(String),
+    /// A whole number field (drag or type) within `min..=max`.
+    Integer { value: i64, min: i64, max: i64 },
+    /// A check box.
+    Check(bool),
+    /// A material swatch (`None`: the default material); clicking it emits
+    /// [`InfoEdit::Swatch`].
+    Swatch(Option<[u8; 3]>),
+    /// A collapsible heading (e.g. "Advanced Attributes"): the fields after it, up to
+    /// the next section, are listed when it is open. `true` = open at first.
+    Section(bool),
+}
+
+/// The new value of an edited [`InfoField`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InfoEdit {
+    /// Committed text (trimmed), different from the field's value.
+    Text(String),
+    Integer(i64),
+    Check(bool),
+    /// The swatch was clicked.
+    Swatch,
 }
 
 /// Application state the shell displays this frame.
@@ -212,6 +268,10 @@ pub enum Event {
     MaterialCreate,
     /// Entity Info: a tag chosen in the Tag dropdown for the selected entities.
     EntityTag(usize),
+    /// Entity Info: the [`InfoField`] with this key was edited.
+    EntityInfoEdit { key: String, edit: InfoEdit },
+    /// Materials, Edit tab: a texture control of material `index` was used.
+    MaterialTexture { index: usize, action: TextureAction },
     /// Materials: the current material edited (name committed, color or opacity
     /// changed). Carries all editable fields; `opacity` is in percent 0..=100.
     MaterialEdit {

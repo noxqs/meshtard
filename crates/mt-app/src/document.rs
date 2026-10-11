@@ -365,6 +365,16 @@ impl Document {
         }
     }
 
+    /// The active context's entities for a change that is not an undo step and does
+    /// not mark the model modified: a live preview the caller reverts, or records
+    /// afterwards with [`Document::edit`] (Texture Position).
+    pub fn active_mut_untracked(&mut self) -> &mut Entities {
+        match Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied()) {
+            Some(d) => &mut self.model.definitions[d].entities,
+            None => &mut self.model.root,
+        }
+    }
+
     /// Context space to world space.
     pub fn context_transform(&self) -> DMat4 {
         let mut ents = &self.model.root;
@@ -861,16 +871,22 @@ impl Document {
                 // Shift by whole repeats so the numbers stay small in f32.
                 let first = ents.loop_points(&face.outer).first().copied()?;
                 let shift = texture::uv_at(&map, first).floor();
-                Some((layer, map, shift))
+                // Projective (distorted) mappings: scaled so q is 1 at the first vertex.
+                let q0 = map.uvq(first.to_array())[2];
+                let q0 = if q0.abs() < 1e-12 { 1.0 } else { q0 };
+                Some((layer, map, shift, q0))
             };
             let (front_tex, back_tex) = (side(front_material, false), side(back_material, true));
-            let uv = |t: &Option<(u32, mt_skp::uv::UvMapping, glam::DVec2)>, p: DVec3| {
-                t.as_ref().map_or([0.0; 2], |(_, map, shift)| {
-                    (texture::uv_at(map, p) - *shift).as_vec2().to_array()
+            // Homogeneous coordinates (u q, v q) and q; the shader divides per pixel.
+            type Side = Option<(u32, mt_skp::uv::UvMapping, glam::DVec2, f64)>;
+            let uv = |t: &Side, p: DVec3| {
+                t.as_ref().map_or(([0.0; 2], 1.0), |(_, map, shift, q0)| {
+                    let [a, b, q] = map.uvq(p.to_array()).map(|x| x / q0);
+                    let shifted = [a - shift.x * q, b - shift.y * q];
+                    (shifted.map(|x| x as f32), q as f32)
                 })
             };
-            let layer =
-                |t: &Option<(u32, _, _)>| t.as_ref().map_or(FaceVertex::NO_TEXTURE, |t| t.0);
+            let layer = |t: &Side| t.as_ref().map_or(FaceVertex::NO_TEXTURE, |t| t.0);
             let texture = [layer(&front_tex), layer(&back_tex)];
             let n = world_normal(f);
             for local in tessellate::triangulate(ents, f) {
@@ -885,11 +901,12 @@ impl Document {
                 let world = [a, b, c];
                 let tri = order.map(|k| world[k]);
                 for k in order {
-                    let [fu, fv] = uv(&front_tex, local[k]);
-                    let [bu, bv] = uv(&back_tex, local[k]);
+                    let ([fu, fv], fq) = uv(&front_tex, local[k]);
+                    let ([bu, bv], bq) = uv(&back_tex, local[k]);
                     out.indices.push(out.vertices.len() as u32);
                     out.vertices.push(FaceVertex {
                         uv: [fu, fv, bu, bv],
+                        q: [fq, bq],
                         texture,
                         ..FaceVertex::new(f32x3(world[k]), f32x3(n), front, back)
                     });

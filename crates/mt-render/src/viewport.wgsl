@@ -183,6 +183,9 @@ struct FaceVertex {
     @location(4) uv: vec4<f32>,
     // Front and back texture layer; 0xffffffff for none.
     @location(5) texture: vec2<u32>,
+    // Front and back projective denominators: the coordinates are uv / q (1 when
+    // affine), divided per pixel for distorted texture positions.
+    @location(6) q: vec2<f32>,
 };
 
 struct FaceOut {
@@ -193,6 +196,7 @@ struct FaceOut {
     @location(3) world: vec3<f32>,
     @location(4) uv: vec4<f32>,
     @location(5) @interpolate(flat) texture: vec2<u32>,
+    @location(6) q: vec2<f32>,
 };
 
 @vertex
@@ -205,6 +209,7 @@ fn face_vs(v: FaceVertex) -> FaceOut {
     out.world = v.position;
     out.uv = v.uv;
     out.texture = v.texture;
+    out.q = v.q;
     return out;
 }
 
@@ -213,7 +218,7 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     // Sampled before any branching (implicit derivatives need uniform control flow).
     // Image rows run top down, SketchUp's v up.
     let layer = select(in.texture.y, in.texture.x, front);
-    let uv = select(in.uv.zw, in.uv.xy, front);
+    let uv = select(in.uv.zw / in.q.y, in.uv.xy / in.q.x, front);
     let texel = textureSample(
         face_textures, face_sampler, vec2<f32>(uv.x, 1.0 - uv.y), i32(min(layer, 2147483647u))
     );
@@ -287,6 +292,7 @@ fn shadow_vs(v: FaceVertex) -> FaceOut {
     out.world = v.position;
     out.uv = v.uv;
     out.texture = v.texture;
+    out.q = v.q;
     return out;
 }
 

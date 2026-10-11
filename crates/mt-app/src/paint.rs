@@ -515,6 +515,7 @@ mod tests {
             locked: false,
             layer: None,
             material: None,
+            attrs: Default::default(),
         });
         let mut pb = PaintBucket::default();
         // The app reports the material shown under the cursor (a face inside).

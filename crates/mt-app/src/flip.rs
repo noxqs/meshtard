@@ -766,6 +766,7 @@ mod tests {
             locked: false,
             layer: None,
             material: None,
+            attrs: Default::default(),
         });
         let sel = [Owner::Instance(0)];
         let bounds = |_: usize| Some((DVec3::ZERO, DVec3::new(10.0, 2.0, 4.0)));

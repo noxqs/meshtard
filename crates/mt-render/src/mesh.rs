@@ -25,6 +25,10 @@ pub struct FaceVertex {
     /// [`crate::FaceStyle::ShadedWithTextures`] instead of the color's RGB (alpha
     /// multiplies).
     pub texture: [u32; 2],
+    /// Projective denominators of the front and back texture coordinates (1 for an
+    /// affine mapping): the drawn coordinates are `uv / q`, divided per pixel, so a
+    /// distorted (perspective) texture position is drawn exactly.
+    pub q: [f32; 2],
 }
 
 impl FaceVertex {
@@ -35,7 +39,7 @@ impl FaceVertex {
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4,
-            4 => Float32x4, 5 => Uint32x2
+            4 => Float32x4, 5 => Uint32x2, 6 => Float32x2
         ],
     };
 
@@ -48,6 +52,7 @@ impl FaceVertex {
             back,
             uv: [0.0; 4],
             texture: [Self::NO_TEXTURE; 2],
+            q: [1.0; 2],
         }
     }
 

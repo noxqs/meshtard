@@ -106,6 +106,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
             entities: Entities::new(),
             is_group: d.name.starts_with("Group#"),
             is_image: d.is_image,
+            attributes: Default::default(),
         });
         maps.definitions.insert(id, key);
     }
@@ -157,6 +158,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
                     normal: n,
                     name: s.name.clone(),
                     hidden: s.hidden,
+                    symbol: s.label.clone(),
                 }
             })
         })
@@ -373,6 +375,7 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             hidden: f.hidden,
             layer: layer(&f.layer),
             uv: crate::texture::FaceUv::boxed(f.uv_transform, f.uv_transform_back),
+            shadows: Default::default(),
         };
         ents.add_raw_face(outer, loops, normal, attrs);
     }
@@ -389,6 +392,7 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             locked: false,
             layer: layer(&i.layer),
             material: material(i.material_id),
+            attrs: Default::default(),
         });
     }
     ents.texts = texts(d);
@@ -498,6 +502,7 @@ mod merge_tests {
             locked: false,
             layer: Some(1),
             material: Some(0),
+            attrs: Default::default(),
         });
         let mut dst = Model::default();
         dst.materials.push(Material {

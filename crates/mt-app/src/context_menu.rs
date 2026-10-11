@@ -275,6 +275,12 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
     if !f.faces.is_empty() {
         v.push(cmd("edit.reverse_faces", "Reverse Faces"));
         v.push(cmd("edit.orient_faces", "Orient Faces"));
+        if f.faces.len() == 1 {
+            v.push(sub(
+                "Texture",
+                vec![cmd("tool.texture_position", "Position")],
+            ));
+        }
     }
     if !f.instances.is_empty() {
         let whose = if f.group && !f.component {

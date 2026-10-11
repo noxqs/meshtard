@@ -1313,6 +1313,7 @@ impl ModifyTool for PlaceComponent {
             locked: false,
             layer: None,
             material: None,
+            attrs: Default::default(),
         });
         true
     }
@@ -1480,6 +1481,7 @@ impl ModifyTool for SectionPlaneTool {
             normal: Self::normal(inf),
             name: format!("Section Plane {n}"),
             hidden: false,
+            symbol: String::new(),
         });
         ctx.ents.active_section = Some(ctx.ents.section_planes.len() - 1);
         true

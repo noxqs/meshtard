@@ -45,8 +45,13 @@ impl App {
                 name: x.name.clone(),
                 color: x.color,
                 opacity: (x.opacity * 100.0).round().clamp(0.0, 100.0) as u8,
+                texture: x
+                    .texture
+                    .as_ref()
+                    .map(|t| crate::material_edit::texture_row(t, doc.units)),
             })
             .collect();
+        data.can_position_texture = self.can_position_texture();
         let selected: Vec<usize> = if doc.context.is_empty() {
             self.selection
                 .items()
@@ -127,6 +132,13 @@ impl App {
 
     /// Applies a tray event. Returns whether the scene must be rebuilt.
     pub(crate) fn tray_event(&mut self, event: Event) -> bool {
+        let event = match event {
+            Event::EntityInfoEdit { key, edit } => return self.entity_info_edit(&key, &edit),
+            Event::MaterialTexture { index, action } => {
+                return self.material_texture(index, action);
+            }
+            e => e,
+        };
         let camera = self.camera.clone();
         let Some(doc) = self.document.as_mut() else {
             return false;

@@ -42,6 +42,20 @@ pub struct Definition {
     pub is_image: bool,
     /// Component behavior "Glue to": instances placed on a face lie in its plane.
     pub glue: GlueTo,
+    /// Entity Info > Advanced Attributes kept on the definition.
+    pub attributes: DefinitionAttrs,
+}
+
+/// The definition half of Entity Info's Advanced Attributes (Price, Size, URL, Type);
+/// Status and Owner are on the instance ([`crate::InstanceAttrs`]). Free text; which
+/// side SketchUp keeps each one on is from memory, unverified. Not saved in .skp yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefinitionAttrs {
+    pub price: String,
+    pub size: String,
+    pub url: String,
+    /// "Type" in Entity Info.
+    pub kind: String,
 }
 
 /// SketchUp's component "Glue to" setting (Make Component dialog).
