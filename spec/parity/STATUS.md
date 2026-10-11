@@ -56,7 +56,7 @@
 | Move | Stretch connected geometry, Ctrl copy, `5x` and `/5` arrays | unverified | preview is an outline; SketchUp moves the geometry live |
 | Rotate | Center, start, end; typed angle; Ctrl copy | unverified | protractor plane from the three points, not SketchUp's protractor orientation |
 | Scale | Three points or typed factor | differs | SketchUp uses bounding-box grips |
-| Offset | Inward/outward, arcs stay arcs | differs | partial collapse cancels the whole offset; SketchUp trims |
+| Offset | Inward/outward, arcs stay arcs, partial collapses trimmed (vanishing arms, split loops, holes merging) | unverified | corners always mitered (no limit); where trimming cuts an arc, its end piece is a chord piece |
 | Follow Me | Select path, click profile; soft joints under 30° | unverified | |
 | Intersect Faces | With Model, With Selection | unverified | With Context missing |
 | Groups | Make Group / Component, origin at selection's bounding-box corner | unverified | component axes dialog missing |

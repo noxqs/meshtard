@@ -761,9 +761,10 @@ fn rebuild(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[FaceId
     let live: HashSet<CurveId> = ents.edges.values().filter_map(|e| e.attrs.curve).collect();
     ents.curves.retain(|c, _| live.contains(&c));
     Aabb::of(
-        segments
-            .iter()
-            .flat_map(|(a, b, _)| [*a, *b])
-            .chain(records.iter().flat_map(|r| r.loops.iter().flatten().copied())),
+        segments.iter().flat_map(|(a, b, _)| [*a, *b]).chain(
+            records
+                .iter()
+                .flat_map(|r| r.loops.iter().flatten().copied()),
+        ),
     )
 }

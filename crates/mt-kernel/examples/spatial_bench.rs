@@ -58,7 +58,7 @@ fn verts(e: &Entities) -> Vec<VertexId> {
     e.vertices.keys().collect()
 }
 
-fn time(label: &str, n: usize, ents: &Entities, f: impl FnOnce()) {
+fn time(label: &str, n: usize, f: impl FnOnce()) {
     let t = Instant::now();
     f();
     let dt = t.elapsed().as_secs_f64();
@@ -67,7 +67,6 @@ fn time(label: &str, n: usize, ents: &Entities, f: impl FnOnce()) {
         dt * 1e3,
         dt * 1e3 / n as f64
     );
-    let _ = ents;
 }
 
 fn main() {
@@ -80,7 +79,6 @@ fn main() {
         ents.faces.len(),
         t.elapsed().as_secs_f64() * 1e3
     );
-    if std::env::var_os("STATS").is_some() { plane_stats(&mut ents); return; }
     let mut rng = Rng(7);
 
     let vs = verts(&ents);
@@ -88,8 +86,8 @@ fn main() {
         .map(|_| ents.pos(vs[rng.next(vs.len())]) + DVec3::splat(1e-4))
         .collect();
     let mut e0 = ents.clone();
-    time("build_index", 1, &e0.clone(), || e0.ensure_index());
-    time("find_vertex", probes.len(), &e0, || {
+    time("build_index", 1, || e0.ensure_index());
+    time("find_vertex", probes.len(), || {
         let found = probes
             .iter()
             .filter(|p| e0.find_vertex(**p).is_some())
@@ -107,16 +105,11 @@ fn main() {
             (pts.len() >= 4).then(|| (pts[0], pts[pts.len() / 2]))
         })
         .collect();
-    time(
-        "add_line (chords of faces)",
-        chords.len(),
-        &ents.clone(),
-        || {
-            for &(a, b) in &chords {
-                add_line(&mut ents, a, b);
-            }
-        },
-    );
+    time("add_line (chords of faces)", chords.len(), || {
+        for &(a, b) in &chords {
+            add_line(&mut ents, a, b);
+        }
+    });
 
     // Lines between nearby vertices (new edges, often closing loops).
     let vs = verts(&ents);
@@ -126,16 +119,11 @@ fn main() {
             (ents.pos(vs[i]), ents.pos(vs[i + 1]))
         })
         .collect();
-    time(
-        "add_line (vertex to vertex)",
-        lines.len(),
-        &ents.clone(),
-        || {
-            for &(a, b) in &lines {
-                add_line(&mut ents, a, b);
-            }
-        },
-    );
+    time("add_line (vertex to vertex)", lines.len(), || {
+        for &(a, b) in &lines {
+            add_line(&mut ents, a, b);
+        }
+    });
 
     // Free lines in empty space above the model.
     let (lo, hi) = bounds(&ents);
@@ -145,21 +133,16 @@ fn main() {
             (DVec3::new(lo.x, lo.y, z), DVec3::new(hi.x, hi.y, z))
         })
         .collect();
-    time(
-        "add_line (free, above model)",
-        free.len(),
-        &ents.clone(),
-        || {
-            for &(a, b) in &free {
-                add_line(&mut ents, a, b);
-            }
-        },
-    );
+    time("add_line (free, above model)", free.len(), || {
+        for &(a, b) in &free {
+            add_line(&mut ents, a, b);
+        }
+    });
 
     let n = 50;
     let fs = faces(&ents);
     let picks: Vec<FaceId> = (0..n).map(|_| fs[rng.next(fs.len())]).collect();
-    time("push_pull", n, &ents.clone(), || {
+    time("push_pull", n, || {
         for &f in &picks {
             if ents.faces.contains_key(f) {
                 mt_kernel::push_pull(&mut ents, f, 0.5, false);
@@ -169,7 +152,7 @@ fn main() {
 
     let fs = faces(&ents);
     let picks: Vec<FaceId> = (0..n).map(|_| fs[rng.next(fs.len())]).collect();
-    time("move face (transform_vertices)", n, &ents.clone(), || {
+    time("move face (transform_vertices)", n, || {
         for &f in &picks {
             if ents.faces.contains_key(f) {
                 let vs = mt_kernel::vertices_of(&ents, &[], &[f]);
@@ -181,7 +164,7 @@ fn main() {
 
     let fs = faces(&ents);
     let picks: Vec<FaceId> = (0..n).map(|_| fs[rng.next(fs.len())]).collect();
-    time("offset_face", n, &ents.clone(), || {
+    time("offset_face", n, || {
         for &f in &picks {
             if ents.faces.contains_key(f) {
                 mt_kernel::offset_face(&mut ents, f, 0.1);
@@ -189,6 +172,9 @@ fn main() {
         }
     });
 
+    time("clone (undo snapshot)", 1, || {
+        std::hint::black_box(ents.clone());
+    });
     println!(
         "result: {} vertices, {} edges, {} faces, {} curves",
         ents.vertices.len(),
@@ -198,21 +184,4 @@ fn main() {
     );
     let errs = validate(&ents, Checks::TOPOLOGY);
     println!("topology errors: {}", errs.len());
-}
-
-#[allow(dead_code)]
-pub fn plane_stats(ents: &mut Entities) {
-    ents.ensure_index();
-    let fs = faces(ents);
-    for f in fs.iter().step_by(fs.len() / 10) {
-        let pl = ents.face_plane(*f);
-        let n = pl.normal;
-        let cand = ents.edges_near_plane(&pl, 4e-3).len();
-        let real = mt_kernel::arrangement::edges_in_plane(ents, &pl).len();
-        let fc = ents.faces_near_plane(&pl, 4e-3).len();
-        let side = mt_kernel::geom::Plane::new(n.cross(DVec3::X).normalize_or(DVec3::Y), ents.pos(ents.edges[ents.faces[*f].outer.coedges[0].edge].start));
-        let sc = ents.edges_near_plane(&side, 4e-3).len();
-        let sr = mt_kernel::arrangement::edges_in_plane(ents, &side).len();
-        println!("normal {n:.3?} cand {cand} real {real} faces {fc} | side cand {sc} real {sr}");
-    }
 }

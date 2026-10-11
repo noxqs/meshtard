@@ -352,7 +352,10 @@ impl<K: Key + Ord> Layer<K> {
     /// Items whose box comes within `tol` of the plane `normal . p = d`, unsorted. Only
     /// the slabs (along the normal's main axis) that the plane crosses within the level's
     /// occupied range are visited.
-    fn query_plane(&self, cell: f64, normal: DVec3, d: f64, tol: f64, out: &mut Vec<K>) {
+    ///
+    /// `rel` widens `tol` by that much per inch of distance from the origin, for planes
+    /// that agree in direction only within an angle.
+    fn query_plane(&self, cell: f64, normal: DVec3, d: f64, tol: f64, rel: f64, out: &mut Vec<K>) {
         let n = normal.to_array();
         let axis = (0..3)
             .max_by(|&i, &j| n[i].abs().total_cmp(&n[j].abs()))
@@ -365,6 +368,16 @@ impl<K: Key + Ord> Layer<K> {
                 continue;
             }
             let cs = cell * (level as f64).exp2();
+            let reach = (0..3)
+                .map(|i| {
+                    let lo = lv.slabs[i].first_key_value().map_or(0, |x| *x.0);
+                    let hi = lv.slabs[i].last_key_value().map_or(0, |x| *x.0);
+                    ((lo as f64).abs().max((hi + 1) as f64).abs() + 1.0) * cs
+                })
+                .map(|x| x * x)
+                .sum::<f64>()
+                .sqrt();
+            let tol = tol + rel * reach;
             // Extremes of the other two terms of the plane equation over the occupied
             // (grown) range, so the range of the main coordinate on the plane.
             let (mut lo, mut hi) = (d - tol, d + tol);
@@ -484,6 +497,10 @@ impl Grid {
     }
 }
 
+/// Angle (radians, generously) by which the normals of planes that `Plane::coincides`
+/// treats as the same can differ.
+const COINCIDE_ANGLE: f64 = 1e-4;
+
 /// Sorts candidates into key (slot map) order.
 fn sorted<K: Ord>(mut v: Vec<K>) -> Vec<K> {
     v.sort_unstable();
@@ -526,9 +543,6 @@ impl Entities {
     /// without the editing methods) or sized for a much smaller model. Kernel operations
     /// call this; queries on an `Entities` without an index fall back to scans.
     pub fn ensure_index(&mut self) {
-        if std::env::var_os("MT_NO_INDEX").is_some() {
-            return;
-        } // TEMP
         let items = self.vertices.len() + self.edges.len() + self.faces.len();
         let fresh = self
             .grid()
@@ -577,6 +591,16 @@ impl Entities {
             g.faces.insert(cell, f, self.face_bounds(f));
         }
         self.index.grid = Some(Box::new(g));
+    }
+
+    /// Updates the index entry of a face whose loops changed.
+    pub(crate) fn refresh_face_bounds(&mut self, f: FaceId) {
+        if self.index.grid.is_some() && self.faces.contains_key(f) {
+            let b = self.face_bounds(f);
+            if let Some(g) = &mut self.index.grid {
+                g.insert_face(f, b);
+            }
+        }
     }
 
     /// Moves vertices, keeping the index (vertices, their edges and faces) up to date.
@@ -678,7 +702,7 @@ impl Entities {
             Some(g) => {
                 let mut out = Vec::new();
                 g.edges
-                    .query_plane(g.cell, plane.normal, plane.d, tol, &mut out);
+                    .query_plane(g.cell, plane.normal, plane.d, tol, 0.0, &mut out);
                 out
             }
             None => self.edges.keys().collect(),
@@ -702,13 +726,15 @@ impl Entities {
         self.faces_in(&Aabb::point(p).expand(r))
     }
 
-    /// Candidate faces within `tol` of the plane, in key order.
+    /// Candidate faces within `tol` of the plane, or whose own plane may coincide with it
+    /// (`Plane::coincides` lets directions differ slightly, so far from the origin a
+    /// coinciding face can be further away), in key order.
     pub fn faces_near_plane(&self, plane: &crate::geom::Plane, tol: f64) -> Vec<FaceId> {
         match self.grid() {
             Some(g) => {
                 let mut out = Vec::new();
                 g.faces
-                    .query_plane(g.cell, plane.normal, plane.d, tol, &mut out);
+                    .query_plane(g.cell, plane.normal, plane.d, tol, COINCIDE_ANGLE, &mut out);
                 sorted(out)
             }
             None => self.faces.keys().collect(),

@@ -450,9 +450,11 @@ fn annotations_round_trip() {
 #[test]
 fn face_colors_round_trip() {
     for with_geometry in [false, true] {
-        let mut m = Model::default();
-        m.front_color = [250, 240, 230];
-        m.back_color = [10, 20, 30];
+        let mut m = Model {
+            front_color: [250, 240, 230],
+            back_color: [10, 20, 30],
+            ..Model::default()
+        };
         if with_geometry {
             square(&mut m.root, DVec3::ZERO, 10.0);
         }

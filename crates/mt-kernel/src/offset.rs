@@ -6,11 +6,16 @@
 //!    arcs; nothing is checked, so the raw offset may cross itself and the other loops'
 //!    raw offsets where parts of the face collapse;
 //! 2. the raw offsets of all loops are split where they cross or touch each other;
-//! 3. a piece is kept when it bounds the offset region: the winding number of all raw
-//!    loops is positive on its left and not on its right (so inverted parts, where an
-//!    arm of the face vanished, and parts swallowed by another loop's offset go), it lies
-//!    at the offset distance or more from the face's boundary and on the side the offset
-//!    moves to (inside the face for an inward offset, outside for an outward one).
+//! 3. a piece is kept when it bounds the offset region: it is part of an edge's offset
+//!    that still runs the way the edge does (an edge whose offset turned around has
+//!    collapsed), the winding number of all raw loops is positive on its left and not on
+//!    its right (so inverted parts, where an arm of the face vanished, and parts
+//!    swallowed by another loop's offset go), it lies at the offset distance or more
+//!    from the face's boundary and on the side the offset moves to (inside the face for
+//!    an inward offset, outside for an outward one);
+//! 4. kept straight pieces on one line are united (pieces of two edges' offsets meet
+//!    or overlap where a part of the face between them vanished), and everything is
+//!    added with `add_line` / `add_curve`.
 
 use std::collections::HashSet;
 
@@ -51,32 +56,92 @@ pub fn offset_face(ents: &mut Entities, face: FaceId, distance: f64) -> Vec<Edge
         .collect();
     let kept = trim(&input, &raw, distance);
 
+    // Straight pieces on one line are merged: pieces of different raw segments can
+    // overlap or continue each other where a vanished part of the face was.
+    let mut arcs: Vec<(ArcRef, Vec<Piece>)> = Vec::new();
+    let mut lines: Vec<(DVec2, DVec2)> = Vec::new();
+    for pieces in &kept {
+        for run in runs(pieces) {
+            match run {
+                Run::Line(p) => lines.push((p.a, p.b)),
+                Run::Arc(arc, ps) => arcs.push((arc, ps)),
+            }
+        }
+    }
+    let lines = merge_collinear(&lines);
+
     let lift = |q: DVec2| lift(&plane, q);
-    let segments: Vec<(DVec3, DVec3)> = kept
+    let segments: Vec<(DVec3, DVec3)> = arcs
         .iter()
-        .flatten()
-        .map(|p| (lift(p.a), lift(p.b)))
+        .flat_map(|(_, ps)| ps.iter().map(|p| (p.a, p.b)))
+        .chain(lines.iter().copied())
+        .map(|(a, b)| (lift(a), lift(b)))
         .collect();
     if segments.is_empty() {
         return Vec::new();
     }
     let before = EdgeSnapshot::near(ents, &segments);
-    for pieces in &kept {
-        for run in runs(pieces) {
-            match run {
-                Run::Line(p) => {
-                    add_line(ents, lift(p.a), lift(p.b));
-                }
-                Run::Arc(curve, ps) => {
-                    let mut pts: Vec<DVec3> = ps.iter().map(|p| lift(p.a)).collect();
-                    pts.push(lift(ps[ps.len() - 1].b));
-                    let arc = concentric_arc(&curve.arc, curve.radius, &mut pts);
-                    add_curve(ents, &pts, Some(arc));
-                }
-            }
-        }
+    for (arc, ps) in &arcs {
+        let mut pts: Vec<DVec3> = ps.iter().map(|p| lift(p.a)).collect();
+        pts.push(lift(ps[ps.len() - 1].b));
+        let arc = concentric_arc(&arc.arc, arc.radius, &mut pts);
+        add_curve(ents, &pts, Some(arc));
+    }
+    for &(a, b) in &lines {
+        add_line(ents, lift(a), lift(b));
     }
     before.added_on(ents, &segments)
+}
+
+/// A 2D segment.
+type Seg2 = (DVec2, DVec2);
+
+/// Unites segments lying on one line where they overlap or touch.
+fn merge_collinear(segs: &[Seg2]) -> Vec<Seg2> {
+    let eps = 1e-9;
+    // Groups of segments on one line: (point on the line, unit direction, members).
+    let mut groups: Vec<(DVec2, DVec2, Vec<Seg2>)> = Vec::new();
+    for &(a, b) in segs {
+        let Some(d) = (b - a).try_normalize() else {
+            continue;
+        };
+        let group = groups
+            .iter_mut()
+            .find(|(o, dir, _)| dir.perp_dot(d).abs() <= eps && dir.perp_dot(a - *o).abs() <= 1e-7);
+        match group {
+            Some(g) => g.2.push((a, b)),
+            None => groups.push((a, d, vec![(a, b)])),
+        }
+    }
+    let mut out = Vec::new();
+    for (o, d, members) in groups {
+        let mut spans: Vec<(f64, f64)> = members
+            .iter()
+            .map(|&(a, b)| {
+                let (s, t) = ((a - o).dot(d), (b - o).dot(d));
+                (s.min(t), s.max(t))
+            })
+            .collect();
+        spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (s, t) in spans {
+            match merged.last_mut() {
+                Some(m) if s <= m.1 + 1e-7 => m.1 = m.1.max(t),
+                _ => merged.push((s, t)),
+            }
+        }
+        // Ends are taken from the members' own points where possible, so pieces that
+        // were not merged keep their exact coordinates.
+        let at = |t: f64| {
+            members
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .find(|p| ((*p - o).dot(d) - t).abs() <= 1e-12)
+                .unwrap_or(o + d * t)
+        };
+        out.extend(merged.into_iter().map(|(s, t)| (at(s), at(t))));
+    }
+    out
 }
 
 /// Edges near some segments before an operation, to tell which edges it added along them.
@@ -148,8 +213,6 @@ struct ArcRef {
 struct InLoop {
     points: Vec<DVec2>,
     arcs: Vec<Option<(CurveId, Arc)>>,
-    /// Arc centers in plane coordinates (zero for straight edges).
-    centers: Vec<DVec2>,
 }
 
 fn face_loops(ents: &Entities, face: FaceId, plane: &Plane) -> Option<Vec<InLoop>> {
@@ -174,15 +237,7 @@ fn face_loops(ents: &Entities, face: FaceId, plane: &Plane) -> Option<Vec<InLoop
                 Some((id, arc))
             })
             .collect();
-        let centers = arcs
-            .iter()
-            .map(|a| a.map_or(DVec2::ZERO, |(_, arc)| plane.project(arc.center)))
-            .collect();
-        out.push(InLoop {
-            points,
-            arcs,
-            centers,
-        });
+        out.push(InLoop { points, arcs });
     }
     Some(out)
 }
@@ -193,6 +248,9 @@ struct Seg {
     a: DVec2,
     b: DVec2,
     arc: Option<ArcRef>,
+    /// Runs the way its original edge does. An edge whose offset turned around has
+    /// collapsed (its neighbors' offsets meet before it), so no piece of it is kept.
+    forward: bool,
 }
 
 fn left(d: DVec2) -> DVec2 {
@@ -242,9 +300,7 @@ fn raw_offset(plane: &Plane, l: &InLoop, distance: f64) -> Vec<Seg> {
                     c + (pts[k] - c).normalize() * a.radius
                 }
                 (Some(a), _) => line_circle(pts[k] + n2 * distance, dirs[k], plane, a, miter),
-                (None, Some(b)) => {
-                    line_circle(pts[k] + n1 * distance, dirs[prev], plane, b, miter)
-                }
+                (None, Some(b)) => line_circle(pts[k] + n1 * distance, dirs[prev], plane, b, miter),
                 (None, None) => miter,
             };
             vec![q]
@@ -258,11 +314,17 @@ fn raw_offset(plane: &Plane, l: &InLoop, distance: f64) -> Vec<Seg> {
                 a: p,
                 b: q,
                 arc: None,
+                forward: true,
             });
         }
         let a = *corners[k].last().expect("a corner");
         let b = corners[(k + 1) % n][0];
-        segs.push(Seg { a, b, arc: arcs[k] });
+        segs.push(Seg {
+            a,
+            b,
+            arc: arcs[k],
+            forward: (b - a).dot(dirs[k]) > 0.0,
+        });
     }
     segs
 }
@@ -296,6 +358,8 @@ struct Piece {
     /// if that is kept from its start).
     to_end: bool,
     from_start: bool,
+    /// Index of the raw segment it is a piece of.
+    seg: usize,
 }
 
 /// Splits the raw loops at their crossings and keeps the pieces bounding the offset
@@ -330,21 +394,25 @@ fn trim(input: &[InLoop], raw: &[Vec<Seg>], distance: f64) -> Vec<Vec<Piece>> {
         }
     }
 
-    // Arcs are polylines: their offsets are off the true offset by up to this fraction
-    // of the distance at chord midpoints.
+    // Arcs are polylines, their offsets concentric polylines: those come nearer to the
+    // original chords than the distance, by up to the sagitta of a chord of the bigger
+    // of the two arcs.
     let sag = input
         .iter()
         .flat_map(|l| l.arcs.iter().flatten())
         .map(|(_, a)| {
             let step = (a.end_angle - a.start_angle).abs() / a.segments.max(1) as f64;
-            1.0 - (step.min(std::f64::consts::PI) / 2.0).cos()
+            (a.radius + distance.abs()) * (1.0 - (step.min(std::f64::consts::PI) / 2.0).cos())
         })
         .fold(0.0, f64::max);
-    let min_dist = distance.abs() * (1.0 - sag) - TOL;
+    let min_dist = distance.abs() - sag - TOL;
 
     let mut out: Vec<Vec<Piece>> = vec![Vec::new(); raw.len()];
     for (x, &(i, k)) in all.iter().enumerate() {
         let s = seg((i, k));
+        if !s.forward {
+            continue;
+        }
         let ps = &mut params[x];
         ps.sort_by(f64::total_cmp);
         ps.dedup_by(|b, a| (*b - *a) * s.a.distance(s.b) <= 1e-9);
@@ -355,14 +423,23 @@ fn trim(input: &[InLoop], raw: &[Vec<Seg>], distance: f64) -> Vec<Vec<Piece>> {
             if a.distance(b) <= 1e-9 {
                 continue;
             }
-            if bounds_region(raw, input, a, b, distance, min_dist) {
-                out[i].push(Piece {
+            if !bounds_region(raw, input, a, b, distance, min_dist) {
+                continue;
+            }
+            // A piece continuing the previous kept piece of the same segment extends it.
+            match out[i].last_mut() {
+                Some(p) if p.seg == x && p.b == a => {
+                    p.b = b;
+                    p.to_end = j + 1 == last;
+                }
+                _ => out[i].push(Piece {
                     a,
                     b,
                     arc: s.arc,
                     to_end: j + 1 == last,
                     from_start: j == 0,
-                });
+                    seg: x,
+                }),
             }
         }
     }
@@ -428,8 +505,8 @@ fn bounds_region(
         return false;
     }
     let outer = &input[0].points;
-    let inside =
-        point_in_polygon(mid, outer) && !input[1..].iter().any(|h| point_in_polygon(mid, &h.points));
+    let inside = point_in_polygon(mid, outer)
+        && !input[1..].iter().any(|h| point_in_polygon(mid, &h.points));
     inside == (distance > 0.0)
 }
 
@@ -449,35 +526,17 @@ fn winding(raw: &[Vec<Seg>], p: DVec2) -> i32 {
     w
 }
 
-/// Distance from `p` to the face's boundary (arc edges as true arcs).
+/// Distance from `p` to the face's boundary (arcs as their chords).
 fn boundary_distance(input: &[InLoop], p: DVec2) -> f64 {
     let to3 = |q: DVec2| DVec3::new(q.x, q.y, 0.0);
-    let mut best = f64::INFINITY;
-    for l in input {
-        let n = l.points.len();
-        for k in 0..n {
-            let (a, b) = (l.points[k], l.points[(k + 1) % n]);
-            let chord = point_segment(to3(p), to3(a), to3(b)).0;
-            let d = match &l.arcs[k] {
-                Some((_, arc)) => {
-                    // The arc between the chord's ends: the circle where `p` is within
-                    // their angular wedge, else the nearer end.
-                    let c = l.centers[k];
-                    let (u, w, q) = (a - c, b - c, p - c);
-                    let span = u.perp_dot(w);
-                    let within = u.perp_dot(q) * span >= 0.0 && q.perp_dot(w) * span >= 0.0;
-                    if within && u.dot(q) > 0.0 {
-                        (q.length() - arc.radius).abs()
-                    } else {
-                        p.distance(a).min(p.distance(b))
-                    }
-                }
-                None => chord,
-            };
-            best = best.min(d);
-        }
-    }
-    best
+    input
+        .iter()
+        .flat_map(|l| {
+            let n = l.points.len();
+            (0..n).map(move |k| (l.points[k], l.points[(k + 1) % n]))
+        })
+        .map(|(a, b)| point_segment(to3(p), to3(a), to3(b)).0)
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// What to add for a loop's kept pieces: straight pieces one by one, consecutive joined

@@ -6,14 +6,14 @@
 use glam::{DVec2, DVec3};
 
 use crate::TOL;
+use crate::arrangement::{self, Cell};
+use crate::entities::{CoEdge, EdgeId, Entities, FaceAttrs, FaceId, Loop, VertexId};
+use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
 
 /// Slack for plane queries of the spatial index: a face or edge coinciding with a plane
 /// (within TOL, with normals equal to 1e-9) lies within this of it, far out from the
 /// origin too.
 pub(crate) const PLANE_SLACK: f64 = 4.0 * TOL;
-use crate::arrangement::{self, Cell};
-use crate::entities::{CoEdge, EdgeId, Entities, FaceAttrs, FaceId, Loop, VertexId};
-use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
 
 /// Adds a straight line from `a` to `b` and returns the edges covering it, in order.
 ///
@@ -374,9 +374,9 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
                 .any(|&x| x != e && in_plane(x))
         };
         let live = new_edges.iter().any(|&e| {
-            ents.edges.get(e).is_some_and(|edge| {
-                in_plane(e) && anchored(edge.start, e) && anchored(edge.end, e)
-            })
+            ents.edges
+                .get(e)
+                .is_some_and(|edge| in_plane(e) && anchored(edge.start, e) && anchored(edge.end, e))
         });
         if !live {
             continue;
@@ -541,6 +541,7 @@ fn heal_vertex(ents: &mut Entities, v: VertexId) {
         if !ents.edges[joined].faces.contains(&f) {
             ents.edges[joined].faces.push(f);
         }
+        ents.refresh_face_bounds(f);
     }
 }
 

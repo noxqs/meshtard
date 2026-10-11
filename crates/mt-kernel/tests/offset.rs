@@ -89,6 +89,7 @@ fn outward_offset_surrounds_a_free_face() {
     assert_eq!(areas(&e), [96.0, 100.0], "ring around the face");
 }
 
+/// An offset that collapses entirely (inward past the inradius) leaves nothing to keep.
 #[test]
 fn collapsing_offset_adds_nothing() {
     for d in [5.0, 6.0, 50.0] {
@@ -124,7 +125,9 @@ fn offset_of_face_with_hole_grows_the_hole() {
     // Hole face 16, outer ring 100-64, ring around the hole 36-16, middle ring 64-36.
     assert_eq!(areas(&e), [16.0, 20.0, 28.0, 36.0]);
 
-    // Growing the hole into the outer loop collapses: nothing happens.
+    // Growing the hole past the shrinking outer loop on every side leaves no region
+    // between them: nothing is added. (A hole only partly reaching the outer offset
+    // merges with it: `hole_merges_with_outer_offset`.)
     let mut e = Entities::new();
     rect(&mut e, 0.0, 0.0, 10.0, 10.0);
     rect(&mut e, 3.0, 3.0, 7.0, 7.0);
@@ -160,7 +163,9 @@ fn concave_face_offsets_with_miters() {
     assert_eq!(new.len(), 6);
     // The L has area 64; the inner L is [1,9]x[1,3] + [1,3]x[3,9].
     assert_eq!(areas(&e), [28.0, 36.0]);
-    // The inner L's arms are 2 wide: offsetting it by 1.5 collapses them.
+    // The inner L's arms and corner are all 2 wide: offsetting it by 1.5 collapses the
+    // whole of it, so nothing is kept. (A wider part would be kept: see
+    // `l_shape_keeps_the_wide_part`.)
     let inner = e
         .faces
         .keys()
@@ -257,4 +262,258 @@ fn arc_and_lines_keep_the_arc() {
         .map(|v| e.pos(v).y)
         .collect();
     assert!(ends.iter().all(|y| (y - 1.0).abs() < 1e-9));
+}
+
+fn polygon(ents: &mut Entities, pts: &[(f64, f64)]) -> FaceId {
+    for i in 0..pts.len() {
+        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+        add_line(ents, p(a.0, a.1, 0.0), p(b.0, b.1, 0.0));
+    }
+    check(ents);
+    only_face(ents)
+}
+
+#[test]
+fn l_shape_keeps_the_wide_part() {
+    // A 10x6 block with a 2-wide arm on top: offsetting inward by 1.5 makes the arm
+    // vanish; the block's offset is kept (SketchUp trims rather than cancels).
+    let mut e = Entities::new();
+    let f = polygon(
+        &mut e,
+        &[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 6.0),
+            (2.0, 6.0),
+            (2.0, 10.0),
+            (0.0, 10.0),
+        ],
+    );
+    let new = offset_face(&mut e, f, 1.5);
+    check(&e);
+    assert_eq!(new.len(), 4);
+    assert_eq!(
+        areas(&e),
+        [21.0, 47.0],
+        "inner 7x3 block and the rest of the L"
+    );
+    for &x in &new {
+        for v in [e.edges[x].start, e.edges[x].end] {
+            let q = e.pos(v);
+            assert!(q.x == 1.5 || q.x == 8.5, "{q}");
+            assert!(q.y == 1.5 || q.y == 4.5, "{q}");
+        }
+    }
+}
+
+#[test]
+fn u_shape_arms_vanish() {
+    let mut e = Entities::new();
+    let f = polygon(
+        &mut e,
+        &[
+            (0.0, 0.0),
+            (12.0, 0.0),
+            (12.0, 12.0),
+            (10.0, 12.0),
+            (10.0, 6.0),
+            (2.0, 6.0),
+            (2.0, 12.0),
+            (0.0, 12.0),
+        ],
+    );
+    let new = offset_face(&mut e, f, 1.5);
+    check(&e);
+    assert_eq!(new.len(), 4);
+    // The base's offset [1.5, 10.5] x [1.5, 4.5]; the U has area 96.
+    assert_eq!(areas(&e), [27.0, 69.0]);
+}
+
+#[test]
+fn narrow_neck_splits_the_offset_in_two() {
+    // Two 6x6 squares joined by a 2-wide bridge: the bridge vanishes and each square
+    // keeps its own offset loop.
+    let mut e = Entities::new();
+    let f = polygon(
+        &mut e,
+        &[
+            (0.0, 0.0),
+            (6.0, 0.0),
+            (6.0, 2.0),
+            (12.0, 2.0),
+            (12.0, 0.0),
+            (18.0, 0.0),
+            (18.0, 6.0),
+            (12.0, 6.0),
+            (12.0, 4.0),
+            (6.0, 4.0),
+            (6.0, 6.0),
+            (0.0, 6.0),
+        ],
+    );
+    let new = offset_face(&mut e, f, 1.5);
+    check(&e);
+    assert_eq!(new.len(), 8);
+    assert_eq!(areas(&e), [9.0, 9.0, 66.0]);
+}
+
+#[test]
+fn hole_merges_with_outer_offset() {
+    // A hole near the left side: growing it by 1.5 runs into the outer loop's offset,
+    // and the two offsets merge into one C-shaped loop.
+    let mut e = Entities::new();
+    rect(&mut e, 0.0, 0.0, 10.0, 10.0);
+    rect(&mut e, 1.0, 4.0, 3.0, 6.0);
+    let f = e
+        .faces
+        .iter()
+        .find(|(_, f)| f.holes.len() == 1)
+        .map(|(id, _)| id)
+        .unwrap();
+    let new = offset_face(&mut e, f, 1.5);
+    check(&e);
+    assert_eq!(new.len(), 8);
+    // [1.5, 8.5]^2 minus the grown hole [-0.5, 4.5] x [2.5, 7.5]: 49 - 15. The rest of
+    // the face (96 - 34) keeps both the hole and the new loop as holes.
+    assert_eq!(areas(&e), [4.0, 34.0, 62.0]);
+    let rest = e
+        .faces
+        .keys()
+        .find(|&g| (area(&e, g) - 62.0).abs() < 1e-6)
+        .unwrap();
+    assert_eq!(e.faces[rest].holes.len(), 2);
+}
+
+#[test]
+fn outward_offset_closes_a_narrow_slot() {
+    // A block with a 2-wide slot cut into its top: offsetting outward by 1.5 fills the
+    // slot; the offset is the block's outline grown, with nothing of the slot.
+    let mut e = Entities::new();
+    let f = polygon(
+        &mut e,
+        &[
+            (0.0, 0.0),
+            (12.0, 0.0),
+            (12.0, 12.0),
+            (7.0, 12.0),
+            (7.0, 6.0),
+            (5.0, 6.0),
+            (5.0, 12.0),
+            (0.0, 12.0),
+        ],
+    );
+    let new = offset_face(&mut e, f, -1.5);
+    check(&e);
+    assert_eq!(new.len(), 4);
+    // The grown outline is 15x15; the block has area 132.
+    assert_eq!(areas(&e), [93.0, 132.0]);
+}
+
+#[test]
+fn circle_offset_past_its_radius_adds_nothing() {
+    let mut e = Entities::new();
+    let c = circle(10.0);
+    add_curve(&mut e, &c.points(), Some(c));
+    let f = only_face(&e);
+    for d in [10.0, 12.0] {
+        assert!(offset_face(&mut e, f, d).is_empty(), "offset {d}");
+        check(&e);
+        assert_eq!((e.edges.len(), e.faces.len()), (24, 1));
+    }
+}
+
+#[test]
+fn rounded_ends_stay_arcs_when_trimmed_elsewhere() {
+    // A slot (two half circles of radius 3 joined by straight sides) with a 2-wide tab
+    // on one side: offsetting inward by 1.5 removes the tab and keeps both ends as
+    // concentric arcs of radius 1.5.
+    let mut e = Entities::new();
+    let half = |cx: f64, start: f64| mt_kernel::Arc {
+        center: p(cx, 0.0, 0.0),
+        start_angle: start,
+        end_angle: start + std::f64::consts::PI,
+        segments: 8,
+        ..circle(3.0)
+    };
+    let right = half(10.0, -std::f64::consts::FRAC_PI_2);
+    let left = half(0.0, std::f64::consts::FRAC_PI_2);
+    add_curve(&mut e, &right.points(), Some(right));
+    add_curve(&mut e, &left.points(), Some(left));
+    // Top side with a tab x in [4, 6], y in [3, 6]; bottom side straight.
+    let top = [
+        (10.0, 3.0),
+        (6.0, 3.0),
+        (6.0, 6.0),
+        (4.0, 6.0),
+        (4.0, 3.0),
+        (0.0, 3.0),
+    ];
+    for w in top.windows(2) {
+        add_line(&mut e, p(w[0].0, w[0].1, 0.0), p(w[1].0, w[1].1, 0.0));
+    }
+    add_line(&mut e, p(0.0, -3.0, 0.0), p(10.0, -3.0, 0.0));
+    check(&e);
+    let f = only_face(&e);
+    let new = offset_face(&mut e, f, 1.5);
+    check(&e);
+    assert_eq!(e.faces.len(), 2);
+    // 8 + 8 arc segments and the two straight sides: the tab left no trace.
+    assert_eq!(new.len(), 18);
+    let mut radii: Vec<f64> = new
+        .iter()
+        .filter_map(|&x| e.edges[x].attrs.curve)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .map(|c| e.curves[c].arc.expect("arc curve").radius)
+        .collect();
+    radii.sort_by(f64::total_cmp);
+    assert_eq!(radii.len(), 2, "one curve per end");
+    assert!(radii.iter().all(|r| (r - 1.5).abs() < 1e-9));
+    for &x in &new {
+        for v in [e.edges[x].start, e.edges[x].end] {
+            assert!(
+                e.pos(v).y.abs() <= 1.5 + 1e-9,
+                "nothing of the tab: {}",
+                e.pos(v)
+            );
+        }
+    }
+}
+
+mod random {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Overlapping rectangles (making L, U and holed faces), then offsets of faces by
+    /// distances that trim them in every way; the model stays valid.
+    fn run(rects: &[(i8, i8, i8, i8)], offsets: &[(usize, i8)]) -> Result<(), TestCaseError> {
+        let mut e = Entities::new();
+        for &(x0, y0, w, h) in rects {
+            let (x0, y0) = (f64::from(x0), f64::from(y0));
+            rect(&mut e, x0, y0, x0 + f64::from(w), y0 + f64::from(h));
+        }
+        for &(n, d) in offsets {
+            let Some(f) = e.faces.keys().nth(n % e.faces.len().max(1)) else {
+                break;
+            };
+            let d = f64::from(d) * 0.75;
+            let new = offset_face(&mut e, f, d);
+            let errs = validate(&e, Checks::ALL);
+            prop_assert!(errs.is_empty(), "offset {d} of {f:?}: {errs:#?}");
+            for x in new {
+                prop_assert!(e.edges.contains_key(x));
+            }
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn offsets_stay_valid(
+            rects in prop::collection::vec((0i8..12, 0i8..12, 1i8..8, 1i8..8), 1..5),
+            offsets in prop::collection::vec((any::<usize>(), -4i8..=4), 1..4),
+        ) {
+            run(&rects, &offsets)?;
+        }
+    }
 }

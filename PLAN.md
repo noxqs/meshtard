@@ -110,7 +110,8 @@ SketchUp runs only on Windows and macOS, so the trial runs on one of those machi
 - [x] `mt-skp`: VFF container (2021+) and legacy MFC CArchive (SketchUp 3 to 2020), ported from OpenSKP C++ at commit `359d183`. Geometry, components, tags, materials with textures, styles with watermarks, scenes, saved view, dimensions, guides, attribute dictionaries.
 - [x] Test: all 25 files in `tests/corpus/openskp` match OpenSKP Python's output (same commit), field by field. Known gaps both ways are listed in `crates/mt-skp/tests/oracle.rs`.
 - [x] App: File > Open and `meshtard FILE.skp` load a model and draw its edges, at the view it was saved with.
-- [ ] Not yet read (Python oracle has them, C++ does not): edge layer and curve id, legacy face layers, legacy model-level dimensions, text positions.
+- [x] Edge curve ids, legacy face layers, legacy model-level dimensions, text positions, legacy styles now read.
+- [ ] Not yet read: edge layers; VFF texts (none in the corpus); tag folders and dashes (no sample).
 - [ ] Loading into `mt-kernel` entities moves to M2, where the kernel is built.
 
 Reading first means real SketchUp models are available for testing everything else.
@@ -122,7 +123,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Validity checker after every operation: 16 scenario tests plus random sequences (3,000+ cases per run).
 - [x] `.skp` import into kernel entities (all 25 sample files pass topology checks), triangulation (exact area on every well-formed face).
 - [x] Renderer: shaded two-sided faces with materials, edges drawn on top, translucency. The app draws `.skp` files with faces.
-- [ ] Not yet: spatial index for large kernel operations (lookups are linear today). (Undo and Intersect Faces came in M6.)
+- [x] Spatial index (multi-level grid) for kernel lookups: Push/Pull 51 -> 3 ms, Move 77 -> 4 ms on a 51k-edge model.
 
 ### M3: Renderer and GUI shell
 - [x] Faces, edges, profiles (borders and silhouettes), front/back face colors.
@@ -130,7 +131,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Selection: click, Ctrl/Shift/Ctrl+Shift, window vs crossing, double/triple click, highlight; Select All, Select None, Delete.
 - [x] CPU BVH for picking.
 - [ ] CUDA triangulation and BVH build: to be done on the user's Linux machine with an NVIDIA GPU (Remote Control session).
-- [ ] Not yet: dockable toolbars, other tray panels' contents, component-aligned selection boxes.
+- [ ] Not yet: dockable toolbars; Environments and Instructor panels.
 
 ### M4: Inference engine
 - [x] `mt-infer`: endpoint, midpoint, origin, on edge, on axis, on face.
@@ -145,7 +146,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Curves in the kernel: arcs, circles and freehand curves select, erase and report (Entity Info) as one entity.
 - [x] Shapes lie on the clicked face's plane or the ground; arrow keys lock the plane. Typed values: rectangle `w,h`, radius, `24s` sides/segments, arc bulge, arc angle.
 - [x] Eraser: click or drag; Shift hides, Ctrl softens/smooths, Ctrl+Shift unsoftens.
-- [ ] Not yet: rectangle orientation on tilted faces as SketchUp does it, Eraser drag preview highlighting in SketchUp's style. (Hints and undo are done.)
+- [ ] Not yet: rectangle orientation on tilted faces as SketchUp does it.
 
 ### M6: Modeling tools
 - [x] Undo/Redo (snapshot per edit, 100 steps).
@@ -153,7 +154,8 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Tape Measure: parallel guide from an edge, guide point otherwise; guides imported from `.skp`, used by inference; Edit > Delete Guides.
 - [x] Protractor (angle or slope guides), Dimensions (linear, radius, diameter), Text (leader and screen text), saved to .skp.
 - [x] Push/Pull double-click repeats the last distance; Ctrl toggles copy / new faces.
-- [ ] Not yet: Scale grips; Move/Rotate showing the moved geometry live (now an outline); Offset trimming partial collapses.
+- [x] Scale grip box (corner, edge, face grips; typed factors and sizes); Move/Rotate/Scale show the geometry live; Offset trims partial collapses.
+- [x] Make Component dialog (name, description, Glue to, Set Component Axes); gluing components lie on matching faces.
 - [ ] CUDA: intersection and solid tools (mt-cuda in progress on the Linux machine).
 
 ### M7: Scene structure
@@ -165,7 +167,8 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Components panel: In Model list with instance counts, place instances, edit name and description, Purge Unused.
 - [x] Large models build their pick index on the GPU (`--features cuda`, from 20k triangles; threshold being measured).
 - [x] Textures: imported with their UV mapping (checked against OpenSKP), drawn in Shaded With Textures, saved back.
-- [ ] Left for later: section fill, scene transitions, component axes dialog and gluing, tag folders and dashes, Statistics tab.
+- [x] Section fill, animated scene transitions, Eraser drag preview, selection boxes in component axes.
+- [ ] Left for later: tag folders and dashes (no sample file), Components Statistics tab.
 
 ### M8: `.skp` writing
 - [x] Writer: Rust port of OpenSKP's legacy v17 (SketchUp 2017) writer, byte-identical to OpenSKP on 17 models; extended with plain edges (per-edge soft/smooth/hidden), root group instances (shared group definitions), a plane tolerance for real models and empty-root files.

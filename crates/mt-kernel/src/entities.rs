@@ -441,6 +441,10 @@ impl Entities {
         }
         self.edges[e].faces.clear();
         self.unlink_edge(e);
+        // `w` may be off the edge by up to the tolerance: the faces' boxes can change.
+        for &f in &edge.faces {
+            self.refresh_face_bounds(f);
+        }
         (a, b)
     }
 }
