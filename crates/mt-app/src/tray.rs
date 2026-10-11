@@ -16,6 +16,7 @@ impl App {
             current_material: self.current_material,
             active_scene: self.active_scene,
             scene_tabs: self.scene_tabs,
+            soften: self.soften.settings,
             ..TrayData::default()
         };
         let Some(doc) = &self.document else {
@@ -447,6 +448,7 @@ impl App {
                 };
                 true
             }
+            Event::SoftenChanged(s) => self.soften_changed(s),
             Event::ShadowsChanged(s) => {
                 let (month, day) = mt_ui::month_day(s.day_of_year);
                 let sh = &mut doc.model.shadows;

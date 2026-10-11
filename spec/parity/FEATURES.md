@@ -33,8 +33,8 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 
 ## Tier 2: modeling power and file exchange
 
-13. [ ] **Solid Tools: Outer Shell, Union, Subtract, Intersect, Trim, Split** (`tool.outer_shell`, `tool.solid_*`) L.
-    Needs a "is solid" test (closed manifold, already shown in Entity Info?) and a robust mesh boolean in mt-kernel built on `intersect.rs` (intersect faces, classify each face inside/outside the other solid by ray parity, keep/discard, merge coplanar). CUDA candidate for classification on large models. Trial: result naming, which input is kept (Subtract/Trim), what happens to materials.
+13. [x] **Solid Tools: Outer Shell, Union, Subtract, Intersect, Trim, Split** (`tool.outer_shell`, `tool.solid_*`) L.
+    Needs a "is solid" test (closed manifold, already shown in Entity Info?) and a robust mesh boolean in mt-kernel built on `intersect.rs` (intersect faces, classify each face inside/outside the other solid by ray parity, keep/discard, merge coplanar). CUDA candidate for classification on large models. Trial: result naming, which input is kept (Subtract/Trim), what happens to materials. Done: kernel in `mt_kernel::solid`, tools in `crates/mt-app/src/solid_tools.rs` and `pick_tool.rs` (click first and second solid; Outer Shell also on a selection); results are new groups; Entity Info shows Solid Group/Component and Volume.
 14. [x] **Export 2D Graphic (PNG/JPG)** (`file.export_2d`) S.
     Render the viewport offscreen at a chosen size (wgpu texture readback), save with `image`. Options dialog: size, transparent background, anti-alias. Done (`crates/mt-app/src/export.rs`, `Viewport::render_image`); dimension/text labels (egui overlay) are not in the image.
 15. [x] **Export 3D Model (OBJ, STL, glTF/DAE)** (`file.export_3d`) M.
@@ -43,26 +43,26 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     .skp import as a component definition (reader exists); OBJ/STL to faces with merge; images as image entities or textures (needs image entity, see 30). Done for .skp (Place Component), OBJ (MTL colors, no texture maps) and STL (`mt_kernel::mesh_import`, `crates/mt-app/src/import.rs`). Images are not imported yet: they wait for the image entity of item 30.
 17. [x] **Scenes from the View > Animation menu** (`view.anim_*`) S.
     Scenes and transitions exist in the tray; add Add/Update/Delete/Previous/Next/Play and the Settings dialog (transition time, scene delay). Trial: Update Scene's property dialog. Done (`crates/mt-app/src/animation.rs`); Update Scene updates at once (no property dialog); settings are not saved in the file.
-18. [ ] **Tag tool and Window > Tags shortcuts** (`tool.tag`) S.
-    Click to move entities to the active tag (SketchUp 2026 Tag Tool: Alt to sample, Ctrl to keep selection). Trial: its exact keys.
-19. [ ] **Axes tool** (`tool.axes`) S.
-    Reuse `AxesPick` from the Make Component dialog; store model axes in the file (model-level transformation) and drive drawing directions/inference from it.
+18. [x] **Tag tool and Window > Tags shortcuts** (`tool.tag`) S.
+    Click to move entities to the active tag (SketchUp 2026 Tag Tool: Alt to sample, Ctrl to keep selection). Trial: its exact keys. Done (`pick_tool.rs`): click tags, Alt+click samples; Ctrl not done.
+19. [x] **Axes tool** (`tool.axes`) S.
+    Reuse `AxesPick` from the Make Component dialog; store model axes in the file (model-level transformation) and drive drawing directions/inference from it. Done (`model_axes.rs`, `mt_infer::Axes`): axes drawn and inferred there; not saved in the file (mt-skp does not expose model axes); shape tools' default planes stay world-aligned.
 20. [ ] **Position Camera, Walk, Look Around, Field of View** (`camera.position|walk|look_around|field_of_view`) M.
     Eye height 5' 6" (verify), walking with collision off, look around rotates about the eye; Field of View is a drag tool plus typed degrees (`35deg`) or focal length (`50mm`).
 21. [ ] **Model Info** (`window.model_info`) M.
     Dialog pages: Units (format, precision, snapping), Dimensions, Text, Statistics (purge unused), Geo-location (read only), Credits, File. Units already exist in the model; wire to the dialog. Trial: screenshots of every page.
 22. [ ] **Preferences** (`window.preferences`) M.
     Shortcuts page (rebind and save to user config like `toolbars.toml`), Drawing (click-drag-click), Graphics, General (auto-save, backup). Trial: shortcut export file.
-23. [ ] **Revert** (`file.revert`) S.
+23. [x] **Revert** (`file.revert`) S.
     Reopen the file from disk after a confirm prompt (reuse `confirm.rs`).
-24. [ ] **Hide Rest of Model / Hide Similar Components** (`view.hide_rest_of_model|hide_similar_components`) S.
+24. [x] **Hide Rest of Model / Hide Similar Components** (`view.hide_rest_of_model|hide_similar_components`) S.
     Edit context exists; renderer fades or hides everything outside the context path.
-25. [ ] **Intersect With Context** (`edit.intersect_context`) S.
+25. [x] **Intersect With Context** (`edit.intersect_context`) S.
     Same as Intersect With Selection limited to the active context; `intersect.rs` already has the core.
 26. [x] **Fog** (`view.fog`, `window.fog`) S.
     Fog start/end distance and color in the style; a fragment shader term. Trial: default distances.
-27. [ ] **Soften Edges panel** (`window.soften_edges`) S.
-    Angle slider; soften/smooth selected edges whose face angle is under it (Eraser Ctrl already softens single edges).
+27. [x] **Soften Edges panel** (`window.soften_edges`) S.
+    Angle slider; soften/smooth selected edges whose face angle is under it (Eraser Ctrl already softens single edges). Done (`soften.rs`, Soften Edges tray panel).
 28. [ ] **Two-Point Perspective** (`camera.two_point`) M.
     Keep vertical lines vertical: shifted-lens projection; orbit switches it off.
 

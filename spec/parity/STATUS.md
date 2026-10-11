@@ -54,7 +54,7 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Camera | Zoom (wheel at cursor, Z) | unverified | scenario 00 |
 | Camera | Zoom Extents (Shift+Z), Standard Views, Parallel Projection / Perspective, Previous / Next | unverified | fit to bounding sphere; views animate and fit; Iso from the camera's quadrant; scenario 00 steps 11-14 |
 | Camera | Zoom Window | unverified | drag a box (solid either way); centers on it at the target depth and fills the view; tool stays active |
-| Shell | Window menu opens tray panels, Show Tray | unverified | Environments, Instructor, Fog, Soften Edges still grey |
+| Shell | Window menu opens tray panels, Show Tray | unverified | Environments and Instructor still grey; Fog and Soften Edges are added to the tray when first opened |
 | Select | Click rules (Ctrl add, Shift toggle, Ctrl+Shift remove) | unverified | |
 | Select | Double click face/edge, triple click connected | unverified | |
 | Select | Window (left to right) vs crossing (right to left) | unverified | solid vs dashed box |
@@ -98,7 +98,12 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Modify | Offset | differs | typed distance, arcs stay arcs, partial collapses trimmed; corners always mitered; trimmed arc ends become chord pieces |
 | Modify | Follow Me | unverified | select path, click profile; soft joints under 30 degrees |
 | Modify | Paint Bucket | differs | paints clicked side, group or component, or the selection when clicking a selected entity; no Alt sample, no Ctrl/Shift fills |
-| Modify | Intersect Faces with Model, with Selection | unverified | With Context missing |
+| Modify | Intersect Faces with Model, with Selection, with Context | unverified | With Context: selected loose faces against every face of the open context (selected groups' contents not intersected) |
+| Modify | Solid Tools: Union, Intersect, Subtract, Trim, Split (Tools > Solid Tools) | unverified | click tools: first solid, then second, in the open context; cursor label "Solid Group" / "Solid Component" / "Not a solid" / "Locked" (SketchUp shows cursor badges), status text per step; results are new groups `Group#n` with the origin at their bounding-box corner and the tag of the input they replace, one undo step; Subtract and Trim give second minus first, Subtract deletes both inputs, Trim keeps the first, Split makes up to three groups; a failed boolean leaves the model unchanged with a status message; tool stays active after each result; Esc drops the first pick |
+| Modify | Outer Shell | unverified | with two or more solid groups/components selected it runs at once and selects the result; otherwise a click tool like Union |
+| Modify | Tag tool | unverified | click moves the entity (or the whole selection when clicking a selected entity) to the active tag of the Tags panel; Alt+click samples an entity's tag as the active tag (from memory of the 2025 Tag tool); no Ctrl option; locked groups keep their tag |
+| Modify | Soften Edges panel (Window > Soften Edges) | unverified | angle between normals slider (0-180, default 20), Smooth normals (on), Soften coplanar (off): defaults from memory; applies to selected edges and the edges of selected faces live, a slider drag is one undo step; edges without exactly two faces untouched |
+| Construction | Axes tool | unverified | click origin, red point, green point (blue by the right-hand rule); moves the drawn axes, axis inferences, arrow-key locks, origin snap and the free-point ground plane; one undo step; model-only (not read from or written to .skp); inside an open group it still sets the model axes; no Reset/Move/Place context menu |
 | Construction | Tape Measure | unverified | parallel guide from an edge, guide point otherwise; guides dashed gray, infinite |
 | Construction | Protractor | differs | angle or slope guides; drawn at click radius (SketchUp: fixed screen size); no 15 degree snap; no Ctrl measure-only |
 | Construction | Delete Guides | unverified | Edit menu |
@@ -110,6 +115,8 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Groups | Gluing | unverified | glued components lie on matching faces; orientation on the face a guess |
 | Groups | Placing components | differs | click places at a point; no cursor rotation while placing |
 | Groups | Edit in place | unverified | double click; rest faded (amount a guess) and not selectable; Esc, click outside (also on empty space) or Edit > Close closes |
+| Groups | View > Component Edit > Hide Rest Of Model, Hide Similar Components | unverified | while a group or component is open, hide everything outside it (guides too) / other instances of its definition; check marks; style settings (model-only, not saved; SketchUp keeps them in the model, unverified) |
+| Tray | Entity Info for solids | unverified | "Solid Group" / "Solid Component" title and Volume in model units cubed (`1000.00 in³`, format and precision a guess); scaled instances scale the volume |
 | Groups | Explode | differs | welds vertices and overlapping edges only; no splitting where edges cross |
 | Groups | Make Unique | unverified | |
 | Section | Section Plane tool | differs | on clicked face or horizontal; no name/symbol dialog; no arrow-key locks |
@@ -124,6 +131,7 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | File | New, Save, Save As, Save A Copy As | differs | writes SketchUp 2017 format; SketchUp 2026 writes VFF |
 | File | Round trip | differs | not saved: camera view (opens in Iso), scenes, styles, shadows, units, active section, edge tags, guides and section planes inside components, group/component locks, View > Axes / Guides / Hidden Geometry; arcs reopen as polylines (hidden flags of edges, faces and instances are saved) |
 | File | "Save changes?" prompt | unverified | on New, Open, dropped file, close; Yes/No/Cancel, wording a guess |
+| File | Revert | unverified | reopens the file from disk (camera back to the saved view); asks "Revert ... ? Unsaved changes will be lost." with Revert/Cancel only when there are unsaved changes (wording a guess); enabled only when the model has a file |
 | File | Saved files open in real SketchUp 2026 | unverified | not tried yet |
 | File | Export 2D Graphic (PNG, JPEG) | unverified | options dialog first (Use view size, width/height with the view's aspect, Anti-alias, Transparent background for PNG), then the save dialog; offscreen render; anti-alias = 2x supersampling over the view's 4x MSAA; line widths stay in pixels; selection not drawn; dimension and text labels missing; transparent leaves out sky/ground (and ground shadows); JPEG quality 90. Defaults (view size, anti-alias on, transparent off) from memory |
 | File | Export 3D Model: OBJ | unverified | triangles only (no polygon option), flattened groups/components, hidden and hidden-tag geometry skipped, edges not exported; MTL Kd/d, textures written next to the .obj as `<name>_<material>.<ext>` (stored image; colorized textures not recolored); faces without material use `FrontColor`/`BackColor` (names from memory); units choice (default model units); "Swap YZ" (Y up) on and two-sided off by default (from memory) |

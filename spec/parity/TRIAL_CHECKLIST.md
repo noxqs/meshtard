@@ -62,6 +62,7 @@ Screenshot every dialog and behaviour that meshtard does not have yet (its menu 
 - [ ] `File > Export > 3D Model`, `2D Graphic`, `Section Slice`, `Animation`: the file dialog and each Options... dialog into `spec/raw/export/`
 - [ ] `File > Import`: the file dialog with its type list and Options... into `spec/raw/import/`
 - [ ] Solid Tools (Outer Shell, Intersect, Union, Subtract, Trim, Split, Solid Inspector if present) on two overlapping solid groups: before and after for each into `spec/raw/solid_tools/`; note which input is kept and the status bar text for non-solids
+- [ ] Tag tool, Axes tool, Soften Edges panel, Revert, View > Component Edit (Hide Rest Of Model, Hide Similar Components): the Tag tool's modifier keys (sample, keep selection) and cursor; Axes tool clicks and its context menu (Reset, Move, Place); Soften Edges defaults (angle, Smooth normals, Soften coplanar) and whether face edges count; the Revert prompt text; Entity Info rows and volume format for a solid group into `spec/raw/m12/`
 - [ ] Sandbox (From Contours, From Scratch, Smoove, Stamp, Drape, Add Detail, Flip Edge): one screenshot per tool in use into `spec/raw/sandbox/`
 - [ ] `Tools > 3D Text`: the dialog and the placed result into `spec/raw/3d_text/`
 - [ ] `File > Print Preview` and `File > Print`: dialogs into `spec/raw/print/`

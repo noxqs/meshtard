@@ -12,6 +12,8 @@ pub enum Tool {
     /// A modify tool from `modify`, by command id.
     Modify(&'static str),
     Eraser,
+    /// A click tool from `pick_tool` (Solid Tools, Tag), by command id.
+    Pick(&'static str),
     Orbit,
     Pan,
     Zoom,
@@ -45,6 +47,14 @@ impl Tool {
             "tool.follow_me" => Self::Modify("tool.follow_me"),
             "tool.paint_bucket" => Self::Modify("tool.paint_bucket"),
             "tool.section_plane" => Self::Modify("tool.section_plane"),
+            "tool.axes" => Self::Modify("tool.axes"),
+            "tool.tag" => Self::Pick("tool.tag"),
+            "tool.outer_shell" => Self::Pick("tool.outer_shell"),
+            "tool.solid_intersect" => Self::Pick("tool.solid_intersect"),
+            "tool.solid_union" => Self::Pick("tool.solid_union"),
+            "tool.solid_subtract" => Self::Pick("tool.solid_subtract"),
+            "tool.solid_trim" => Self::Pick("tool.solid_trim"),
+            "tool.solid_split" => Self::Pick("tool.solid_split"),
             "camera.orbit" => Self::Orbit,
             "camera.pan" => Self::Pan,
             "camera.zoom" => Self::Zoom,
@@ -57,7 +67,7 @@ impl Tool {
     pub fn command(self) -> &'static str {
         match self {
             Self::Select => "tool.select",
-            Self::Draw(id) | Self::Modify(id) => id,
+            Self::Draw(id) | Self::Modify(id) | Self::Pick(id) => id,
             Self::Eraser => "tool.eraser",
             Self::Orbit => "camera.orbit",
             Self::Pan => "camera.pan",
@@ -72,7 +82,7 @@ impl Tool {
             Self::Select => {
                 "Select objects. Shift to extend select. Drag mouse to select multiple."
             }
-            Self::Draw(_) | Self::Modify(_) => "",
+            Self::Draw(_) | Self::Modify(_) | Self::Pick(_) => "",
             Self::Eraser => {
                 "Select objects to erase. Shift = Hide, Ctrl = Soften/Smooth, Ctrl+Shift = Unsoften."
             }
@@ -105,7 +115,12 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
     }
     if input.left_drag != DVec2::ZERO {
         match tool {
-            Tool::Select | Tool::Draw(_) | Tool::Modify(_) | Tool::Eraser | Tool::ZoomWindow => {}
+            Tool::Select
+            | Tool::Draw(_)
+            | Tool::Modify(_)
+            | Tool::Pick(_)
+            | Tool::Eraser
+            | Tool::ZoomWindow => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
             Tool::Orbit => camera.orbit(input.left_drag),
             Tool::Pan => camera.pan(input.left_drag, viewport),

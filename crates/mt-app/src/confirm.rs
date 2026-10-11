@@ -15,6 +15,8 @@ pub enum Pending {
     /// Open this file, or ask for one.
     Open(Option<PathBuf>),
     Exit,
+    /// File > Revert: asks "Revert?" instead of "Save changes?" (wording unverified).
+    Revert,
 }
 
 impl App {
@@ -45,6 +47,7 @@ impl App {
                 self.closing = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Pending::Revert => self.revert(ctx, frame),
         }
     }
 
@@ -71,24 +74,48 @@ impl App {
             .and_then(|d| d.path.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "Untitled".into());
         let mut answer = None;
-        egui::Modal::new(egui::Id::new("mt_save_changes")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            ui.label("meshtard");
-            ui.add_space(6.0);
-            ui.label(format!("Save changes to \"{name}\"?"));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Yes").clicked() {
-                    answer = Some(Answer::Yes);
-                }
-                if ui.button("No").clicked() {
-                    answer = Some(Answer::No);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    answer = Some(Answer::Cancel);
-                }
+        if matches!(action, Pending::Revert) {
+            egui::Modal::new(egui::Id::new("mt_revert")).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label("meshtard");
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "Revert \"{name}\" to the last saved version? Unsaved changes will be lost."
+                ));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Revert").clicked() {
+                        answer = Some(Answer::No);
+                    }
+                    if ui.button("Cancel").clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        answer = Some(Answer::Cancel);
+                    }
+                });
             });
-        });
+        } else {
+            egui::Modal::new(egui::Id::new("mt_save_changes")).show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label("meshtard");
+                ui.add_space(6.0);
+                ui.label(format!("Save changes to \"{name}\"?"));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Yes").clicked() {
+                        answer = Some(Answer::Yes);
+                    }
+                    if ui.button("No").clicked() {
+                        answer = Some(Answer::No);
+                    }
+                    if ui.button("Cancel").clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        answer = Some(Answer::Cancel);
+                    }
+                });
+            });
+        }
         match answer {
             Some(Answer::Yes) => {
                 self.pending = None;

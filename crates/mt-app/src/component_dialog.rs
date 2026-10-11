@@ -162,6 +162,7 @@ impl App {
 }
 
 /// "Set Component Axes": click the origin, a point along red, a point toward green.
+/// Without a dialog it is the Axes tool, picking the model's drawing axes.
 #[derive(Debug)]
 pub struct AxesPick {
     points: Vec<DVec3>,
@@ -170,8 +171,18 @@ pub struct AxesPick {
 }
 
 impl AxesPick {
+    /// The Axes tool (Tools > Axes).
+    pub fn model_axes() -> Self {
+        Self {
+            points: Vec::new(),
+            frame: None,
+            dialog: None,
+        }
+    }
+
     /// The finished dialog and axes, once the third point is placed.
     pub fn take(&mut self) -> Option<(MakeComponent, DMat4)> {
+        self.dialog.as_ref()?;
         let f = self.frame.take()?;
         Some((self.dialog.take()?, f))
     }
@@ -193,6 +204,15 @@ pub fn axes_frame(o: DVec3, red: DVec3, green: DVec3) -> Option<DMat4> {
 
 impl ModifyTool for AxesPick {
     fn status(&self) -> String {
+        if self.dialog.is_none() {
+            // The Axes tool (draft wording).
+            return match self.points.len() {
+                0 => "Select a point for the axes origin.",
+                1 => "Select a point on the red axis.",
+                _ => "Select a point toward the green axis.",
+            }
+            .into();
+        }
         match self.points.len() {
             0 => "Select origin of the component axes.",
             1 => "Select a point on the red axis.",
@@ -244,6 +264,13 @@ impl ModifyTool for AxesPick {
 
     fn take_axes(&mut self) -> Option<(MakeComponent, DMat4)> {
         self.take()
+    }
+
+    fn take_model_axes(&mut self) -> Option<DMat4> {
+        if self.dialog.is_some() {
+            return None;
+        }
+        self.frame.take()
     }
 }
 

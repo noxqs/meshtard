@@ -108,6 +108,10 @@ impl Shell {
                 self.fog_panel(ui, &mut data);
                 true
             }
+            "window.soften_edges" => {
+                self.soften_panel(ui, &mut data);
+                true
+            }
             _ => false,
         };
         self.data = data;
@@ -949,6 +953,22 @@ impl Shell {
         }
     }
 
+    /// Soften Edges panel: the "Angle between normals" slider (degrees) and the Smooth
+    /// normals and Soften coplanar boxes. Unverified: SketchUp's slider shows no
+    /// number field and is labeled "Angle between normals" above it.
+    fn soften_panel(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
+        let before = data.soften;
+        let s = &mut data.soften;
+        ui.label("Angle between normals");
+        ui.spacing_mut().slider_width = (ui.available_width() - 70.0).max(60.0);
+        ui.add(egui::Slider::new(&mut s.angle, 0..=180).suffix("°"));
+        ui.checkbox(&mut s.smooth, "Smooth normals");
+        ui.checkbox(&mut s.coplanar, "Soften coplanar");
+        if data.soften != before {
+            self.pending.push(Event::SoftenChanged(data.soften));
+        }
+    }
+
     /// Scene tabs above the viewport (View > Scene Tabs). Click activates a scene;
     /// right-click offers Update, Add and Delete. Unverified: tab shape and colors,
     /// and the full context menu (SketchUp also has Move Left/Right, Scene Manager).
@@ -1413,6 +1433,38 @@ mod tests {
         let f = changed.expect("a click in the panel changes the fog");
         assert!(f.enabled, "Display Fog is the first control: {f:?}");
         assert_eq!((f.start, f.end), (0, 100));
+    }
+
+    /// Window > Soften Edges shows the panel; a click on it changes the settings.
+    #[test]
+    fn window_soften_edges_opens_panel() {
+        let spec = Spec::builtin().unwrap();
+        let ctx = egui::Context::default();
+        let mut s = Shell::new(&spec);
+        assert!(
+            s.panels
+                .iter()
+                .any(|p| p.id == "window.soften_edges" && !p.shown)
+        );
+        s.command("window.soften_edges");
+        assert!(s.panel_expanded("window.soften_edges"));
+        let mut changed = None;
+        for y in (40..600).step_by(4) {
+            for p in &mut s.panels {
+                p.shown = p.id == "window.soften_edges";
+                p.expanded = p.shown;
+            }
+            let ev = run(&ctx, &mut s, &spec, click(pos2(1360.0, y as f32)));
+            if let Some(Event::SoftenChanged(f)) = ev
+                .into_iter()
+                .find(|e| matches!(e, Event::SoftenChanged(_)))
+            {
+                changed = Some(f);
+                break;
+            }
+        }
+        let f = changed.expect("a click in the panel changes the settings");
+        assert_ne!(f, crate::SoftenSettings::default());
     }
 
     /// Expands only the Components panel (clicks while scanning may toggle headers).

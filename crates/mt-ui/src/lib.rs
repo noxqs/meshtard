@@ -64,6 +64,7 @@
 //! | Styles    | [`TrayData::style`]: edges, back edges, profiles, depth cue, extension, section cut width, face style, X-ray | [`Event::StyleChanged`] |
 //! | Shadows   | [`TrayData::shadows`]: on/off, time, date, light, dark, on faces/ground | [`Event::ShadowsChanged`] |
 //! | Fog       | [`TrayData::fog`]: on/off, start and end distance, background or own color | [`Event::FogChanged`] |
+//! | Soften Edges | [`TrayData::soften`]: angle between normals, smooth normals, soften coplanar | [`Event::SoftenChanged`] |
 //!
 //! When [`TrayData::scene_tabs`] is on and there are scenes, [`Shell::show`] draws a
 //! strip of scene tabs between the toolbars and the viewport (the viewport closure
@@ -132,8 +133,8 @@ pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use theme::apply as apply_theme;
 pub use tray_data::{
     ComponentRow, FaceStyle, FogSettings, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow,
-    SelectMode, ShadowSettings, StyleSettings, TagRow, TrayData, component_edit, date_label,
-    day_of_year, instances_label, month_day, outliner_node, outliner_rows, time_label,
+    SelectMode, ShadowSettings, SoftenSettings, StyleSettings, TagRow, TrayData, component_edit,
+    date_label, day_of_year, instances_label, month_day, outliner_node, outliner_rows, time_label,
 };
 
 /// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection")
@@ -246,6 +247,9 @@ pub enum Event {
     ShadowsChanged(ShadowSettings),
     /// Fog: any setting changed; the complete new settings.
     FogChanged(FogSettings),
+    /// Soften Edges: any setting changed; the complete new settings (the app applies
+    /// them to the selection).
+    SoftenChanged(SoftenSettings),
 
     /// Toolbars: the user docked, floated, moved, closed or showed a toolbar. Save
     /// [`Shell::toolbar_layout`] if the app keeps the layout between runs.

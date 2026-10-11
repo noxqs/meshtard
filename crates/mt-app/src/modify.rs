@@ -75,6 +75,10 @@ pub trait ModifyTool {
     fn take_axes(&mut self) -> Option<(crate::component_dialog::MakeComponent, DMat4)> {
         None
     }
+    /// Axes tool: the picked drawing axes (context space) once complete.
+    fn take_model_axes(&mut self) -> Option<DMat4> {
+        None
+    }
     /// Ctrl pressed and released: toggles copy (Move, Rotate) or new faces
     /// (Push/Pull) for the rest of the tool's use (SketchUp keeps the toggle while the
     /// tool is active; unverified).
@@ -125,6 +129,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.follow_me" => Box::new(FollowMe),
         "tool.paint_bucket" => Box::new(PaintBucket::default()),
         "tool.section_plane" => Box::new(SectionPlaneTool),
+        "tool.axes" => Box::new(crate::component_dialog::AxesPick::model_axes()),
         _ => return None,
     })
 }

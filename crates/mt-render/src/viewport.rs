@@ -234,6 +234,9 @@ pub struct AxesStyle {
     pub colors: [[f32; 3]; 3],
     pub dotted_negative: bool,
     pub width: f32,
+    /// Where the axes cross and their unit red, green and blue directions (Axes tool).
+    pub origin: [f32; 3],
+    pub dirs: [[f32; 3]; 3],
 }
 
 /// Flat diffuse face shading: `color * (ambient + (1 - ambient) * max(0, n·light))`.
@@ -283,6 +286,8 @@ impl Style {
                 colors: [spec.axes.x, spec.axes.y, spec.axes.z],
                 dotted_negative: spec.axes.dotted_negative,
                 width: spec.axes.width_px,
+                origin: [0.0; 3],
+                dirs: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             }),
             // Profile width 2 matches item 1007 of SketchUp's default style seen in OpenSKP's
             // fixtures (unverified that 1007 is the profile width).
@@ -313,14 +318,18 @@ const DEFAULT_MONOCHROME: ([f32; 3], [f32; 3]) = (
 
 fn axis_segments(axes: &AxesStyle) -> Vec<Segment> {
     let mut out = Vec::with_capacity(6);
-    for (i, color) in axes.colors.iter().enumerate() {
-        let mut dir = [0.0; 3];
-        dir[i] = AXIS_LENGTH;
-        let neg = dir.map(|v| -v);
+    let o = axes.origin;
+    for (color, d) in axes.colors.iter().zip(axes.dirs) {
+        let at = |s: f32| [0, 1, 2].map(|k| o[k] + d[k] * s);
         let color = [color[0], color[1], color[2], 1.0];
-        out.push(Segment::line([0.0; 3], dir, color, [axes.width, 0.0]));
+        out.push(Segment::line(o, at(AXIS_LENGTH), color, [axes.width, 0.0]));
         let dash = if axes.dotted_negative { AXIS_DASH } else { 0.0 };
-        out.push(Segment::line([0.0; 3], neg, color, [axes.width, dash]));
+        out.push(Segment::line(
+            o,
+            at(-AXIS_LENGTH),
+            color,
+            [axes.width, dash],
+        ));
     }
     out
 }

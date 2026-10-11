@@ -3,6 +3,7 @@
 mod animation;
 mod annot;
 mod camera_cmd;
+mod commands;
 mod component_dialog;
 mod confirm;
 mod document;
@@ -11,11 +12,15 @@ mod filedialog;
 mod import;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod model_axes;
 mod modify;
 mod nav;
 mod overlay;
+mod pick_tool;
 mod selection;
 mod settings;
+mod soften;
+mod solid_tools;
 mod splash;
 mod tools;
 mod tray;
@@ -159,6 +164,19 @@ const IMPLEMENTED: &[&str] = &[
     "view.anim_next",
     "view.anim_play",
     "view.anim_settings",
+    "tool.outer_shell",
+    "tool.solid_intersect",
+    "tool.solid_union",
+    "tool.solid_subtract",
+    "tool.solid_trim",
+    "tool.solid_split",
+    "tool.tag",
+    "tool.axes",
+    "file.revert",
+    "view.hide_rest_of_model",
+    "view.hide_similar_components",
+    "edit.intersect_context",
+    "window.soften_edges",
 ];
 
 fn main() -> eframe::Result {
@@ -291,6 +309,10 @@ struct App {
     mesh_import: Option<import::MeshImport>,
     /// View > Animation settings and playback.
     animation: animation::Animation,
+    /// The Solid Tools or Tag tool, when `tool` is `Tool::Pick`.
+    pick: Option<pick_tool::PickTool>,
+    /// Window > Soften Edges.
+    soften: soften::SoftenPanel,
 }
 
 impl App {
@@ -380,6 +402,8 @@ impl App {
             exports: Default::default(),
             mesh_import: None,
             animation: Default::default(),
+            pick: None,
+            soften: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -527,6 +551,7 @@ impl App {
             if !st.axes {
                 style.axes = None;
             }
+            model_axes::apply(&doc.model, &mut style, &mut self.engine);
             self.viewport.set_style(device, style);
         }
         self.viewport
@@ -847,6 +872,7 @@ impl App {
             self.tool = tool;
             self.draw = tools::for_command(id);
             self.modify = modify::for_command(id);
+            self.start_pick_tool(frame, id);
             if let Some(m) = self.modify.as_mut() {
                 m.set_material(self.current_material);
             }
@@ -884,7 +910,7 @@ impl App {
             // Display settings; not undo steps in this draft.
             let device = rs.device.clone();
             self.rebuild(&device);
-        } else if self.camera_command(id) {
+        } else if self.camera_command(id) || self.extra_command(ctx, frame, id) {
         } else if id == "file.exit" {
             self.request(ctx, frame, confirm::Pending::Exit);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -1371,6 +1397,7 @@ impl App {
             Tool::Eraser => {
                 self.eraser_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
+            Tool::Pick(_) => self.pick_tool(ui, &response, rect, viewport_px, &render_state.device),
             Tool::ZoomWindow => {
                 self.inference = None;
                 self.zoom_window_tool(ui, &response, rect, viewport_px);
@@ -1414,6 +1441,7 @@ impl App {
         );
         self.draw_selection_box(ui, &response, rect);
         self.draw_zoom_box(ui, &response, rect);
+        self.pick_overlay(ui, rect);
         if self.annotations(ui, rect, viewport_px) {
             self.rebuild(&render_state.device);
         }
@@ -1737,6 +1765,10 @@ impl App {
             self.create_component(d, Some(axes), device);
             return;
         }
+        if let Some(axes) = tool.take_model_axes() {
+            self.set_model_axes(axes, device);
+            return;
+        }
         if tool.constraint().is_none() && tool.anchor().is_none() {
             self.engine.unlock();
         }
@@ -2046,6 +2078,8 @@ fn view_toggle(s: &mut mt_kernel::StyleSettings, id: &str) -> bool {
         "view.depth_cue" => s.depth_cue = !s.depth_cue,
         "view.extension" => s.extension = !s.extension,
         "view.fog" => s.fog.enabled = !s.fog.enabled,
+        "view.hide_rest_of_model" => s.hide_rest_of_model = !s.hide_rest_of_model,
+        "view.hide_similar_components" => s.hide_similar_components = !s.hide_similar_components,
         _ => return false,
     }
     true
@@ -2072,6 +2106,8 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
         "view.depth_cue" => s.depth_cue,
         "view.extension" => s.extension,
         "view.fog" => s.fog.enabled,
+        "view.hide_rest_of_model" => s.hide_rest_of_model,
+        "view.hide_similar_components" => s.hide_similar_components,
         _ => false,
     }
 }
@@ -2099,6 +2135,8 @@ const VIEW_TOGGLES: &[&str] = &[
     "view.depth_cue",
     "view.extension",
     "view.fog",
+    "view.hide_rest_of_model",
+    "view.hide_similar_components",
 ];
 
 /// The kernel's view of a selection.
@@ -2187,7 +2225,7 @@ impl App {
                 let inst = &root.instances[*i];
                 let def = doc.model.definitions.get(inst.definition);
                 let group = def.is_some_and(|d| d.is_group);
-                mt_ui::EntityInfo {
+                let mut info = mt_ui::EntityInfo {
                     title: if group { "Group" } else { "Component" }.into(),
                     rows: vec![
                         ("Instance".into(), inst.name.clone()),
@@ -2200,7 +2238,9 @@ impl App {
                             if inst.locked { "Yes" } else { "No" }.into(),
                         ),
                     ],
-                }
+                };
+                solid_tools::describe(doc, inst, &mut info);
+                info
             }
             [Owner::Section(i)] if *i < root.section_planes.len() => mt_ui::EntityInfo {
                 title: "Section Plane".into(),
@@ -2272,6 +2312,7 @@ impl eframe::App for App {
                 (_, Tool::Modify(_)) if self.modify.is_some() => {
                     self.modify.as_ref().map(|m| m.status()).unwrap_or_default()
                 }
+                (_, Tool::Pick(_)) => self.pick_status(),
                 (_, t) => t.hint().to_owned(),
             });
         let units = self
@@ -2296,6 +2337,7 @@ impl eframe::App for App {
         let can_redo = self.document.as_ref().is_some_and(Document::can_redo);
         let has_selection = !self.selection.items().is_empty();
         let can_paste = self.clipboard.is_some();
+        let has_file = self.document.as_ref().is_some_and(|d| d.has_file);
         let can_go_back = self.camera_history.can_go_back();
         let can_go_forward = self.camera_history.can_go_forward();
         let camera = self.camera.clone();
@@ -2316,6 +2358,7 @@ impl eframe::App for App {
                 "edit.paste" | "edit.paste_in_place" => can_paste,
                 "camera.previous" => can_go_back,
                 "camera.next" => can_go_forward,
+                "file.revert" => has_file,
                 _ => IMPLEMENTED.contains(&id),
             },
             is_checked: &|id| {

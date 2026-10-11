@@ -68,3 +68,11 @@ id = "window.fog"
 title = "Fog"
 expanded = false
 shown = false
+
+# Not in the Default Tray of a fresh install as far as remembered (unverified);
+# Window > Soften Edges adds it.
+[[panel]]
+id = "window.soften_edges"
+title = "Soften Edges"
+expanded = false
+shown = false

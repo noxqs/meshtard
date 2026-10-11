@@ -198,6 +198,11 @@ impl Document {
         }
     }
 
+    /// Id of the current model state (changes with every edit, undo and redo).
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
     /// Whether the model changed since it was opened or last saved.
     pub fn is_modified(&self) -> bool {
         self.state != self.saved_state
@@ -402,7 +407,8 @@ impl Document {
         let f = |p: DVec3| p.as_vec3().to_array();
         self.section_planes(&mut scene);
         crate::annot::collect(self, &mut scene);
-        let guides = if self.model.style.guides {
+        let rest_hidden = !self.context.is_empty() && self.model.style.hide_rest_of_model;
+        let guides = if self.model.style.guides && !rest_hidden {
             &root.guides[..]
         } else {
             &[]
@@ -559,6 +565,20 @@ impl Document {
         out: &mut Scene,
     ) {
         let show_hidden = self.model.style.hidden_geometry;
+        // View > Component Edit > Hide Rest Of Model: only the open context's path is
+        // walked outside it.
+        let editing = !self.context.is_empty();
+        let hide_rest = editing && self.model.style.hide_rest_of_model;
+        if hide_rest && matches!(level, Level::Outside) {
+            return;
+        }
+        let rest_here = hide_rest && matches!(level, Level::Context([_, ..]));
+        // View > Component Edit > Hide Similar Components: other instances of the open
+        // definition.
+        let open_def = (editing && self.model.style.hide_similar_components)
+            .then(|| Self::path_definitions(&self.model, &self.context))
+            .flatten()
+            .and_then(|d| d.last().copied());
         let ghost = inherited.hidden;
         let inherited = inherited.material;
         // Outside the open context: faded, not selectable.
@@ -583,7 +603,8 @@ impl Document {
             // Geometry shows hidden edges (and soft ones) dashed.
             let style = &self.model.style;
             let hidden = ghost || e.attrs.hidden || e.attrs.soft;
-            if (!style.edges && !style.profiles)
+            if rest_here
+                || (!style.edges && !style.profiles)
                 || (hidden && !show_hidden)
                 || !self.layer_visible(e.attrs.layer)
             {
@@ -620,7 +641,7 @@ impl Document {
 
         for (f, face) in &ents.faces {
             let hidden = ghost || face.attrs.hidden;
-            if (hidden && !show_hidden) || !self.layer_visible(face.attrs.layer) {
+            if rest_here || (hidden && !show_hidden) || !self.layer_visible(face.attrs.layer) {
                 continue;
             }
             let front_material = face.attrs.material.or(inherited);
@@ -698,6 +719,10 @@ impl Document {
 
         for (index, i) in ents.instances.iter().enumerate() {
             if (i.hidden && !show_hidden) || !self.layer_visible(i.layer) {
+                continue;
+            }
+            let on_path = matches!(level, Level::Context([first, ..]) if *first == index);
+            if (rest_here && !on_path) || (open_def == Some(i.definition) && !on_path) {
                 continue;
             }
             let Some(def) = self.model.definitions.get(i.definition) else {
@@ -1093,6 +1118,29 @@ mod tests {
         assert!(doc.undo());
         assert!(doc.context.is_empty());
         assert!(doc.model.definitions[def].entities.faces[face].attrs.hidden);
+    }
+
+    #[test]
+    fn hide_rest_of_model_and_similar_components() {
+        let mut doc = square_and_group();
+        // A second instance of the group's definition, moved aside.
+        let mut other = doc.model.root.instances[0].clone();
+        other.transform = DMat4::from_translation(DVec3::X * 50.0);
+        doc.model.root.instances.push(other);
+        let tris = |doc: &Document| doc.scene().triangles.len();
+        let all = tris(&doc);
+        doc.model.style.hide_rest_of_model = true;
+        doc.model.style.hide_similar_components = true;
+        assert_eq!(tris(&doc), all, "nothing hidden at the root");
+        assert!(doc.open_instance(0));
+        let face = 2; // one square: two triangles
+        doc.model.style.hide_rest_of_model = false;
+        assert_eq!(tris(&doc), all - face, "the other instance is hidden");
+        doc.model.style.hide_similar_components = false;
+        doc.model.style.hide_rest_of_model = true;
+        assert_eq!(tris(&doc), face, "only the open group");
+        doc.model.style.hide_rest_of_model = false;
+        assert_eq!(tris(&doc), all, "faded, not hidden");
     }
 
     #[test]

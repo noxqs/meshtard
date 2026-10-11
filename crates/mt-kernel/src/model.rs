@@ -2,7 +2,7 @@
 
 use slotmap::SlotMap;
 
-use glam::DVec3;
+use glam::{DMat4, DVec3};
 
 use crate::entities::{DefinitionId, Entities, LayerId};
 
@@ -123,6 +123,12 @@ pub struct StyleSettings {
     pub extension_length: f32,
     /// View > Fog and the Fog panel.
     pub fog: FogSettings,
+    /// View > Component Edit > Hide Rest Of Model: while a group or component is open,
+    /// nothing outside it is drawn (otherwise it is faded).
+    pub hide_rest_of_model: bool,
+    /// View > Component Edit > Hide Similar Components: while a component is open,
+    /// its other instances are not drawn.
+    pub hide_similar_components: bool,
 }
 
 /// Window > Fog. Distances are fractions of the model's depth as seen from the camera
@@ -174,6 +180,9 @@ impl Default for StyleSettings {
             extension: false,
             extension_length: 2.0,
             fog: FogSettings::default(),
+            // Both off by default (unverified).
+            hide_rest_of_model: false,
+            hide_similar_components: false,
         }
     }
 }
@@ -230,6 +239,10 @@ pub struct Model {
     pub pages: Vec<Page>,
     pub style: StyleSettings,
     pub shadows: ShadowSettings,
+    /// The drawing axes (Axes tool): columns are the unit red, green and blue
+    /// directions and the origin, in world space; identity for the default axes. Not
+    /// read from or written to .skp files yet (mt-skp does not expose them).
+    pub axes: DMat4,
 }
 
 impl Default for Model {
@@ -249,6 +262,7 @@ impl Default for Model {
             pages: Vec::new(),
             style: StyleSettings::default(),
             shadows: ShadowSettings::default(),
+            axes: DMat4::IDENTITY,
         }
     }
 }

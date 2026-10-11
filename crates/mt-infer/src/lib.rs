@@ -308,9 +308,40 @@ impl View<'_> {
     }
 }
 
+/// The drawing axes (Axes tool): an origin and unit red, green and blue directions.
+/// Axis inferences, axis locks, "on axis" and "from point" follow them, and points with
+/// no inference land on their red-green plane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Axes {
+    pub origin: DVec3,
+    /// Red, green, blue.
+    pub dirs: [DVec3; 3],
+}
+
+impl Default for Axes {
+    fn default() -> Self {
+        Self {
+            origin: DVec3::ZERO,
+            dirs: [DVec3::X, DVec3::Y, DVec3::Z],
+        }
+    }
+}
+
+impl Axes {
+    pub fn dir(&self, axis: Axis) -> DVec3 {
+        match axis {
+            Axis::Red => self.dirs[0],
+            Axis::Green => self.dirs[1],
+            Axis::Blue => self.dirs[2],
+        }
+    }
+}
+
 /// The inference state carried between mouse moves.
 #[derive(Debug, Clone, Default)]
 pub struct Engine {
+    /// The drawing axes (world axes by default).
+    pub axes: Axes,
     /// Last edge hovered: the reference for parallel and perpendicular.
     pub reference_edge: Option<usize>,
     /// Last point acquired (endpoint, midpoint, ... rested on): the source for "from
@@ -339,8 +370,12 @@ fn closest_on_line(o: DVec3, d: DVec3, ray_o: DVec3, ray_d: DVec3) -> DVec3 {
 }
 
 impl Engine {
+    /// Forgets everything but the drawing axes.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            axes: self.axes,
+            ..Self::default()
+        };
     }
 
     /// Forgets indices into the old geometry (reference edge, hovered arc) after the
@@ -356,7 +391,7 @@ impl Engine {
         let kind = Kind::Along(axis);
         self.lock = match self.lock {
             Some((_, k)) if k == kind => None,
-            _ => Some((axis.dir(), kind)),
+            _ => Some((self.axes.dir(axis), kind)),
         };
     }
 
@@ -538,7 +573,7 @@ impl Engine {
             return t;
         }
         Inference {
-            point: free_point(ray.origin, ray.dir, anchor),
+            point: free_point(ray.origin, ray.dir, anchor, &self.axes),
             kind: Kind::Free,
             edge: None,
             guide: None,
@@ -611,7 +646,7 @@ impl Engine {
                 Kind::Midpoint,
             )
         };
-        let origin = || best_point(&mut std::iter::once((DVec3::ZERO, None)), Kind::Origin);
+        let origin = || best_point(&mut std::iter::once((self.axes.origin, None)), Kind::Origin);
         let on_line = |a: DVec3, b: DVec3| -> Option<(f64, DVec3)> {
             let (pa, pb) = view.project_segment(a, b)?;
             let ab = pb - pa;
@@ -644,8 +679,8 @@ impl Engine {
             Axis::ALL
                 .iter()
                 .filter_map(|&ax| {
-                    on_line(-ax.dir() * AXIS_EXTENT, ax.dir() * AXIS_EXTENT)
-                        .map(|(d, p)| (d, p, ax))
+                    let (o, d) = (self.axes.origin, self.axes.dir(ax));
+                    on_line(o - d * AXIS_EXTENT, o + d * AXIS_EXTENT).map(|(d, p)| (d, p, ax))
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, p, ax)| Inference {
@@ -740,11 +775,13 @@ impl Engine {
     ) -> Option<Inference> {
         let mut dirs: Vec<(DVec3, Kind)> = Axis::ALL
             .iter()
-            .map(|&ax| (ax.dir(), Kind::Along(ax)))
+            .map(|&ax| (self.axes.dir(ax), Kind::Along(ax)))
             .collect();
         if let Some([p, q]) = self.reference_edge.and_then(|e| geom.edges.get(e)) {
             let e = (*q - *p).normalize();
-            let axis_aligned = Axis::ALL.iter().any(|ax| e.cross(ax.dir()).length() < 1e-6);
+            let axis_aligned = Axis::ALL
+                .iter()
+                .any(|&ax| e.cross(self.axes.dir(ax)).length() < 1e-6);
             if !axis_aligned {
                 dirs.push((e, Kind::Parallel));
                 // Perpendicular within the plane of the edge and the anchor, else horizontal.
@@ -804,18 +841,19 @@ impl Engine {
         Axis::ALL
             .iter()
             .filter_map(|&ax| {
+                let dir = self.axes.dir(ax);
                 let p = match along {
                     Some((a, q)) => {
                         let d = (q - a).normalize_or_zero();
-                        if d.cross(ax.dir()).length() < 1e-6 {
+                        if d.cross(dir).length() < 1e-6 {
                             return None;
                         }
                         // Point on the anchor line closest to the tracking line.
-                        let x = closest_on_line(a, d, src, ax.dir());
-                        let y = src + ax.dir() * (x - src).dot(ax.dir());
+                        let x = closest_on_line(a, d, src, dir);
+                        let y = src + dir * (x - src).dot(dir);
                         (x.distance(y) < 1e-6).then_some(x)?
                     }
-                    None => closest_on_line(src, ax.dir(), ro, rd),
+                    None => closest_on_line(src, dir, ro, rd),
                 };
                 let dist = view.screen_dist(p, cursor);
                 (dist <= DIRECTION_APERTURE && p.distance(src) > 1e-6).then_some((dist, p, ax))
@@ -932,10 +970,12 @@ fn intersection(
         .map(|(_, x)| x)
 }
 
-/// A point with no inference: on the ground plane, or on the horizontal plane through
-/// the anchor; a vertical plane facing the camera when looking almost level.
-fn free_point(ro: DVec3, rd: DVec3, anchor: Option<DVec3>) -> DVec3 {
-    let base = anchor.unwrap_or(DVec3::ZERO);
+/// A point with no inference: on the ground plane (the drawing axes' red-green plane),
+/// or on the plane parallel to it through the anchor; a plane facing the camera that
+/// contains the blue axis when looking almost level.
+fn free_point(ro: DVec3, rd: DVec3, anchor: Option<DVec3>, axes: &Axes) -> DVec3 {
+    let base = anchor.unwrap_or(axes.origin);
+    let up = axes.dirs[2];
     let hit_plane = |n: DVec3| {
         let denom = rd.dot(n);
         (denom.abs() > 1e-9)
@@ -943,12 +983,13 @@ fn free_point(ro: DVec3, rd: DVec3, anchor: Option<DVec3>) -> DVec3 {
             .filter(|t| *t > 0.0)
             .map(|t| ro + rd * t)
     };
-    if rd.z.abs() > 0.1
-        && let Some(p) = hit_plane(DVec3::Z)
+    let rz = rd.dot(up);
+    if rz.abs() > 0.1
+        && let Some(p) = hit_plane(up)
     {
         return p;
     }
-    let facing = DVec3::new(rd.x, rd.y, 0.0).normalize_or_zero();
+    let facing = (rd - up * rz).normalize_or_zero();
     if facing != DVec3::ZERO
         && let Some(p) = hit_plane(facing)
     {
@@ -1041,6 +1082,41 @@ mod tests {
             i.normal.is_some_and(|n| n.z.abs() > 0.999),
             "face normal reported"
         );
+    }
+
+    /// Moved and rotated drawing axes: directions, the axis lock and the origin follow
+    /// them.
+    #[test]
+    fn inferences_follow_moved_axes() {
+        let (g, b) = square();
+        let mut e = Engine::default();
+        let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+        e.axes = Axes {
+            origin: DVec3::new(300.0, 0.0, 0.0),
+            dirs: [DVec3::new(c, s, 0.0), DVec3::new(-s, c, 0.0), DVec3::Z],
+        };
+        let a = DVec3::new(200.0, 200.0, 0.0);
+        let red = e.axes.dirs[0];
+        let i = infer(
+            &mut e,
+            &g,
+            &b,
+            at(a + red * 60.0) + DVec2::new(0.0, 3.0),
+            Some(a),
+        );
+        assert_eq!(i.kind, Kind::Along(Axis::Red));
+        assert!((i.point - a).normalize().dot(red) > 1.0 - 1e-9);
+        let o = e.axes.origin;
+        let i = infer(&mut e, &g, &b, at(o) + DVec2::new(2.0, 1.0), None);
+        assert_eq!((i.kind, i.point), (Kind::Origin, e.axes.origin));
+        e.reset();
+        assert_eq!(
+            e.axes.origin,
+            DVec3::new(300.0, 0.0, 0.0),
+            "reset keeps the axes"
+        );
+        e.toggle_axis_lock(Axis::Green);
+        assert_eq!(e.lock.map(|l| l.0), Some(e.axes.dirs[1]));
     }
 
     #[test]

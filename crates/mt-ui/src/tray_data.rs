@@ -33,6 +33,7 @@ pub struct TrayData {
     pub style: StyleSettings,
     pub shadows: ShadowSettings,
     pub fog: FogSettings,
+    pub soften: SoftenSettings,
     /// Tag of the selected entities, shown as a Tag dropdown in Entity Info; `None`
     /// hides the row (nothing selected).
     pub entity_tag: Option<usize>,
@@ -63,6 +64,7 @@ impl Default for TrayData {
             style: StyleSettings::default(),
             shadows: ShadowSettings::default(),
             fog: FogSettings::default(),
+            soften: SoftenSettings::default(),
             entity_tag: None,
             components: Vec::new(),
             current_component: None,
@@ -264,6 +266,29 @@ impl Default for StyleSettings {
             section_fill_color: [64, 64, 64],
             face_style: FaceStyle::default(),
             x_ray: false,
+        }
+    }
+}
+
+/// Settings of the Soften Edges panel. The defaults (20 degrees, Smooth normals on,
+/// Soften coplanar off) are from memory, unverified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SoftenSettings {
+    /// "Angle between normals" in degrees, 0..=180: edges between faces meeting at a
+    /// smaller angle are softened.
+    pub angle: u8,
+    /// Smooth normals: softened edges are smoothed too.
+    pub smooth: bool,
+    /// Soften coplanar: edges between coplanar faces are softened.
+    pub coplanar: bool,
+}
+
+impl Default for SoftenSettings {
+    fn default() -> Self {
+        Self {
+            angle: 20,
+            smooth: true,
+            coplanar: false,
         }
     }
 }
