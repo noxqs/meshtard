@@ -453,7 +453,7 @@ impl Document {
         self.collect(
             ents,
             DMat4::IDENTITY,
-            None,
+            Inherited::default(),
             // Owners are not used: the ghost is not pickable.
             Level::Inside(Owner::Instance(usize::MAX)),
             &mut HashSet::new(),
