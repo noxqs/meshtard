@@ -2170,8 +2170,10 @@ mod tests {
         ));
         let d = e.guides[0].dir.unwrap();
         assert!((d - v(1.0, 0.0, 1.0).normalize()).length() < 1e-12, "{d}");
-        assert_eq!(parse_angle("90°"), Some(90f64.to_radians()));
-        assert_eq!(parse_angle("1:2"), Some(0.5f64.atan()));
+        // atan may differ in the last bit between platforms.
+        let near = |s: &str, want: f64| (parse_angle(s).unwrap() - want).abs() < 1e-12;
+        assert!(near("90°", 90f64.to_radians()));
+        assert!(near("1:2", 0.5f64.atan()));
         assert_eq!(parse_angle("abc"), None);
     }
 
