@@ -1,6 +1,7 @@
 //! meshtard desktop application.
 
 mod annot;
+mod camera_cmd;
 mod component_dialog;
 mod confirm;
 mod document;
@@ -96,6 +97,19 @@ const IMPLEMENTED: &[&str] = &[
     "camera.orbit",
     "camera.pan",
     "camera.zoom",
+    "camera.zoom_extents",
+    "camera.view_top",
+    "camera.view_bottom",
+    "camera.view_front",
+    "camera.view_back",
+    "camera.view_left",
+    "camera.view_right",
+    "camera.view_iso",
+    "camera.parallel",
+    "camera.perspective",
+    "camera.previous",
+    "camera.next",
+    "view.toolbars",
 ];
 
 fn main() -> eframe::Result {
@@ -193,8 +207,11 @@ struct App {
     current_component: Option<usize>,
     active_scene: Option<usize>,
     scene_tabs: bool,
-    /// Camera move to an activated scene, in progress.
+    /// Camera move to an activated scene or view, in progress.
     transition: Option<tray::Transition>,
+    camera_history: camera_cmd::History,
+    /// The viewport size in pixels at the last frame.
+    viewport_px: DVec2,
     /// Open group or component space to world space (identity at the root).
     ctx_xf: glam::DMat4,
     /// The active modify tool, when `tool` is `Tool::Modify`.
@@ -287,6 +304,8 @@ impl App {
             active_scene: None,
             scene_tabs: true,
             transition: None,
+            camera_history: camera_cmd::History::default(),
+            viewport_px: DVec2::ZERO,
             erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
@@ -666,6 +685,7 @@ impl App {
                     self.camera = camera;
                 }
                 self.transition = None;
+                self.camera_history.clear();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 self.document = Some(doc);
                 self.selection.clear();
@@ -707,6 +727,7 @@ impl App {
             // Display settings; not undo steps in this draft.
             let device = rs.device.clone();
             self.rebuild(&device);
+        } else if self.camera_command(id) {
         } else if id == "file.exit" {
             self.request(ctx, frame, confirm::Pending::Exit);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -892,6 +913,7 @@ impl App {
                 self.selection.clear();
                 self.camera = Camera::from_spec(&self.spec.default_model.camera);
                 self.transition = None;
+                self.camera_history.clear();
                 self.rebuild(&device);
             }
         }
@@ -1013,6 +1035,10 @@ impl App {
         let before = self.camera.clone();
         nav::apply(self.tool, &mut self.camera, &input, viewport_px);
         self.cancel_transition_if_moved(&before);
+        self.viewport_px = viewport_px;
+        if self.transition.is_none() {
+            self.camera_history.track(&before, &self.camera);
+        }
         match self.tool {
             Tool::Select => {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
@@ -1883,6 +1909,9 @@ impl eframe::App for App {
         let style = self.document.as_ref().map(|d| d.model.style.clone());
         let can_undo = self.document.as_ref().is_some_and(Document::can_undo);
         let can_redo = self.document.as_ref().is_some_and(Document::can_redo);
+        let can_go_back = self.camera_history.can_go_back();
+        let can_go_forward = self.camera_history.can_go_forward();
+        let camera = self.camera.clone();
         let spec = self.spec.clone();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
@@ -1893,10 +1922,13 @@ impl eframe::App for App {
             is_enabled: &|id| match id {
                 "edit.undo" => can_undo,
                 "edit.redo" => can_redo,
+                "camera.previous" => can_go_back,
+                "camera.next" => can_go_forward,
                 _ => IMPLEMENTED.contains(&id),
             },
             is_checked: &|id| {
-                (id == "view.shadows" && shadows_on)
+                camera_cmd::is_checked(&camera, id)
+                    || (id == "view.shadows" && shadows_on)
                     || style.as_ref().is_some_and(|s| view_checked(s, id))
             },
             entity_info: &info,

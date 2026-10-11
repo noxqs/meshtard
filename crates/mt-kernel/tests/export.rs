@@ -260,18 +260,29 @@ fn dump() {
     std::fs::write(std::env::var("OUT").unwrap(), export::to_skp(&m).unwrap()).unwrap();
 }
 
-/// Every corpus model survives save and reopen with the same geometry counts.
+/// Every corpus model survives save and reopen with the same geometry counts. The
+/// SketchUp trial folders (`2026`, `2017`: saved by SketchUp; `meshtard`: saved by
+/// meshtard) are read when present, and there a file that does not open fails.
 #[test]
 fn corpus_round_trips() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/openskp");
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus");
+    let paths = ["openskp", "2026", "2017", "meshtard"]
+        .into_iter()
+        .filter_map(|d| Some((d, std::fs::read_dir(corpus.join(d)).ok()?)))
+        .flat_map(|(d, entries)| entries.map(move |e| (d, e.unwrap().path())));
     let mut failures = Vec::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
+    for (dir, path) in paths {
         if path.extension().is_none_or(|x| x != "skp") {
             continue;
         }
-        let Ok(src) = mt_skp::read(&path) else {
-            continue;
+        let src = match mt_skp::read(&path) {
+            Ok(src) => src,
+            // Some OpenSKP samples are known not to open.
+            Err(_) if dir == "openskp" => continue,
+            Err(e) => {
+                failures.push(format!("{}: does not open: {e}", path.display()));
+                continue;
+            }
         };
         let m = import::from_skp(&src);
         let name = path.file_name().unwrap().to_string_lossy().into_owned();

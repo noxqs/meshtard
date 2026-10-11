@@ -705,24 +705,7 @@ impl Document {
     }
 
     pub fn extents_camera(&self, fov_deg: f64) -> Option<Camera> {
-        let scene = self.scene();
-        let points = scene
-            .edges
-            .iter()
-            .flat_map(|s| [s.a, s.b])
-            .chain(scene.vertices.iter().map(|v| v.position));
-        let mut min = DVec3::splat(f64::INFINITY);
-        let mut max = DVec3::splat(f64::NEG_INFINITY);
-        let mut any = false;
-        for p in points {
-            let p = DVec3::new(p[0].into(), p[1].into(), p[2].into());
-            min = min.min(p);
-            max = max.max(p);
-            any = true;
-        }
-        if !any {
-            return None;
-        }
+        let (min, max) = crate::camera_cmd::scene_bounds(&self.scene())?;
         let center = (min + max) / 2.0;
         let radius = ((max - min).length() / 2.0).max(1.0);
         let distance = radius / (fov_deg.to_radians() / 2.0).sin();

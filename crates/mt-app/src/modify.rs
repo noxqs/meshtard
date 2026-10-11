@@ -1271,7 +1271,8 @@ impl ModifyTool for PaintBucket {
 
 /// Places instances of a component picked in the Components panel at clicked points
 /// (SketchUp glues the component to the cursor at its origin; rotating with the
-/// cursor and gluing to faces are not implemented).
+/// cursor is not implemented). A definition that glues lies in the clicked face's
+/// plane when the face accepts it.
 #[derive(Debug)]
 pub struct PlaceComponent {
     pub definition: mt_kernel::DefinitionId,

@@ -25,6 +25,33 @@ pub struct Camera {
     pub perspective: bool,
 }
 
+/// The Camera > Standard Views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandardView {
+    Top,
+    Bottom,
+    Front,
+    Back,
+    Left,
+    Right,
+    Iso,
+}
+
+impl StandardView {
+    pub fn from_command(id: &str) -> Option<Self> {
+        Some(match id {
+            "camera.view_top" => Self::Top,
+            "camera.view_bottom" => Self::Bottom,
+            "camera.view_front" => Self::Front,
+            "camera.view_back" => Self::Back,
+            "camera.view_left" => Self::Left,
+            "camera.view_right" => Self::Right,
+            "camera.view_iso" => Self::Iso,
+            _ => return None,
+        })
+    }
+}
+
 /// A ray in world space. `dir` is normalized.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ray {
@@ -250,6 +277,50 @@ pub fn ease_in_out(t: f64) -> f64 {
 }
 
 impl Camera {
+    /// Moves the eye along the view direction so the sphere around `min`-`max` fits
+    /// the view (`aspect` = width / height), looking at its center. Fitting the
+    /// bounding sphere leaves a margin; SketchUp's exact margin is unverified.
+    pub fn fit(&mut self, min: DVec3, max: DVec3, aspect: f64) {
+        let center = (min + max) / 2.0;
+        let radius = ((max - min).length() / 2.0).max(1.0);
+        let half_v = (self.fov_deg.to_radians() / 2.0).max(1e-3);
+        let distance = if self.perspective {
+            let half_h = (half_v.tan() * aspect).atan();
+            radius / half_v.min(half_h).sin()
+        } else {
+            // The view height at the target scales with the distance.
+            radius / aspect.min(1.0) / half_v.tan()
+        };
+        let forward = self.forward();
+        self.target = center;
+        self.eye = center - forward * distance;
+    }
+
+    /// The camera looking along `view` (from the eye towards the target) at the
+    /// same target, distance, field of view and projection.
+    pub fn looking(&self, view: StandardView) -> Camera {
+        let dir = match view {
+            StandardView::Top => -DVec3::Z,
+            StandardView::Bottom => DVec3::Z,
+            StandardView::Front => DVec3::Y,
+            StandardView::Back => -DVec3::Y,
+            StandardView::Left => DVec3::X,
+            StandardView::Right => -DVec3::X,
+            StandardView::Iso => {
+                // The isometric view from the quadrant the camera is in (unverified:
+                // SketchUp may always use the front-left one).
+                let f = self.forward();
+                let sx = if f.x < 0.0 { -1.0 } else { 1.0 };
+                let sy = if f.y < 0.0 { -1.0 } else { 1.0 };
+                DVec3::new(sx, sy, -1.0).normalize()
+            }
+        };
+        Camera {
+            eye: self.target - dir * self.distance(),
+            ..self.clone()
+        }
+    }
+
     /// The view a fraction `t` (0..1, not eased) of the way from `self` to `to`, for
     /// scene transitions. The target moves in a straight line; the eye swings around it
     /// (azimuth the short way round, elevation linearly) while its distance changes
@@ -291,6 +362,45 @@ mod tests {
     use super::*;
 
     const VIEWPORT: DVec2 = DVec2::new(1600.0, 900.0);
+
+    #[test]
+    fn fit_keeps_direction_and_shows_the_box() {
+        for perspective in [true, false] {
+            let mut c = camera(perspective);
+            let forward = c.forward();
+            let (min, max) = (DVec3::new(-50.0, 0.0, 0.0), DVec3::new(150.0, 80.0, 60.0));
+            c.fit(min, max, VIEWPORT.x / VIEWPORT.y);
+            assert!((c.forward() - forward).length() < 1e-9);
+            assert_eq!(c.target, (min + max) / 2.0);
+            for x in [min.x, max.x] {
+                for y in [min.y, max.y] {
+                    for z in [min.z, max.z] {
+                        let p = c.project(DVec3::new(x, y, z), VIEWPORT).unwrap();
+                        assert!(p.x >= 0.0 && p.x <= VIEWPORT.x, "{p} {perspective}");
+                        assert!(p.y >= 0.0 && p.y <= VIEWPORT.y, "{p} {perspective}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standard_views() {
+        let c = camera(true);
+        let top = c.looking(StandardView::Top);
+        assert_eq!(top.target, c.target);
+        assert!((top.distance() - c.distance()).abs() < 1e-9);
+        assert!((top.forward() + DVec3::Z).length() < 1e-12);
+        assert_eq!(top.right(), DVec3::X, "Top: red runs right");
+        let front = c.looking(StandardView::Front);
+        assert!((front.up() - DVec3::Z).length() < 1e-12);
+        assert!((front.right() - DVec3::X).length() < 1e-12);
+        let iso = c.looking(StandardView::Iso);
+        // The camera is at -x -y looking towards +x +y.
+        let f = iso.forward();
+        assert!(f.x > 0.0 && f.y > 0.0 && f.z < 0.0);
+        assert!((f.z.abs() - 1.0 / 3f64.sqrt()).abs() < 1e-12);
+    }
 
     fn camera(perspective: bool) -> Camera {
         Camera {

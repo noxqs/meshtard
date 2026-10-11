@@ -1,28 +1,76 @@
 # SketchUp 2026 trial checklist
 
-Run on the Windows machine with SketchUp 2026. Prepare everything before starting the trial clock.
+Run on the Windows machine with SketchUp 2026. Prepare everything before starting the trial clock:
 
-Save all output under `spec/` in this repo, named as below.
+- meshtard Windows release build and a few meshtard-saved `.skp` files on the machine (for scenario 12)
+- this repo checked out, with `spec/raw/` and `tests/corpus/2026/` and `tests/corpus/2017/` created
+- OBS or Windows Game Bar set up to record the screen
+- `TRIAL_NOTES.md` open in an editor next to SketchUp
 
-## 1. Static capture (first hour)
+Save all output under `spec/` and `tests/corpus/` in this repo, named as below. Work top to bottom: the sections are ordered by value per minute of trial time, so stop wherever the trial ends.
+
+## 1. Text exports and file round trip (first 30 minutes)
+
+These are the hardest to get any other way.
 
 - [ ] `Window > Preferences > Shortcuts > Export...` and save the file as `spec/raw/shortcuts.txt`. Then correct `keymap.toml` from it and set `verified = true`.
+- [ ] Save the empty default model as `tests/corpus/2026/empty_default.skp`, and `File > Save As` SketchUp 2017 as `tests/corpus/2017/empty_default.skp`.
+- [ ] Scenario 12 steps 1 to 3: open the meshtard-saved files in SketchUp and screenshot the Save As version list.
+
+## 2. Scenarios with corpus files
+
+Run each scenario file in this folder step by step, in this order (most valuable first):
+
+| Order | File | Covers |
+|---|---|---|
+| 1 | `02_rectangle_shapes.md` | rectangle, circle, polygon, shapes on sloped and diagonal faces |
+| 2 | `06_move_rotate_scale.md` | move, rotate, scale, copies and arrays |
+| 3 | `05_pushpull_offset_followme.md` | push/pull, offset, follow me, intersect |
+| 4 | `07_groups_components.md` | groups, components, edit in place, explode, make unique, glue, axes |
+| 5 | `01_line_inference.md` | line tool, inference, axis locks, typed lengths |
+| 6 | `09_scenes_styles_shadows.md` | face styles, X-ray, edge styles, shadows, scenes, transitions |
+| 7 | `08_tags_materials.md` | tags, materials, paint bucket, textures, Outliner, Entity Info |
+| 8 | `10_section_planes.md` | section planes, cuts, fill |
+| 9 | `11_dimensions_text_guides.md` | tape measure, protractor, dimensions, text |
+| 10 | `04_selection_erase.md` | selection rules, eraser, hide, soften, undo |
+| 11 | `03_arcs_freehand.md` | arcs, pie, freehand |
+| 12 | `12_file_toolbars.md` | file open/save, older versions, toolbars |
+| 13 | `00_camera_navigation.md` | orbit, pan, zoom, camera defaults |
+
+For each one:
+
+- record the screen into `spec/raw/scenarios/NN.mp4`
+- fill the scenario's table in `TRIAL_NOTES.md` as you go
+- save the model after the last step as `tests/corpus/2026/scenario_NN.skp`, then `File > Save As`, type "SketchUp 2017", as `tests/corpus/2017/scenario_NN.skp`
+
+Afterwards, run the same steps in meshtard from the recordings and fill the `meshtard same?` column.
+
+## 3. Static capture
+
 - [ ] Open every menu and submenu, screenshot each one into `spec/raw/menus/<menu>.png`. Correct `menus.toml` and set `verified = true`. Note greyed-out items with an empty model.
 - [ ] Screenshot the full window at 1920x1080 with a new model from the default template: `spec/raw/ui/new_model_1920.png`.
 - [ ] Screenshot every toolbar under `View > Toolbars...`: `spec/raw/ui/toolbars/<name>.png`.
 - [ ] Screenshot every Default Tray panel, expanded: `spec/raw/ui/tray/<panel>.png`.
-- [ ] Save the empty default model as `tests/corpus/2026/empty_default.skp`.
-- [ ] `Window > Model Info` and `Window > Preferences`: screenshot every page into `spec/raw/ui/model_info/` and `spec/raw/ui/preferences/`.
-- [ ] `Window > Styles > Edit`: screenshot every tab of the default style.
+- [ ] `Window > Styles > Edit`: screenshot every tab of the default style into `spec/raw/ui/styles/`.
 
-## 2. Scenarios
+## 4. Grey-menu reference
 
-Run each file in this folder (`NN_*.md`) step by step. For each one:
+Screenshot every dialog and behaviour that meshtard does not have yet (its menu items are greyed out in meshtard), so they can be built later without the trial. One PNG per page or state, into `spec/raw/<area>/`:
 
-- record the screen (OBS or Windows Game Bar) into `spec/raw/scenarios/NN.mp4`
-- save the model after the last step as `tests/corpus/2026/scenario_NN.skp`
-- write down anything that differs from the "Expected" section of the scenario
+- [ ] `Window > Model Info`: every page (Animation, Classifications, Components, Credits, Dimensions, File, Geo-location, Rendering, Statistics, Text, Units, ...) into `spec/raw/model_info/<page>.png`
+- [ ] `Window > Preferences`: every page into `spec/raw/preferences/<page>.png`
+- [ ] `File > Export > 3D Model`, `2D Graphic`, `Section Slice`, `Animation`: the file dialog and each Options... dialog into `spec/raw/export/`
+- [ ] `File > Import`: the file dialog with its type list and Options... into `spec/raw/import/`
+- [ ] Solid Tools (Outer Shell, Intersect, Union, Subtract, Trim, Split, Solid Inspector if present) on two overlapping solid groups: before and after for each into `spec/raw/solid_tools/`; note which input is kept and the status bar text for non-solids
+- [ ] Sandbox (From Contours, From Scratch, Smoove, Stamp, Drape, Add Detail, Flip Edge): one screenshot per tool in use into `spec/raw/sandbox/`
+- [ ] `Tools > 3D Text`: the dialog and the placed result into `spec/raw/3d_text/`
+- [ ] `File > Print Preview` and `File > Print`: dialogs into `spec/raw/print/`
+- [ ] `File > Generate Report`: the dialog, every template, and one generated report into `spec/raw/report/`
 
-## 3. File format corpus
+## 5. Corpus
 
-- [ ] For each scenario file, also `File > Save As` in SketchUp 2017 format into `tests/corpus/2017/` (exercises the legacy container).
+The `.skp` files saved in sections 1 and 2 become automated round-trip tests. The tests in `crates/mt-skp/tests/` will read every file under `tests/corpus/2026/` (VFF format) and `tests/corpus/2017/` (legacy format), compare both versions of each scenario with each other, write them back with meshtard's writer and read the result again. Commit the files after the trial; do not edit them in SketchUp afterwards.
+
+- [ ] `tests/corpus/2026/`: `empty_default.skp` and one `scenario_NN.skp` per scenario run
+- [ ] `tests/corpus/2017/`: the same names, saved as SketchUp 2017
+- [ ] `TRIAL_NOTES.md` filled and copied back into the repo
