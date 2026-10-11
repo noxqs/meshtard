@@ -204,6 +204,8 @@ Reading first means real SketchUp models are available for testing everything el
 - Not saved in the .skp yet: model axes, units (writer keeps its template's units), two-point.
 
 ### M13: Presentation and the rest (FEATURES.md Tier 3)
+- [x] Items 32-38: Export Section Slice (R12 DXF), Export Animation (numbered PNG/JPEG frames), Print Setup / Print Preview / Print (one-page PDF written directly, opened in the system viewer), templates (New from Template, Save As Template, default template for File > New), Generate Report (CSV/HTML), Manage Trays (named trays, one docked at a time), About; Help links open the project page.
+- Not done: DWG, MP4 (no small pure-Rust encoder), OS print dialog, tiled printing, several trays shown at once, report templates over attributes. Items 29-31 (Sandbox, Images, 3D Text) are worked on separately.
 
 ## Risks
 

@@ -124,6 +124,7 @@ mod theme;
 mod toolbar;
 mod tray;
 mod tray_data;
+mod trays;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -136,6 +137,7 @@ pub use tray_data::{
     SelectMode, ShadowSettings, SoftenSettings, StyleSettings, TagRow, TrayData, component_edit,
     date_label, day_of_year, instances_label, month_day, outliner_node, outliner_rows, time_label,
 };
+pub use trays::{TrayDef, TrayLayout};
 
 /// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection")
 /// and rows of label and value (e.g. "Length", "1000 mm").
@@ -254,6 +256,10 @@ pub enum Event {
     /// Toolbars: the user docked, floated, moved, closed or showed a toolbar. Save
     /// [`Shell::toolbar_layout`] if the app keeps the layout between runs.
     ToolbarLayoutChanged,
+    /// Trays: a tray was added, renamed, deleted or shown, or its panels changed
+    /// (Window > Manage Trays, or a panel opened or closed). Save
+    /// [`Shell::tray_layout`] if the app keeps it between runs.
+    TrayLayoutChanged,
 }
 
 /// A toolbar as listed by [`Shell::toolbars`].
@@ -308,6 +314,10 @@ pub struct Shell {
     /// Where floating toolbars were docked before, for double-click on the title.
     last_dock: HashMap<String, ToolbarPosition>,
     toolbars_dialog_open: bool,
+    /// Named trays (Window > Manage Trays), the spec's default, and the dialog.
+    trays: TrayLayout,
+    tray_default: TrayLayout,
+    trays_dialog: Option<trays::TraysDialog>,
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +369,9 @@ impl Shell {
             toolbar_drag: None,
             last_dock: HashMap::new(),
             toolbars_dialog_open: false,
+            trays: TrayLayout::from_spec(spec),
+            tray_default: TrayLayout::from_spec(spec),
+            trays_dialog: None,
         }
     }
 
@@ -439,6 +452,7 @@ impl Shell {
 
         self.floating_toolbars(ui.ctx(), frame);
         self.toolbars_dialog(ui.ctx());
+        self.trays_dialog_ui(ui.ctx());
         self.toolbar_drag(ui.ctx(), frame);
 
         std::mem::take(&mut self.pending)
@@ -587,9 +601,10 @@ impl Shell {
     pub fn open_panel(&mut self, id: &str) -> bool {
         match self.panels.iter_mut().find(|p| p.id == id) {
             Some(p) => {
-                p.shown = true;
                 p.expanded = true;
                 self.tray_visible = true;
+                let id = p.id.clone();
+                self.set_panel_in_tray(&id, true);
                 true
             }
             None => false,
@@ -668,6 +683,8 @@ impl Shell {
             self.tray_visible = !self.tray_visible;
         } else if id == "view.toolbars" {
             self.toolbars_dialog_open = true;
+        } else if id == "window.manage_trays" {
+            self.open_trays_dialog();
         } else {
             self.open_panel(id);
         }

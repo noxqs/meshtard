@@ -1,5 +1,7 @@
 //! meshtard desktop application.
 
+mod about;
+mod anim_export;
 mod animation;
 mod annot;
 mod camera_cmd;
@@ -20,11 +22,16 @@ mod nav;
 mod overlay;
 mod pick_tool;
 mod preferences;
+mod presentation;
+mod print;
+mod report;
+mod section_export;
 mod selection;
 mod settings;
 mod soften;
 mod solid_tools;
 mod splash;
+mod templates;
 mod tools;
 mod tray;
 
@@ -187,6 +194,19 @@ const IMPLEMENTED: &[&str] = &[
     "camera.two_point",
     "window.model_info",
     "window.preferences",
+    "file.export_section",
+    "file.export_animation",
+    "file.print",
+    "file.print_preview",
+    "file.print_setup",
+    "file.new_from_template",
+    "file.save_as_template",
+    "file.generate_report",
+    "window.manage_trays",
+    "help.about",
+    "help.welcome",
+    "help.knowledge_center",
+    "help.contact",
 ];
 
 fn main() -> eframe::Result {
@@ -329,6 +349,8 @@ struct App {
     model_info: Option<model_info::ModelInfo>,
     /// Window > Preferences and the settings it keeps.
     prefs: preferences::Prefs,
+    /// File > Export Section Slice and Animation, Print, templates, report, About.
+    present: presentation::Presentation,
 }
 
 impl App {
@@ -355,6 +377,9 @@ impl App {
                 shell.set_native_menu(true);
                 if let Some(layout) = settings::load_toolbar_layout() {
                     shell.set_toolbar_layout(layout);
+                }
+                if let Some(trays) = settings::load_tray_layout() {
+                    shell.set_tray_layout(trays);
                 }
                 shell
             }),
@@ -418,6 +443,7 @@ impl App {
             camera_tools: Default::default(),
             model_info: None,
             prefs,
+            present: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -924,7 +950,10 @@ impl App {
             // Display settings; not undo steps in this draft.
             let device = rs.device.clone();
             self.rebuild(&device);
-        } else if self.camera_command(id) || self.extra_command(ctx, frame, id) {
+        } else if self.camera_command(id)
+            || self.extra_command(ctx, frame, id)
+            || self.presentation_command(ctx, frame, id)
+        {
         } else if id == "window.model_info" {
             self.open_model_info();
         } else if id == "window.preferences" {
@@ -1262,8 +1291,8 @@ impl App {
         }
     }
 
-    /// File > New without asking (see `confirm`).
-    fn new_document(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    /// File > New from the built-in template, without asking (see `confirm`).
+    fn new_document_builtin(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         {
             if let Some(rs) = frame.wgpu_render_state() {
                 let device = rs.device.clone();
@@ -2414,12 +2443,18 @@ impl eframe::App for App {
         self.animation_ui(ui.ctx(), frame);
         self.model_info_ui(ui.ctx(), frame);
         self.preferences_ui(ui.ctx());
+        self.presentation_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
                 mt_ui::Event::ToolbarLayoutChanged => {
                     if let Some(shell) = &self.shell {
                         settings::save_toolbar_layout(shell.toolbar_layout());
+                    }
+                }
+                mt_ui::Event::TrayLayoutChanged => {
+                    if let Some(shell) = &self.shell {
+                        settings::save_tray_layout(shell.tray_layout());
                     }
                 }
                 mt_ui::Event::Measurements(text) => {

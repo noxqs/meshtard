@@ -13,7 +13,7 @@ use eframe::egui;
 use crate::App;
 use crate::document::Document;
 
-const IMAGE: &[u8] = include_bytes!("../assets/splash.png");
+pub(crate) const IMAGE: &[u8] = include_bytes!("../assets/splash.png");
 /// Shortest time the splash stays up (unverified; long enough to be seen).
 const MIN_SECS: f32 = 1.2;
 const FADE_SECS: f32 = 0.35;

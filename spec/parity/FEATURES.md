@@ -71,20 +71,20 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 29. [ ] **Sandbox From Scratch / From Contours** (`tool.sandbox_*`) M. Grid of triangles; contours via triangulation of curve points (Delaunay). Also Smoove/Stamp/Drape tools later.
 30. [ ] **Images and Match New Photo** (`camera.match_new_photo`) L. Needs an image entity type (read/write in the file), then the match-photo vanishing-point UI.
 31. [ ] **3D Text** (`tool.text_3d`) M. Font outlines (ttf-parser) to faces, extrude; dialog with font, height, extrude, filled.
-32. [ ] **Export Section Slice (DXF/DWG)** (`file.export_section`) M. Section cut lines to DXF (DWG is proprietary: DXF only).
-33. [ ] **Export Animation (MP4/image sequence)** (`file.export_animation`) M. Offscreen render each frame of scene transitions; image sequence first, video via an encoder later.
-34. [ ] **Print / Print Preview / Print Setup** (`file.print*`) M. Offscreen render to PDF (printpdf) or the OS print dialog. Trial: scale options.
-35. [ ] **Templates: New from Template, Save As Template** (`file.new_from_template`, `file.save_as_template`) S. Templates are .skp files in the user config folder; New uses the chosen one.
-36. [ ] **Generate Report** (`file.generate_report`) M. Attribute/component report to CSV/HTML.
-37. [ ] **Manage Trays** (`window.manage_trays`) S. Create trays and choose their panels; save like the toolbar layout.
-38. [ ] **About** (`help.about`) S. Version, license, OpenSKP credit, splash image.
+32. [x] **Export Section Slice (DXF/DWG)** (`file.export_section`) M. Section cut lines to DXF (DWG is proprietary: DXF only).
+33. [x] **Export Animation (MP4/image sequence)** (`file.export_animation`) M. Offscreen render each frame of scene transitions; image sequence first, video via an encoder later.
+34. [x] **Print / Print Preview / Print Setup** (`file.print*`) M. Offscreen render to PDF (printpdf) or the OS print dialog. Trial: scale options.
+35. [x] **Templates: New from Template, Save As Template** (`file.new_from_template`, `file.save_as_template`) S. Templates are .skp files in the user config folder; New uses the chosen one.
+36. [x] **Generate Report** (`file.generate_report`) M. Attribute/component report to CSV/HTML.
+37. [x] **Manage Trays** (`window.manage_trays`) S. Create trays and choose their panels; save like the toolbar layout.
+38. [x] **About** (`help.about`) S. Version, license, OpenSKP credit, splash image.
 
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)
 - `window.3d_warehouse`, `extensions.warehouse` (Trimble online services)
 - `extensions.manager` (plugins are out of scope for now; see PLAN.md)
-- `help.welcome`, `help.knowledge_center`, `help.contact` (could open project pages instead)
+- `help.welcome`, `help.knowledge_center`, `help.contact`: done as links to the project page (https://github.com/noxqs/meshtard), opened with the system browser
 
 ## Order of work
 
