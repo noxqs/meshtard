@@ -82,10 +82,7 @@ impl App {
         let device = rs.device.clone();
         match result {
             Ok(doc) => self.install(ctx, &device, &path, doc),
-            Err(e) => {
-                log::warn!("could not open {}: {e}", path.display());
-                self.message = Some(format!("Could not open {}: {e}", path.display()));
-            }
+            Err(e) => self.file_error("open", &path, e),
         }
     }
 

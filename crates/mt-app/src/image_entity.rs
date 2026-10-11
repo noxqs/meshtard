@@ -255,18 +255,17 @@ pub fn average_color(img: &image::RgbImage) -> [u8; 3] {
 impl App {
     /// File > Import of a PNG or JPEG: starts placing it.
     pub(crate) fn import_image(&mut self, path: &Path) {
-        let fail = |e: String| format!("Could not import {}: {e}", path.display());
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
-                self.message = Some(fail(e.to_string()));
+                self.file_error("import", path, e);
                 return;
             }
         };
         let img = match image::load_from_memory(&data) {
             Ok(i) => i.to_rgb8(),
             Err(e) => {
-                self.message = Some(fail(e.to_string()));
+                self.file_error("import", path, e);
                 return;
             }
         };

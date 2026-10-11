@@ -13,6 +13,7 @@ mod context_menu;
 mod cursor;
 mod document;
 mod entity_info;
+mod errors;
 mod export;
 mod filedialog;
 mod flip;
@@ -380,6 +381,8 @@ struct App {
     pick: Option<pick_tool::PickTool>,
     /// A camera tool held by its shortcut key (see `spring`).
     spring: Option<spring::Spring>,
+    /// An error dialog waiting to be closed.
+    error: Option<errors::ErrorMessage>,
     /// Window > Soften Edges.
     soften: soften::SoftenPanel,
     /// Position Camera, Walk, Look Around and Field of View.
@@ -483,6 +486,7 @@ impl App {
             animation: Default::default(),
             pick: None,
             spring: None,
+            error: None,
             soften: Default::default(),
             camera_tools: Default::default(),
             model_info: None,
@@ -862,10 +866,7 @@ impl App {
     fn open(&mut self, ctx: &egui::Context, device: &wgpu::Device, path: &std::path::Path) {
         match Document::open(path) {
             Ok(doc) => self.install(ctx, device, path, doc),
-            Err(e) => {
-                log::warn!("could not open {}: {e}", path.display());
-                self.message = Some(format!("Could not open {}: {e}", path.display()));
-            }
+            Err(e) => self.file_error("open", path, e),
         }
     }
 
@@ -1343,7 +1344,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.message = Some(format!("Could not save {}: {e}", path.display()));
+                self.file_error("save", &path, e);
                 false
             }
         }
@@ -2381,6 +2382,7 @@ impl eframe::App for App {
         self.poll_loading(ui.ctx(), frame);
         self.splash_ui(ui.ctx());
         self.confirm_ui(ui.ctx(), frame);
+        self.error_ui(ui.ctx());
         self.make_component_ui(ui.ctx(), frame);
         self.export_ui(ui.ctx(), frame);
         self.import_ui(ui.ctx(), frame);

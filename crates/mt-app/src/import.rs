@@ -104,7 +104,7 @@ impl App {
         let src = match mt_skp::read(path) {
             Ok(s) => s,
             Err(e) => {
-                self.message = Some(format!("Could not import {}: {e}", path.display()));
+                self.file_error("import", path, e);
                 return;
             }
         };
@@ -198,7 +198,7 @@ impl App {
         let (materials, ents) = match read_mesh(&d.path, d.stl, &opts, doc.model.materials.len()) {
             Ok(x) => x,
             Err(e) => {
-                self.message = Some(format!("Could not import {}: {e}", d.path.display()));
+                self.file_error("import", &d.path, e);
                 return;
             }
         };

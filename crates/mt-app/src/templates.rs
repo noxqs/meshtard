@@ -146,7 +146,7 @@ impl App {
         let mut doc = match Document::open(&path) {
             Ok(doc) => doc,
             Err(e) => {
-                self.message = Some(format!("Could not open template {}: {e}", path.display()));
+                self.file_error("open the template", &path, e);
                 return;
             }
         };
