@@ -14,7 +14,12 @@ impl Shell {
             for menu in &frame.spec.menus.menu {
                 ui.menu_button(&menu.label, |ui| {
                     ui.set_min_width(220.0);
-                    menu_items(ui, &menu.items, &Items::of(frame), &mut clicked);
+                    let items = Items {
+                        labels: Some(&self.menu_labels),
+                        icons: Some(&self.icon_palette),
+                        ..Items::of(frame)
+                    };
+                    menu_items(ui, &menu.items, &items, &mut clicked);
                 });
             }
         });
@@ -29,6 +34,11 @@ struct Items<'a> {
     spec: &'a Spec,
     is_enabled: &'a dyn Fn(&str) -> bool,
     is_checked: &'a dyn Fn(&str) -> bool,
+    /// Labels replaced by the app ([`Shell::set_menu_label`]).
+    labels: Option<&'a std::collections::HashMap<String, String>>,
+    /// Draw the command's toolbar icon in the check gutter (Windows menus show tool
+    /// icons since SketchUp 2026, release notes).
+    icons: Option<&'a crate::icons::Palette>,
 }
 
 impl<'a> Items<'a> {
@@ -37,6 +47,8 @@ impl<'a> Items<'a> {
             spec: frame.spec,
             is_enabled: frame.is_enabled,
             is_checked: frame.is_checked,
+            labels: None,
+            icons: None,
         }
     }
 }
@@ -60,6 +72,8 @@ pub fn menu_list(
             spec,
             is_enabled,
             is_checked,
+            labels: None,
+            icons: None,
         },
         &mut clicked,
     );
@@ -79,6 +93,10 @@ fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], frame: &Items, clicked: &mu
                 });
             }
             MenuItem::Command { id, label } => {
+                let label = frame
+                    .labels
+                    .and_then(|l| l.get(id))
+                    .map_or(label.as_str(), String::as_str);
                 let mut button = egui::Button::new(format!("{CHECK_GUTTER}{label}"));
                 if let Some(text) = shortcut_text(frame.spec, id) {
                     button = button.shortcut_text(text);
@@ -87,6 +105,11 @@ fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], frame: &Items, clicked: &mu
                 let response = ui.add_enabled(enabled, button);
                 if (frame.is_checked)(id) {
                     paint_check(ui, response.rect, enabled);
+                } else if let Some(palette) = frame.icons.filter(|_| crate::icons::has_icon(id)) {
+                    let c = egui::pos2(response.rect.left() + 11.0, response.rect.center().y);
+                    let rect = egui::Rect::from_center_size(c, egui::vec2(16.0, 16.0));
+                    let palette = if enabled { *palette } else { palette.disabled() };
+                    crate::icons::paint(ui.painter(), rect, id, &palette);
                 }
                 if response.clicked() {
                     *clicked = Some(id.clone());

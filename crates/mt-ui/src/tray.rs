@@ -141,6 +141,10 @@ impl Shell {
                 ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
                 if id == "window.entity_info" {
                     self.entity_info_panel(ui, frame.entity_info);
+                } else if id == "window.environments" {
+                    self.environments_panel(ui);
+                } else if id == "window.instructor" {
+                    self.instructor_panel(ui, frame.active_tool);
                 } else if !self.panel_body(ui, &id) {
                     ui.label(
                         egui::RichText::new(format!(

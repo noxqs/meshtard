@@ -10,6 +10,9 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+mod instructor;
+pub use instructor::{Instructor, ModifierHelp, ToolHelp};
+
 const MENUS: &str = include_str!("../../../spec/menus.toml");
 const KEYMAP: &str = include_str!("../../../spec/keymap.toml");
 const DEFAULT_MODEL: &str = include_str!("../../../spec/default_model.toml");
