@@ -5,7 +5,7 @@
 //! lines stay visible) and every interior edge of a contour TIN (its border stays
 //! hard). Both from memory of SketchUp's Sandbox (unverified).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use glam::{DVec2, DVec3};
 
@@ -16,7 +16,7 @@ use crate::entities::{CoEdge, EdgeAttrs, EdgeId, Entities, Loop, VertexId};
 /// vertices, reusing edges from `edges`. Degenerate triangles are skipped.
 fn add_triangle(
     ents: &mut Entities,
-    edges: &mut HashMap<(VertexId, VertexId), EdgeId>,
+    edges: &mut BTreeMap<(VertexId, VertexId), EdgeId>,
     [a, b, c]: [VertexId; 3],
 ) -> bool {
     let (pa, pb, pc) = (ents.pos(a), ents.pos(b), ents.pos(c));
@@ -69,7 +69,7 @@ pub fn grid(origin: DVec3, u: DVec3, v: DVec3, nu: usize, nv: usize) -> Entities
         }
     }
     let at = |i: usize, j: usize| verts[j * (nu + 1) + i];
-    let mut edges = HashMap::new();
+    let mut edges = BTreeMap::new();
     for j in 0..nv {
         for i in 0..nu {
             let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
@@ -94,8 +94,8 @@ pub fn tin(points: &[DVec3]) -> Entities {
     let plan: Vec<DVec2> = points.iter().map(|p| p.truncate()).collect();
     let tris = crate::delaunay::triangulate(&plan, TOL);
     let mut ents = Entities::new();
-    let mut vmap: HashMap<usize, VertexId> = HashMap::new();
-    let mut edges = HashMap::new();
+    let mut vmap: BTreeMap<usize, VertexId> = BTreeMap::new();
+    let mut edges = BTreeMap::new();
     for t in tris {
         let vs = t.map(|i| *vmap.entry(i).or_insert_with(|| ents.add_vertex(points[i])));
         add_triangle(&mut ents, &mut edges, vs);
@@ -114,7 +114,7 @@ pub fn tin(points: &[DVec3]) -> Entities {
 
 /// The points of contour edges: every vertex of `edges` once.
 pub fn contour_points(ents: &Entities, edges: &[EdgeId]) -> Vec<DVec3> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for &e in edges {
         let Some(edge) = ents.edges.get(e) else {

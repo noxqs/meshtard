@@ -99,7 +99,7 @@ impl Edge {
 }
 
 /// An edge used by a loop, in the direction the loop runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CoEdge {
     pub edge: EdgeId,
     /// Runs end to start.

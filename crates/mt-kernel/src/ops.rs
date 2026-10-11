@@ -45,6 +45,58 @@ pub(crate) fn insert_line(
     if va == vb {
         return (Vec::new(), Vec::new());
     }
+    let mut all = Vec::new();
+    let mut created = Vec::new();
+    add_piece(ents, va, vb, 0, &mut all, &mut created);
+    update_faces(ents, &created, auto_face);
+    (all, created)
+}
+
+/// How many times a piece of a line is checked again after its ends were snapped.
+const PIECE_DEPTH: usize = 3;
+
+/// Covers `u`-`v` with edges: splits what it crosses, runs through the vertices on it,
+/// and checks each piece again (its ends were snapped to vertices or edges up to TOL
+/// off the line, so the piece can graze an edge the whole line missed).
+fn add_piece(
+    ents: &mut Entities,
+    u: VertexId,
+    v: VertexId,
+    depth: usize,
+    all: &mut Vec<EdgeId>,
+    created: &mut Vec<EdgeId>,
+) {
+    if depth > 0
+        && let Some(e) = ents.edge_between(u, v)
+    {
+        all.push(e);
+        return;
+    }
+    let chain = if depth < PIECE_DEPTH {
+        chain_between(ents, u, v)
+    } else {
+        vec![u, v]
+    };
+    if chain.len() > 2 {
+        for w in chain.windows(2) {
+            add_piece(ents, w[0], w[1], depth + 1, all, created);
+        }
+        return;
+    }
+    match ents.edge_between(u, v) {
+        Some(e) => all.push(e),
+        None => {
+            let e = ents.add_raw_edge(u, v, Default::default());
+            all.push(e);
+            created.push(e);
+        }
+    }
+}
+
+/// The vertices a line from `va` to `vb` runs through, in order (`va` and `vb`
+/// included): edges crossing it are split at the crossing, and edges running along it
+/// are split at its vertices.
+fn chain_between(ents: &mut Entities, va: VertexId, vb: VertexId) -> Vec<VertexId> {
     let (pa, pb) = (ents.pos(va), ents.pos(vb));
     let len = pa.distance(pb);
 
@@ -89,21 +141,7 @@ pub(crate) fn insert_line(
     for &w in &chain {
         snap_edges_to(ents, w);
     }
-
-    let mut all = Vec::new();
-    let mut created = Vec::new();
-    for w in chain.windows(2) {
-        match ents.edge_between(w[0], w[1]) {
-            Some(e) => all.push(e),
-            None => {
-                let e = ents.add_raw_edge(w[0], w[1], Default::default());
-                all.push(e);
-                created.push(e);
-            }
-        }
-    }
-    update_faces(ents, &created, auto_face);
-    (all, created)
+    chain
 }
 
 /// Splits every edge that passes within tolerance of vertex `w` (in its interior) at `w`.
@@ -270,6 +308,17 @@ fn face_edges(ents: &Entities, f: FaceId) -> Vec<EdgeId> {
     v
 }
 
+/// Whether a face on exactly the cell's edges exists, maybe in a plane that does not
+/// quite coincide with the cell's (a loop planar only within tolerance, or a sliver
+/// that fits many planes): the cell must not get a second face.
+fn has_face_on(ents: &Entities, cell: &Cell) -> bool {
+    let edges = cell_edges(cell);
+    ents.edges[cell.outer[0].edge]
+        .faces
+        .iter()
+        .any(|&g| face_edges(ents, g) == edges)
+}
+
 fn reversed(cycle: &[CoEdge]) -> Vec<CoEdge> {
     cycle
         .iter()
@@ -389,7 +438,17 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
         let coplanar: Vec<FaceId> = ents
             .faces_near_plane(&plane, PLANE_SLACK)
             .into_iter()
-            .filter(|&f| ents.face_plane(f).coincides(&plane))
+            // As for edges: within tolerance of the plane everywhere (a plane spanned at
+            // a vertex a hair off a face's plane is tilted by more than `coincides`
+            // allows, and the face would get a twin in it).
+            .filter(|&f| {
+                ents.face_plane(f).coincides(&plane)
+                    || ents.faces[f].loops().all(|l| {
+                        l.coedges
+                            .iter()
+                            .all(|c| plane.contains(ents.pos(ents.coedge_ends(*c).0)))
+                    })
+            })
             .collect();
         let mut to_split: Vec<FaceId> = Vec::new();
         let mut to_create: Vec<usize> = Vec::new();
@@ -404,7 +463,7 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
                         to_split.push(f);
                     }
                 }
-                None if create => to_create.push(i),
+                None if create && !has_face_on(ents, cell) => to_create.push(i),
                 None => {}
             }
         }
@@ -412,6 +471,9 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
             let region = Region::of(ents, f);
             let face = ents.remove_face(f).expect("face exists");
             for cell in cells.iter().filter(|c| region.contains(&plane, c.sample)) {
+                if has_face_on(ents, cell) {
+                    continue;
+                }
                 let g = face_from_cell(ents, &plane, cell, face.normal, face.attrs.clone());
                 if !face_is_sound(ents, g) {
                     ents.remove_face(g);
@@ -559,7 +621,7 @@ pub fn add_curve(
         // Edges covering the segment that existed before it was added lie along it, so
         // only edges near it need remembering.
         ents.ensure_index();
-        let before: std::collections::HashSet<EdgeId> = ents
+        let before: std::collections::BTreeSet<EdgeId> = ents
             .edges_near_segment(w[0], w[1], 4.0 * TOL)
             .into_iter()
             .collect();

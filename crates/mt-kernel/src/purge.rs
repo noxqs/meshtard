@@ -1,7 +1,7 @@
 //! Model Info > Statistics: entity counts and Purge Unused (component definitions,
 //! materials and tags no entity uses).
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::entities::{DefinitionId, Entities};
 use crate::model::Model;
@@ -76,7 +76,7 @@ pub fn statistics(model: &Model) -> Statistics {
 
 /// Definitions with no instance in the model root or inside a used definition.
 pub fn unused_definitions(model: &Model) -> Vec<DefinitionId> {
-    let mut used = HashSet::new();
+    let mut used = BTreeSet::new();
     let mut stack: Vec<&Entities> = vec![&model.root];
     while let Some(ents) = stack.pop() {
         for inst in &ents.instances {
@@ -103,7 +103,7 @@ pub fn purge_definitions(model: &mut Model) -> usize {
 }
 
 /// Old index to new index after dropping the unused ones of `len` items.
-fn remap(len: usize, used: &HashSet<usize>, keep_first: bool) -> Vec<Option<usize>> {
+fn remap(len: usize, used: &BTreeSet<usize>, keep_first: bool) -> Vec<Option<usize>> {
     let mut next = 0;
     (0..len)
         .map(|i| {
@@ -116,7 +116,7 @@ fn remap(len: usize, used: &HashSet<usize>, keep_first: bool) -> Vec<Option<usiz
 }
 
 pub fn purge_materials(model: &mut Model) -> usize {
-    let mut used = HashSet::new();
+    let mut used = BTreeSet::new();
     for ents in all_entities(model) {
         for f in ents.faces.values() {
             used.extend(f.attrs.material);
@@ -146,7 +146,7 @@ pub fn purge_materials(model: &mut Model) -> usize {
 
 /// Tags no entity is on; `Layer0` (Untagged) always stays.
 pub fn purge_tags(model: &mut Model) -> usize {
-    let mut used = HashSet::new();
+    let mut used = BTreeSet::new();
     for ents in all_entities(model) {
         used.extend(ents.edges.values().filter_map(|e| e.attrs.layer));
         used.extend(ents.faces.values().filter_map(|f| f.attrs.layer));

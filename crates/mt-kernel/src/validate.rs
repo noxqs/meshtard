@@ -3,7 +3,7 @@
 use glam::DVec2;
 
 use crate::TOL;
-use crate::entities::{Entities, FaceId, Loop};
+use crate::entities::{EdgeId, Entities, FaceId, Loop};
 use crate::geom::{Plane, segment_segment, signed_area2};
 
 /// Which checks to run. Files written by SketchUp satisfy the topology checks, but not
@@ -90,6 +90,22 @@ pub fn validate(ents: &Entities, checks: Checks) -> Vec<String> {
                 .all(|l| l.coedges.iter().all(|c| ents.edges.contains_key(c.edge)))
         {
             check_face_geometry(ents, fid, &mut err);
+        }
+    }
+
+    // Two faces bounded by the same edges are one face twice. (Not a topology check:
+    // some files written by SketchUp have such pairs.)
+    let mut by_edges: std::collections::BTreeMap<Vec<EdgeId>, FaceId> =
+        std::collections::BTreeMap::new();
+    for (fid, face) in ents.faces.iter().filter(|_| checks.geometry) {
+        let mut edges: Vec<EdgeId> = face
+            .loops()
+            .flat_map(|l| l.coedges.iter().map(|c| c.edge))
+            .collect();
+        edges.sort();
+        edges.dedup();
+        if let Some(g) = by_edges.insert(edges, fid) {
+            err(format!("faces {g:?} and {fid:?} have the same edges"));
         }
     }
 

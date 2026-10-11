@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc af0ae973e5f9bb172acfd25598883ad92b2deed95e4289587321d1ffe9343f03 # shrinks to ops = [Rect([0, 2], [2, 7], 0), Line([0, 0, 0], [1, 0, 0]), Rect([2, 1], [1, 0], 0), Rect([5, 5], [5, 5], 0), Line([1, 3, 0], [2, 4, 0]), Line([1, 1, 0], [0, 4, 0]), Erase(15199860184201021032), Line([0, 4, 0], [3, 2, 0]), Line([0, 3, 0], [2, 3, 0]), Erase(3180181220415818558), Line([0, 1, 0], [2, 3, 0]), Erase(7496226435616384181), Line([4, 4, 0], [0, 2, 0]), Erase(3389687287353793954)]
+cc 7a88a4ef482c82a96af7ad894c5325fb72a51a1c7a7fbec880e53796639cb138 # shrinks to rects = [((4, 5), (7, 3), 0), ((1, 6), (3, 3), 0), ((4, 3), (1, 3), 0), ((0, 7), (8, 0), 0)]

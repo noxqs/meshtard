@@ -8,7 +8,7 @@
 //!   is not welded (unverified: SketchUp may weld the longest chain).
 //! - Explode Curve turns a curve's segments into separate edges.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec3;
 
@@ -21,12 +21,12 @@ pub const MAX_DIVISIONS: usize = 1000;
 /// the direction each runs along the chain, and the `edges + 1` vertices (the last
 /// equals the first for a closed chain). `None` if they do not form one chain.
 pub fn chain_of(ents: &Entities, edges: &[EdgeId]) -> Option<(Vec<EdgeId>, Vec<VertexId>)> {
-    let set: HashSet<EdgeId> = edges.iter().copied().collect();
+    let set: BTreeSet<EdgeId> = edges.iter().copied().collect();
     if set.is_empty() || set.iter().any(|e| !ents.edges.contains_key(*e)) {
         return None;
     }
     // Vertex degree within the set.
-    let mut degree: HashMap<VertexId, usize> = HashMap::new();
+    let mut degree: BTreeMap<VertexId, usize> = BTreeMap::new();
     for &e in &set {
         let edge = &ents.edges[e];
         *degree.entry(edge.start).or_default() += 1;
@@ -52,7 +52,7 @@ pub fn chain_of(ents: &Entities, edges: &[EdgeId]) -> Option<(Vec<EdgeId>, Vec<V
     };
     let mut order = Vec::with_capacity(set.len());
     let mut verts = vec![first];
-    let mut used: HashSet<EdgeId> = HashSet::new();
+    let mut used: BTreeSet<EdgeId> = BTreeSet::new();
     let mut v = first;
     loop {
         let next = ents.vertices[v]
@@ -178,7 +178,7 @@ fn replace_chain(
         return Vec::new();
     }
     // Direction each chain edge runs along the chain.
-    let rev: HashMap<EdgeId, bool> = order
+    let rev: BTreeMap<EdgeId, bool> = order
         .iter()
         .zip(verts)
         .map(|(&e, &v)| (e, ents.edges[e].start != v))
@@ -276,14 +276,14 @@ fn replace_chain(
 /// Weld Edges: joins each connected chain of `edges` (two or more edges, no branches)
 /// into one new free-form curve. Returns the new curves.
 pub fn weld_edges(ents: &mut Entities, edges: &[EdgeId]) -> Vec<CurveId> {
-    let set: HashSet<EdgeId> = edges
+    let set: BTreeSet<EdgeId> = edges
         .iter()
         .copied()
         .filter(|e| ents.edges.contains_key(*e))
         .collect();
     // Connected components through shared vertices.
     let mut out = Vec::new();
-    let mut seen: HashSet<EdgeId> = HashSet::new();
+    let mut seen: BTreeSet<EdgeId> = BTreeSet::new();
     let mut sorted: Vec<EdgeId> = set.iter().copied().collect();
     sorted.sort();
     for start in sorted {
@@ -307,7 +307,7 @@ pub fn weld_edges(ents: &mut Entities, edges: &[EdgeId]) -> Vec<CurveId> {
             continue;
         }
         let curve = ents.curves.insert(Curve { arc: None });
-        let mut old: HashSet<CurveId> = HashSet::new();
+        let mut old: BTreeSet<CurveId> = BTreeSet::new();
         for &e in &comp {
             let a = &mut ents.edges[e].attrs;
             if let Some(c) = a.curve.replace(curve) {
@@ -330,7 +330,7 @@ pub fn weld_edges(ents: &mut Entities, edges: &[EdgeId]) -> Vec<CurveId> {
 /// Explode Curve: the curves of `edges` become separate edges. Returns whether any
 /// curve was exploded.
 pub fn explode_curves(ents: &mut Entities, edges: &[EdgeId]) -> bool {
-    let curves: HashSet<CurveId> = edges
+    let curves: BTreeSet<CurveId> = edges
         .iter()
         .filter_map(|e| ents.edges.get(*e)?.attrs.curve)
         .collect();

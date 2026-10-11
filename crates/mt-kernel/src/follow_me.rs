@@ -1,6 +1,6 @@
 //! SketchUp's Follow Me tool.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use glam::DVec3;
 
@@ -134,7 +134,7 @@ pub fn follow_me(ents: &mut Entities, profile: FaceId, path: &[EdgeId]) -> Vec<F
         }
     }
 
-    let faces_before: HashSet<FaceId> = ents.faces.keys().collect();
+    let faces_before: BTreeSet<FaceId> = ents.faces.keys().collect();
     let mut soft: Vec<(DVec3, DVec3)> = Vec::new();
     let add_section = |ents: &mut Entities, s: &[Vec<DVec3>]| {
         for l in s {
@@ -276,8 +276,8 @@ pub fn follow_me(ents: &mut Entities, profile: FaceId, path: &[EdgeId]) -> Vec<F
 /// starting from the first face, then turns them all over if they face inward
 /// (negative enclosed volume).
 fn orient_outward(ents: &mut Entities, faces: &[FaceId]) {
-    let set: HashSet<FaceId> = faces.iter().copied().collect();
-    let mut done: HashSet<FaceId> = HashSet::new();
+    let set: BTreeSet<FaceId> = faces.iter().copied().collect();
+    let mut done: BTreeSet<FaceId> = BTreeSet::new();
     let use_of = |ents: &Entities, f: FaceId, e: EdgeId| {
         ents.faces[f]
             .loops()

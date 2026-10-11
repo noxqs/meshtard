@@ -23,7 +23,7 @@
 //! keep their front material (unverified). Edge attributes (soft, smooth, curves) are
 //! not carried over.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use glam::{DMat4, DVec2, DVec3};
 
@@ -407,7 +407,7 @@ fn ray_hit(o: DVec3, d: DVec3, [a, b, c]: [DVec3; 3]) -> RayHit {
 /// Faces grouped into connected shells (through shared edges), with each shell made
 /// consistently oriented (a shared edge runs opposite ways in its two faces).
 fn consistent_shells(e: &mut Entities) -> Vec<Vec<FaceId>> {
-    let mut seen: HashSet<FaceId> = HashSet::new();
+    let mut seen: BTreeSet<FaceId> = BTreeSet::new();
     let mut shells = Vec::new();
     let keys: Vec<FaceId> = e.faces.keys().collect();
     for start in keys {
@@ -480,7 +480,7 @@ fn snapped_cuts(ea: &Entities, eb: &Entities) -> Vec<(DVec3, DVec3)> {
         snap(v.pos);
     }
     let key = |p: DVec3| p.to_array().map(f64::to_bits);
-    let mut seen: HashSet<([u64; 3], [u64; 3])> = HashSet::new();
+    let mut seen: BTreeSet<([u64; 3], [u64; 3])> = BTreeSet::new();
     let mut out: Vec<(DVec3, DVec3)> = Vec::with_capacity(segs.len());
     for (p, q) in segs {
         let (p, q) = (snap(p), snap(q));
@@ -636,7 +636,7 @@ fn assemble(pieces: &[(&Piece, bool)]) -> Entities {
             Some((full, normal, attrs))
         })
         .collect();
-    let mut by_key: HashMap<Vec<VertexId>, Vec<usize>> = HashMap::new();
+    let mut by_key: BTreeMap<Vec<VertexId>, Vec<usize>> = BTreeMap::new();
     for (i, (loops, _, _)) in faces.iter().enumerate() {
         let mut key: Vec<VertexId> = loops.concat();
         key.sort();
@@ -786,7 +786,7 @@ fn mergeable(e: &Entities, f: FaceId, g: FaceId) -> bool {
 /// same attributes by the faces of their combined region.
 fn merge_coplanar(e: &mut Entities) {
     let faces: Vec<FaceId> = e.faces.keys().collect();
-    let index: HashMap<FaceId, usize> = faces.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+    let index: BTreeMap<FaceId, usize> = faces.iter().enumerate().map(|(i, f)| (*f, i)).collect();
     let mut parent: Vec<usize> = (0..faces.len()).collect();
     fn root(parent: &mut [usize], i: usize) -> usize {
         let mut r = i;
@@ -804,7 +804,7 @@ fn merge_coplanar(e: &mut Entities) {
             parent[a] = b;
         }
     }
-    let mut groups: HashMap<usize, Vec<FaceId>> = HashMap::new();
+    let mut groups: BTreeMap<usize, Vec<FaceId>> = BTreeMap::new();
     for (i, f) in faces.iter().enumerate() {
         groups.entry(root(&mut parent, i)).or_default().push(*f);
     }
@@ -817,7 +817,7 @@ fn merge_coplanar(e: &mut Entities) {
         let attrs = e.faces[first].attrs.clone();
         let regions: Vec<(Vec<DVec2>, Vec<Vec<DVec2>>)> =
             group.iter().map(|&f| e.face_polygons(f, &plane)).collect();
-        let mut uses: HashMap<EdgeId, usize> = HashMap::new();
+        let mut uses: BTreeMap<EdgeId, usize> = BTreeMap::new();
         for &f in &group {
             for edge in crate::transform::face_edges(e, f) {
                 *uses.entry(edge).or_default() += 1;

@@ -9,7 +9,7 @@
 //!   (a shared edge must run opposite ways in the two faces). The picked face keeps
 //!   its orientation. Edges with three or more faces stop the walk (unverified).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::entities::{CoEdge, EdgeId, Entities, FaceId};
 
@@ -41,7 +41,7 @@ pub fn reverse_face(ents: &mut Entities, f: FaceId) -> bool {
 
 /// Reverse Faces: turns every face of `faces` over. Returns whether any changed.
 pub fn reverse_faces(ents: &mut Entities, faces: &[FaceId]) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
     let mut any = false;
     for &f in faces {
         if seen.insert(f) {
@@ -67,7 +67,7 @@ pub fn orient_faces(ents: &mut Entities, seed: FaceId) -> Vec<FaceId> {
     if !ents.faces.contains_key(seed) {
         return flipped;
     }
-    let mut done: HashSet<FaceId> = HashSet::from([seed]);
+    let mut done: BTreeSet<FaceId> = BTreeSet::from([seed]);
     let mut queue = VecDeque::from([seed]);
     while let Some(f) = queue.pop_front() {
         let edges: Vec<EdgeId> = ents.faces[f]

@@ -17,7 +17,7 @@
 //!    or overlap where a part of the face between them vanished), and everything is
 //!    added with `add_line` / `add_curve`.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use glam::{DVec2, DVec3};
 
@@ -146,7 +146,7 @@ fn merge_collinear(segs: &[Seg2]) -> Vec<Seg2> {
 
 /// Edges near some segments before an operation, to tell which edges it added along them.
 pub(crate) struct EdgeSnapshot {
-    ids: HashSet<EdgeId>,
+    ids: BTreeSet<EdgeId>,
     segments: Vec<(DVec3, DVec3)>,
 }
 

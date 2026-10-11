@@ -376,3 +376,41 @@ fn random_rotated_pairs() {
     }
     assert!(failed * 50 <= cases, "{failed} of {cases} failed");
 }
+
+/// Everything that identifies a result: ids, positions (bit for bit, through their
+/// shortest round-trip text), loops and normals.
+fn fingerprint(e: &Entities) -> String {
+    format!("{:?}", (&e.vertices, &e.edges, &e.faces))
+}
+
+/// Booleans give the same output on every run: the arrangement and face-finding code
+/// does not depend on hash-map order (each std hash map instance hashes differently, so
+/// repeating in one process goes through many orders).
+#[test]
+fn booleans_are_deterministic() {
+    let a = unit();
+    let b = cube(p(0.25, 0.25, 0.0), p(1.5, 0.75, 1.0));
+    let rot = DMat4::from_translation(DVec3::splat(0.5))
+        * DMat4::from_quat(DQuat::from_euler(glam::EulerRot::XYZ, 0.3, 0.5, 0.7));
+    let run = || {
+        let mut out = Vec::new();
+        for xf in [DMat4::from_translation(p(0.5, 0.0, 0.0)), rot] {
+            let first = SolidInput::new(&a, DMat4::IDENTITY);
+            let second = SolidInput::new(&b, xf);
+            out.push(fingerprint(&solid::union(first, second).unwrap()));
+            out.push(fingerprint(&solid::intersect(first, second).unwrap()));
+            out.push(fingerprint(&solid::subtract(first, second).unwrap()));
+            out.push(fingerprint(&solid::trim(first, second).unwrap()));
+            let s = solid::split(first, second).unwrap();
+            for e in [&s.first_only, &s.both, &s.second_only] {
+                out.push(fingerprint(e));
+            }
+            out.push(fingerprint(&solid::outer_shell(&[first, second]).unwrap()));
+        }
+        out
+    };
+    let expected = run();
+    for _ in 0..20 {
+        assert!(run() == expected, "a boolean gave a different result");
+    }
+}
