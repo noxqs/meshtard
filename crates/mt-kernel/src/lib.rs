@@ -21,6 +21,7 @@ pub mod intersect;
 pub mod mesh_export;
 pub mod mesh_import;
 pub mod model;
+pub mod model_data;
 pub mod offset;
 pub mod ops;
 pub mod orient;
@@ -36,7 +37,7 @@ pub mod transform;
 pub mod validate;
 pub mod visibility;
 
-pub use annotation::{ArrowStyle, Dimension, DimensionKind, LeaderStyle, Text, TextPosition};
+pub use annotation::{Dimension, DimensionKind, Text, TextPosition};
 pub use entities::*;
 pub use follow_me::follow_me;
 pub use intersect::intersect_faces;

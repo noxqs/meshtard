@@ -21,6 +21,8 @@ pub const SIZE: f32 = 28.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Arrow,
+    /// The Lasso tool: an arrow with a lasso loop (unverified).
+    Lasso,
     Pencil,
     Rectangle,
     RotatedRectangle,
@@ -113,6 +115,7 @@ impl Cursor {
 impl Kind {
     pub const ALL: &[Kind] = &[
         Self::Arrow,
+        Self::Lasso,
         Self::Pencil,
         Self::Rectangle,
         Self::RotatedRectangle,
@@ -161,8 +164,8 @@ impl Kind {
         use Kind::*;
         match self {
             Arrow => Layout::Arrow,
-            Dimension | Text | SectionPlane | Tag | OuterShell | Intersect | Union | Subtract
-            | Trim | Split => Layout::ArrowGlyph,
+            Lasso | Dimension | Text | SectionPlane | Tag | OuterShell | Intersect | Union
+            | Subtract | Trim | Split => Layout::ArrowGlyph,
             Pencil | Rectangle | RotatedRectangle | Circle | Polygon | Arc | Arc2Point
             | Arc3Point | Pie | Freehand | Sandbox | Eraser | PaintBucket | Eyedropper
             | TapeMeasure => Layout::Tip,
@@ -179,8 +182,8 @@ impl Kind {
     pub fn hotspot(self) -> (f32, f32) {
         use Kind::*;
         match self {
-            Arrow | Dimension | Text | SectionPlane | Tag | OuterShell | Intersect | Union
-            | Subtract | Trim | Split => (2.0, 2.0),
+            Arrow | Lasso | Dimension | Text | SectionPlane | Tag | OuterShell | Intersect
+            | Union | Subtract | Trim | Split => (2.0, 2.0),
             Pencil | Rectangle | RotatedRectangle | Circle | Polygon | Arc | Arc2Point
             | Arc3Point | Pie | Freehand | Sandbox | Eyedropper | TapeMeasure | PaintBucket => {
                 (3.0, 29.0)
@@ -518,6 +521,12 @@ fn draw_kind(k: &mut Ink, kind: Kind) {
     use Kind::*;
     match kind {
         Arrow => arrow_cursor(k),
+        Lasso => {
+            arrow_cursor(k);
+            // A loop of rope at the lower right, its tail running to the arrow.
+            k.outline(&arc_pts((24.0, 22.0), 5.5, 0.0, 360.0), W, INK);
+            k.line(&[(20.0, 26.0), (17.0, 30.0)], W, INK);
+        }
         Pencil => pencil(k),
         Rectangle => {
             pencil(k);

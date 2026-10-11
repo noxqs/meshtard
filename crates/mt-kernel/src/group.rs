@@ -264,6 +264,7 @@ pub fn make_group_with_frame(
         is_image: false,
         glue: crate::model::GlueTo::None,
         attributes: Default::default(),
+        ..Default::default()
     });
     ents.instances.push(Instance {
         definition,

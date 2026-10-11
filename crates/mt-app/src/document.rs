@@ -148,16 +148,37 @@ struct Inherited {
     /// Inside a group or component that is not on the open context's path (the
     /// outermost such instance).
     container: Option<mt_infer::Container>,
+    /// The tag of the innermost tagged instance around: untagged entities take its
+    /// color with Color by Tag and its dashes.
+    layer: Option<usize>,
+    /// Inside another instance of the open component (Model Info > Components fades
+    /// it by its "similar" amount).
+    similar: bool,
 }
 
-/// Edge color outside the open group or component (draft; SketchUp fades the rest of
-/// the model, amount unverified).
-const FADED_EDGE: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
-
-/// Lightens a face color for geometry outside the open context.
-fn fade(c: [f32; 4]) -> [f32; 4] {
-    let l = |x: f32| x + (1.0 - x) * 0.55;
+/// Lightens a color towards white by `amount` (0 to 1) for geometry outside the open
+/// context (Model Info > Components fade sliders; SketchUp's scale is unverified).
+fn fade_by(c: [f32; 4], amount: f32) -> [f32; 4] {
+    let a = amount.clamp(0.0, 1.0);
+    let l = |x: f32| x + (1.0 - x) * a;
     [l(c[0]), l(c[1]), l(c[2]), c[3]]
+}
+
+/// Edges fade a little more than faces (black edges at the default 0.55 fade come
+/// out at 0.62 gray, as before the fade became a setting).
+const EDGE_FADE: f32 = 0.62 / 0.55;
+
+/// Lengths of the component axes drawn by Model Info > Components > Show component
+/// axes, relative to the definition's size (draft).
+const COMPONENT_AXES: f64 = 0.3;
+
+fn rgba(c: [u8; 3]) -> [f32; 4] {
+    [
+        f32::from(c[0]) / 255.0,
+        f32::from(c[1]) / 255.0,
+        f32::from(c[2]) / 255.0,
+        1.0,
+    ]
 }
 
 /// How View > Hidden Geometry draws hidden entities (drafts: SketchUp shows hidden
@@ -219,6 +240,12 @@ pub fn units_to_options(
         ("AnglePrecision", Int(i32::from(o.angle_precision))),
         ("AngleSnapEnabled", Bool(o.angle_snapping)),
         ("SnapAngle", Double(o.snap_angle)),
+        ("AreaUnit", Int(o.area_unit.code())),
+        ("AreaPrecision", Int(i32::from(o.area_precision))),
+        ("VolumeUnit", Int(o.volume_unit.code())),
+        ("VolumePrecision", Int(i32::from(o.volume_precision))),
+        ("ForceInchDisplay", Bool(o.force_inch_display)),
+        ("SuppressUnitsDisplay", Bool(o.suppress_units)),
     ]
     .into_iter()
     .map(|(k, v)| ("UnitsOptions", k, v))
@@ -257,6 +284,19 @@ pub fn units_from_options(
     out.snap_angle = num("SnapAngle")
         .filter(|&v| v > 0.0)
         .unwrap_or(out.snap_angle);
+    // Area and volume (SketchUp 2020+; codes unverified): without them, the squares
+    // and cubes of the length unit.
+    use mt_infer::units::{AreaUnit, VolumeUnit};
+    out.area_unit = int("AreaUnit")
+        .and_then(AreaUnit::from_code)
+        .unwrap_or(AreaUnit::of_length(unit));
+    out.volume_unit = int("VolumeUnit")
+        .and_then(VolumeUnit::from_code)
+        .unwrap_or(VolumeUnit::of_length(unit));
+    out.area_precision = small("AreaPrecision").unwrap_or(out.area_precision);
+    out.volume_precision = small("VolumePrecision").unwrap_or(out.volume_precision);
+    out.force_inch_display = flag("ForceInchDisplay").unwrap_or(out.force_inch_display);
+    out.suppress_units = flag("SuppressUnitsDisplay").unwrap_or(out.suppress_units);
     (unit, out)
 }
 
@@ -753,8 +793,25 @@ impl Document {
         ]
     }
 
+    /// The tag and the folders it is in are visible.
     fn layer_visible(&self, layer: Option<usize>) -> bool {
-        layer.is_none_or(|l| self.model.layers.get(l).is_none_or(|x| x.visible))
+        layer.is_none_or(|l| self.model.layer_shown(l))
+    }
+
+    /// Color by Tag: the tag's color for an entity on `layer` (or its container's).
+    fn tag_color(&self, layer: Option<usize>) -> Option<[f32; 4]> {
+        if !self.model.color_by_tag {
+            return None;
+        }
+        let l = layer.unwrap_or(0);
+        self.model.layers.get(l).map(|x| rgba(x.color))
+    }
+
+    /// Dash length of edges on `layer` (Tags panel Dashes; 0 = solid).
+    fn tag_dash(&self, layer: Option<usize>) -> f32 {
+        layer
+            .and_then(|l| self.model.layers.get(l))
+            .map_or(0.0, |x| x.dashes.length())
     }
 
     fn collect(
@@ -783,15 +840,29 @@ impl Document {
             .and_then(|d| d.last().copied());
         let ghost = inherited.hidden;
         let container = inherited.container;
+        let outer_layer = inherited.layer;
+        let similar = inherited.similar;
         let inherited = inherited.material;
         // Outside the open context: faded, not selectable.
         let faded = matches!(level, Level::Outside | Level::Context([_, ..]));
+        let fades = &self.model.edit_fade;
+        let fade_amount = if similar { fades.similar } else { fades.rest };
+        let fade = |c: [f32; 4]| fade_by(c, fade_amount);
+        // The open component (Model Info > Components fades its other instances).
+        let edit_def = editing
+            .then(|| Self::path_definitions(&self.model, &self.context))
+            .flatten()
+            .and_then(|d| d.last().copied());
         let owner_of = |own: Owner| match level {
             Level::Context([]) => Some(own),
             Level::Inside(o) => Some(o),
             _ => None,
         };
-        let edge_color = if faded { FADED_EDGE } else { EDGE_COLOR };
+        let edge_color = if faded {
+            fade_by(EDGE_COLOR, fade_amount * EDGE_FADE)
+        } else {
+            EDGE_COLOR
+        };
         let world = |p: DVec3| {
             let q = xf.transform_point3(p);
             [q.x as f32, q.y as f32, q.z as f32]
@@ -813,11 +884,25 @@ impl Document {
             {
                 continue;
             }
+            // Color by Tag and the tag's dashes (own tag, else the container's).
+            let tag = e.attrs.layer.filter(|&l| l > 0).or(outer_layer);
+            let color = match self.tag_color(tag) {
+                Some(c) if faded => fade_by(c, fade_amount * EDGE_FADE),
+                Some(c) => c,
+                None => edge_color,
+            };
             let mut seg = Segment::line(
                 world(ents.pos(e.start)),
                 world(ents.pos(e.end)),
-                if hidden { HIDDEN_EDGE } else { edge_color },
-                [EDGE_WIDTH, if hidden { HIDDEN_DASH } else { 0.0 }],
+                if hidden { HIDDEN_EDGE } else { color },
+                [
+                    EDGE_WIDTH,
+                    if hidden {
+                        HIDDEN_DASH
+                    } else {
+                        self.tag_dash(tag)
+                    },
+                ],
             );
             if let Some(c) = container {
                 out.edge_container.insert(out.edges.len(), c);
@@ -854,6 +939,11 @@ impl Document {
             let back_material = face.attrs.back_material.or(inherited);
             let mut front = self.color(front_material, self.model.front_color);
             let mut back = self.color(back_material, self.model.back_color);
+            let by_tag = self.tag_color(face.attrs.layer.filter(|&l| l > 0).or(outer_layer));
+            if let Some(c) = by_tag {
+                front = c;
+                back = c;
+            }
             if faded || hidden {
                 front = fade(front);
                 back = fade(back);
@@ -865,7 +955,7 @@ impl Document {
             // Texture mapping per side, in the face's own coordinates. Faded geometry
             // (outside the open context) shows its lightened colors, not textures.
             let side = |m: Option<MaterialId>, is_back: bool| {
-                let i = m.filter(|_| !faded && !hidden)?;
+                let i = m.filter(|_| !faded && !hidden && by_tag.is_none())?;
                 let layer = *out.texture_of.get(i)?;
                 let map = texture::face_mapping(face, is_back, self.model.materials.get(i)?)?;
                 // Shift by whole repeats so the numbers stay small in f32.
@@ -964,7 +1054,30 @@ impl Document {
                 material: i.material.or(inherited),
                 hidden: ghost || i.hidden,
                 container: container.or((!matches!(child, Level::Context(_))).then_some(kind)),
+                layer: i.layer.filter(|&l| l > 0).or(outer_layer),
+                similar: similar || (edit_def == Some(i.definition) && !on_path),
             };
+            // Model Info > Components > Show component axes.
+            if self.model.edit_fade.show_axes && !def.is_group && !def.is_image {
+                let ix = xf * i.transform;
+                let size = def
+                    .entities
+                    .vertices
+                    .values()
+                    .map(|v| v.pos.abs().max_element())
+                    .fold(0.0f64, f64::max);
+                let len = (size * COMPONENT_AXES).max(1.0);
+                let o = ix.transform_point3(DVec3::ZERO);
+                for (axis, c) in [
+                    (DVec3::X, [0.85, 0.1, 0.1, 1.0]),
+                    (DVec3::Y, [0.1, 0.65, 0.1, 1.0]),
+                    (DVec3::Z, [0.1, 0.2, 0.9, 1.0]),
+                ] {
+                    let tip = ix.transform_point3(axis * len);
+                    out.guides
+                        .push(Segment::line(f32x3(o), f32x3(tip), c, [EDGE_WIDTH, 0.0]));
+                }
+            }
             self.collect(&def.entities, xf * i.transform, parent, child, active, out);
             active.remove(&i.definition);
         }
@@ -1461,6 +1574,12 @@ mod tests {
                 angle_precision: 2,
                 angle_snapping: false,
                 snap_angle: 7.5,
+                area_unit: mt_infer::units::AreaUnit::SquareMeters,
+                area_precision: 1,
+                volume_unit: mt_infer::units::VolumeUnit::Liters,
+                volume_precision: 3,
+                force_inch_display: false,
+                suppress_units: true,
             };
             std::fs::write(&path, doc.to_skp().unwrap()).unwrap();
             let back = Document::open(&path).unwrap();

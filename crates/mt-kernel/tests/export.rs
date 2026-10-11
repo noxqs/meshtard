@@ -47,6 +47,7 @@ fn faces_edges_flags_materials_tags() {
         name: "Walls".into(),
         color: [10, 200, 30],
         visible: false,
+        ..Layer::default()
     });
     square(&mut m.root, DVec3::ZERO, 10.0);
     square(&mut m.root, DVec3::new(10.0, 0.0, 0.0), 10.0);
@@ -256,6 +257,7 @@ fn dump() {
         name: "Walls".into(),
         color: [10, 200, 30],
         visible: true,
+        ..Layer::default()
     });
     square(&mut m.root, DVec3::ZERO, 10.0);
     square(&mut m.root, DVec3::new(3.0, 3.0, 0.0), 2.0);
@@ -641,6 +643,7 @@ fn images_round_trip() {
         name: "Photos".into(),
         color: [1, 2, 3],
         visible: true,
+        ..Layer::default()
     });
     m.materials.push(Material {
         name: "photo.png".into(),

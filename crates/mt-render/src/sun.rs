@@ -79,9 +79,30 @@ fn solar_coordinates(jd: f64) -> (f64, f64) {
     (decl.to_degrees(), 4.0 * eot.to_degrees())
 }
 
+/// A direction given with +Y as true north turned into model axes whose north is
+/// `north_angle_deg` clockwise (seen from above) from the green axis (Model Info >
+/// Geo-location's north angle; SketchUp's sign convention is unverified).
+pub fn rotate_north(dir: DVec3, north_angle_deg: f64) -> DVec3 {
+    let a = -north_angle_deg.to_radians();
+    let (s, c) = a.sin_cos();
+    DVec3::new(dir.x * c - dir.y * s, dir.x * s + dir.y * c, dir.z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn north_angle_turns_the_sun_about_blue() {
+        let north = DVec3::Y;
+        assert!((rotate_north(north, 0.0) - north).length() < 1e-12);
+        // North 90 degrees clockwise from green points along red.
+        assert!((rotate_north(north, 90.0) - DVec3::X).length() < 1e-12);
+        let east = rotate_north(DVec3::X, 90.0);
+        assert!((east + DVec3::Y).length() < 1e-12, "{east:?}");
+        let up = DVec3::new(0.3, 0.4, 0.8);
+        assert!((rotate_north(up, 37.0).z - 0.8).abs() < 1e-12);
+    }
 
     fn elevation_deg(d: DVec3) -> f64 {
         d.z.asin().to_degrees()

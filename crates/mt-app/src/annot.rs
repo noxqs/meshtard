@@ -3,12 +3,16 @@
 //! highlight like edges; labels and arrowheads are painted over the view, facing the
 //! screen at a fixed size.
 //!
-//! Drafts: SketchUp's label font, arrow style (here closed arrows) and leader dot are
-//! unverified.
+//! Model Info > Dimensions and Text set each label's font size, the dimension text's
+//! alignment (to the screen, or along the dimension line above, centered or outside
+//! it), the endpoints (none, slash, dot, closed or open arrow), the text color and
+//! leader (FEATURES.md 61). Drafts: SketchUp's label font, the endpoint sizes and the
+//! leader dot are unverified.
 
 use glam::{DMat4, DVec2, DVec3};
 use mt_infer::units::LengthUnit;
-use mt_kernel::{ArrowStyle, Dimension, DimensionKind, Entities};
+use mt_kernel::model_data::{DimensionAlign, DimensionStyle, Endpoint, LeaderKind, TextStyle};
+use mt_kernel::{Dimension, DimensionKind, Entities};
 use mt_render::Segment;
 
 use crate::document::{Document, Owner, Scene};
@@ -39,13 +43,14 @@ pub struct Annotation {
     pub owner: Option<Owner>,
     pub text: String,
     pub at: Anchor,
-    /// Arrowheads as (tip, a point the arrow comes from).
+    /// Line ends as (tip, a point the line comes from), drawn as `endpoint`.
     pub arrows: Vec<[DVec3; 2]>,
-    /// The point a leader text points at.
-    pub dot: Option<DVec3>,
-    /// Arrowheads drawn as open V shapes instead of filled ones (leader text Arrow >
-    /// Open).
-    pub open: bool,
+    pub endpoint: Endpoint,
+    /// Points.
+    pub font_size: f32,
+    pub color: [u8; 3],
+    /// A dimension's line and how its text is aligned to it.
+    pub along: Option<([DVec3; 2], DimensionAlign)>,
 }
 
 fn trim_number(v: f64) -> String {
@@ -69,6 +74,10 @@ pub fn dimension_label(d: &Dimension, units: LengthUnit) -> String {
 
 /// An area in square inches, e.g. `144 in²` (format unverified).
 pub fn area_label(area: f64, units: LengthUnit) -> String {
+    // The open model's Model Info > Units area unit and precision.
+    if let Some(o) = mt_infer::units::display_options() {
+        return mt_infer::units::format_area(area, &o);
+    }
     let u = units.inches();
     let name = match units {
         LengthUnit::Inch => "in",
@@ -93,35 +102,29 @@ pub fn point_label(p: DVec3, units: LengthUnit) -> String {
 /// Adds the dimensions and texts of the model root and the open context.
 pub fn collect(doc: &Document, scene: &mut Scene) {
     let root = doc.context.is_empty();
-    let show_hidden = doc.model.style.hidden_geometry;
-    add(
-        &doc.model.root,
-        DMat4::IDENTITY,
-        root,
-        doc.units,
-        show_hidden,
-        scene,
-    );
+    let o = Options {
+        units: doc.units,
+        show_hidden: doc.model.style.hidden_geometry,
+        dimension: doc.model.dimension_style,
+        text: doc.model.text_style,
+    };
+    add(&doc.model.root, DMat4::IDENTITY, root, &o, scene);
     if !root {
-        add(
-            doc.active(),
-            doc.context_transform(),
-            true,
-            doc.units,
-            show_hidden,
-            scene,
-        );
+        add(doc.active(), doc.context_transform(), true, &o, scene);
     }
 }
 
-fn add(
-    ents: &Entities,
-    xf: DMat4,
-    owned: bool,
+/// What labels are drawn with: units, View > Hidden Geometry and the model's
+/// default dimension and text styles.
+struct Options {
     units: LengthUnit,
     show_hidden: bool,
-    scene: &mut Scene,
-) {
+    dimension: DimensionStyle,
+    text: TextStyle,
+}
+
+fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) {
+    let (units, show_hidden) = (o.units, o.show_hidden);
     let w = |p: DVec3| xf.transform_point3(p);
     let f = |p: DVec3| w(p).as_vec3().to_array();
     let mut line = |a: DVec3, b: DVec3, owner: Option<Owner>| {
@@ -147,13 +150,17 @@ fn add(
                 vec![[w(p), w(q)], [w(q), w(p)]]
             }
         };
+        let style = d.style.unwrap_or(o.dimension);
         labels.push(Annotation {
             owner,
             text: dimension_label(d, units),
             at: Anchor::World(w(d.label_point())),
             arrows,
-            dot: None,
-            open: false,
+            endpoint: style.endpoint,
+            font_size: style.font_size,
+            color: [0, 0, 0],
+            // Radial dimensions keep their text on the leader, facing the screen.
+            along: (d.kind == DimensionKind::Linear).then_some(([w(p), w(q)], style.align)),
         });
     }
     for (i, t) in ents.texts.iter().enumerate() {
@@ -161,30 +168,29 @@ fn add(
             continue;
         }
         let owner = owned.then_some(Owner::Text(i));
-        let has_leader = !t.screen
-            && t.leader.length() > mt_kernel::TOL
-            && t.leader_style != mt_kernel::LeaderStyle::Hidden;
+        let style = t.style.unwrap_or(o.text);
+        let leader = !t.screen && style.leader != LeaderKind::Hidden;
         let at = if t.screen {
             Anchor::Screen(t.point.truncate())
         } else {
-            if has_leader {
+            if leader && t.leader.length() > mt_kernel::TOL {
                 line(t.point, t.point + t.leader, owner);
             }
             Anchor::World(w(t.point + t.leader))
-        };
-        let head = |style| has_leader && t.arrow == style;
-        let arrows = if head(ArrowStyle::Closed) || head(ArrowStyle::Open) {
-            vec![[w(t.point), w(t.point + t.leader)]]
-        } else {
-            Vec::new()
         };
         labels.push(Annotation {
             owner,
             text: live_text(ents, t, units),
             at,
-            arrows,
-            dot: head(ArrowStyle::Dot).then(|| w(t.point)),
-            open: t.arrow == ArrowStyle::Open,
+            arrows: if leader && t.leader.length() > mt_kernel::TOL {
+                vec![[w(t.point), w(t.point + t.leader)]]
+            } else {
+                Vec::new()
+            },
+            endpoint: style.endpoint,
+            font_size: style.font_size,
+            color: style.color,
+            along: None,
         });
     }
     scene.annotations.extend(labels);
@@ -318,9 +324,10 @@ pub fn pick(
     scene.annotations.iter().rev().find_map(|a| {
         let owner = a.owner?;
         let c = label_pos(a, &project, viewport)?;
+        let k = f64::from(a.font_size / FONT_SIZE);
         let half = DVec2::new(
-            (a.text.chars().count() as f64 * CHAR_WIDTH + 8.0) / 2.0,
-            LABEL_HEIGHT / 2.0,
+            (a.text.chars().count() as f64 * CHAR_WIDTH * k + 8.0) / 2.0,
+            LABEL_HEIGHT * k / 2.0,
         );
         let d = (cursor - c).abs();
         (d.x <= half.x && d.y <= half.y).then_some(owner)
@@ -352,32 +359,13 @@ pub fn paint(
         let color = if a.owner.as_ref().is_some_and(selected) {
             SELECTED
         } else {
-            egui::Color32::BLACK
+            egui::Color32::from_rgb(a.color[0], a.color[1], a.color[2])
         };
         for [tip, from] in &a.arrows {
             let (Some(t), Some(f)) = (to_screen(*tip), to_screen(*from)) else {
                 continue;
             };
-            let dir = (f - t).normalized();
-            if !dir.x.is_finite() {
-                continue;
-            }
-            let side = egui::vec2(-dir.y, dir.x) * ARROW.1;
-            let base = t + dir * ARROW.0;
-            if a.open {
-                let stroke = egui::Stroke::new(1.0, color);
-                painter.line_segment([t, base + side * 1.4], stroke);
-                painter.line_segment([t, base - side * 1.4], stroke);
-            } else {
-                painter.add(egui::Shape::convex_polygon(
-                    vec![t, base + side, base - side],
-                    color,
-                    egui::Stroke::NONE,
-                ));
-            }
-        }
-        if let Some(p) = a.dot.and_then(to_screen) {
-            painter.circle_filled(p, 2.5, color);
+            endpoint(painter, a.endpoint, t, f, color);
         }
         let pos = match a.at {
             Anchor::World(p) => to_screen(p),
@@ -387,11 +375,96 @@ pub fn paint(
         if a.text.is_empty() {
             continue;
         }
-        let galley =
-            painter.layout_no_wrap(a.text.clone(), egui::FontId::proportional(FONT_SIZE), color);
-        let r = egui::Rect::from_center_size(pos, galley.size() + egui::vec2(6.0, 2.0));
-        painter.rect_filled(r, 2.0, egui::Color32::from_white_alpha(220));
-        painter.galley(r.min + egui::vec2(3.0, 1.0), galley, color);
+        let galley = painter.layout_no_wrap(
+            a.text.clone(),
+            egui::FontId::proportional(a.font_size.clamp(4.0, 96.0)),
+            color,
+        );
+        let size = galley.size() + egui::vec2(6.0, 2.0);
+        // Along the dimension line: turned to the line (kept readable, never upside
+        // down), above it, centered on it or past its end.
+        let line = a
+            .along
+            .filter(|(_, al)| *al != DimensionAlign::Screen)
+            .and_then(|([p, q], al)| Some((to_screen(p)?, to_screen(q)?, al)));
+        match line {
+            Some((p, q, align)) if (q - p).length() > 1.0 => {
+                let mut dir = (q - p).normalized();
+                if dir.x < 0.0 || (dir.x == 0.0 && dir.y > 0.0) {
+                    dir = -dir;
+                }
+                // Screen y points down: the normal towards the top of the text.
+                let up = egui::vec2(dir.y, -dir.x);
+                let mid = p + (q - p) * 0.5;
+                let far = if (q - p).dot(dir) > 0.0 { q } else { p };
+                let center = match align {
+                    DimensionAlign::Above => mid + up * (size.y / 2.0 + 2.0),
+                    DimensionAlign::Outside => far + dir * (size.x / 2.0 + 6.0),
+                    DimensionAlign::Centered | DimensionAlign::Screen => mid,
+                };
+                let half = dir * (size.x / 2.0) + up * (size.y / 2.0);
+                let half2 = dir * (size.x / 2.0) - up * (size.y / 2.0);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![center - half, center + half2, center + half, center - half2],
+                    egui::Color32::from_white_alpha(220),
+                    egui::Stroke::NONE,
+                ));
+                // The galley turns about its top left corner.
+                let top_left =
+                    center - dir * (galley.size().x / 2.0) + up * (galley.size().y / 2.0);
+                let angle = dir.y.atan2(dir.x);
+                painter
+                    .add(egui::epaint::TextShape::new(top_left, galley, color).with_angle(angle));
+            }
+            _ => {
+                let r = egui::Rect::from_center_size(pos, size);
+                painter.rect_filled(r, 2.0, egui::Color32::from_white_alpha(220));
+                painter.galley(r.min + egui::vec2(3.0, 1.0), galley, color);
+            }
+        }
+    }
+}
+
+/// A line's end at `tip` (coming from `from`) drawn as `style`; sizes in points are
+/// drafts.
+fn endpoint(
+    painter: &egui::Painter,
+    style: Endpoint,
+    tip: egui::Pos2,
+    from: egui::Pos2,
+    color: egui::Color32,
+) {
+    let dir = (from - tip).normalized();
+    if !dir.x.is_finite() {
+        if style == Endpoint::Dot {
+            painter.circle_filled(tip, 2.5, color);
+        }
+        return;
+    }
+    let side = egui::vec2(-dir.y, dir.x) * ARROW.1;
+    let base = tip + dir * ARROW.0;
+    let stroke = egui::Stroke::new(1.2, color);
+    match style {
+        Endpoint::None => {}
+        Endpoint::Dot => {
+            painter.circle_filled(tip, 2.5, color);
+        }
+        Endpoint::Slash => {
+            // A short stroke at 45 degrees across the line.
+            let d = (dir + egui::vec2(-dir.y, dir.x)).normalized() * 5.0;
+            painter.line_segment([tip - d, tip + d], egui::Stroke::new(1.6, color));
+        }
+        Endpoint::ClosedArrow => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, base + side, base - side],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        Endpoint::OpenArrow => {
+            painter.line_segment([tip, base + side * 1.3], stroke);
+            painter.line_segment([tip, base - side * 1.3], stroke);
+        }
     }
 }
 
@@ -487,6 +560,47 @@ mod tests {
             point_label(DVec3::new(1.0, 2.0, 0.0), LengthUnit::Inch),
             "(1\", 2\", 0\")"
         );
+    }
+
+    /// Shapes painted for one dimension with `endpoint` and `align`.
+    fn painted(endpoint: Endpoint, align: DimensionAlign) -> usize {
+        let a = Annotation {
+            owner: None,
+            text: "10".into(),
+            at: Anchor::World(DVec3::new(50.0, 0.0, 0.0)),
+            arrows: vec![
+                [DVec3::ZERO, DVec3::new(100.0, 0.0, 0.0)],
+                [DVec3::new(100.0, 0.0, 0.0), DVec3::ZERO],
+            ],
+            endpoint,
+            font_size: 13.0,
+            color: [0, 0, 0],
+            along: Some(([DVec3::ZERO, DVec3::new(100.0, 0.0, 0.0)], align)),
+        };
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let p = ui.ctx().layer_painter(egui::LayerId::background());
+            let to_screen = |q: DVec3| Some(egui::pos2(q.x as f32 + 100.0, 150.0 - q.y as f32));
+            paint(&p, &to_screen, rect, std::slice::from_ref(&a), &|_| false);
+        });
+        out.textures_delta.clear();
+        out.shapes.len()
+    }
+
+    #[test]
+    fn endpoints_and_aligned_text_are_painted() {
+        let none = painted(Endpoint::None, DimensionAlign::Screen);
+        for e in [
+            Endpoint::Slash,
+            Endpoint::Dot,
+            Endpoint::ClosedArrow,
+            Endpoint::OpenArrow,
+        ] {
+            assert!(painted(e, DimensionAlign::Screen) > none, "{e:?}");
+        }
+        // Along the line: a turned background and text instead of a rectangle.
+        assert_eq!(painted(Endpoint::None, DimensionAlign::Above), none);
     }
 
     #[test]

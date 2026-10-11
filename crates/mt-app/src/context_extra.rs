@@ -16,9 +16,8 @@ use eframe::egui;
 use egui_wgpu::wgpu;
 use glam::{DMat4, DVec3};
 use mt_infer::units::{LengthUnit, parse_length};
-use mt_kernel::{
-    ArrowStyle, DefinitionId, DimensionKind, Entities, FaceId, LeaderStyle, Model, TextPosition,
-};
+use mt_kernel::model_data::{Endpoint, LeaderKind};
+use mt_kernel::{DefinitionId, DimensionKind, Entities, FaceId, Model, TextPosition};
 
 use crate::App;
 use crate::document::Owner;
@@ -733,18 +732,20 @@ impl App {
             }
             id if id.starts_with("edit.text_") => {
                 let arrow = match id {
-                    "edit.text_arrow_none" => Some(ArrowStyle::None),
-                    "edit.text_arrow_dot" => Some(ArrowStyle::Dot),
-                    "edit.text_arrow_closed" => Some(ArrowStyle::Closed),
-                    "edit.text_arrow_open" => Some(ArrowStyle::Open),
+                    "edit.text_arrow_none" => Some(Endpoint::None),
+                    "edit.text_arrow_dot" => Some(Endpoint::Dot),
+                    "edit.text_arrow_closed" => Some(Endpoint::ClosedArrow),
+                    "edit.text_arrow_open" => Some(Endpoint::OpenArrow),
                     _ => None,
                 };
                 let leader = match id {
-                    "edit.text_leader_view" => Some(LeaderStyle::ViewBased),
-                    "edit.text_leader_pushpin" => Some(LeaderStyle::Pushpin),
-                    "edit.text_leader_hidden" => Some(LeaderStyle::Hidden),
+                    "edit.text_leader_view" => Some(LeaderKind::ViewBased),
+                    "edit.text_leader_pushpin" => Some(LeaderKind::Pushpin),
+                    "edit.text_leader_hidden" => Some(LeaderKind::Hidden),
                     _ => None,
                 };
+                // The text's own style, starting from the model's (Model Info > Text).
+                let default_style = doc.model.text_style;
                 doc.edit(|ents| {
                     let mut any = false;
                     for &i in &f.texts {
@@ -752,14 +753,15 @@ impl App {
                         if t.screen {
                             continue;
                         }
+                        let mut style = t.style.unwrap_or(default_style);
                         if let Some(a) = arrow {
-                            any |= t.arrow != a;
-                            t.arrow = a;
+                            style.endpoint = a;
                         }
                         if let Some(l) = leader {
-                            any |= t.leader_style != l;
-                            t.leader_style = l;
+                            style.leader = l;
                         }
+                        any |= t.style != Some(style);
+                        t.style = Some(style);
                     }
                     any
                 })

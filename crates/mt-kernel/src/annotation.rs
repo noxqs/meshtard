@@ -31,28 +31,6 @@ pub enum TextPosition {
     OutsideEnd,
 }
 
-/// A leader text's arrowhead (context menu Arrow; SketchUp's default is Closed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ArrowStyle {
-    None,
-    Dot,
-    #[default]
-    Closed,
-    Open,
-}
-
-/// A leader text's leader (context menu Leader; SketchUp's default is Pushpin).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LeaderStyle {
-    /// The label keeps its screen offset from the point as the view turns
-    /// (drawn like Pushpin here; unverified).
-    ViewBased,
-    #[default]
-    Pushpin,
-    /// No leader line: only the label.
-    Hidden,
-}
-
 /// A dimension between two points.
 ///
 /// Linear: extension lines run from `a` and `b` to `a + offset` and `b + offset`, and
@@ -69,6 +47,9 @@ pub struct Dimension {
     pub hidden: bool,
     /// Label position along a linear dimension's line. Not saved in .skp.
     pub text_position: TextPosition,
+    /// Font, alignment and endpoints set by Model Info > Dimensions > Update Selected;
+    /// `None` follows the model's `dimension_style` (not saved in .skp).
+    pub style: Option<crate::model_data::DimensionStyle>,
 }
 
 impl Dimension {
@@ -81,6 +62,7 @@ impl Dimension {
             kind: DimensionKind::Linear,
             hidden: false,
             text_position: TextPosition::Center,
+            style: None,
         }
     }
 
@@ -168,9 +150,9 @@ pub struct Text {
     pub text: String,
     pub screen: bool,
     pub hidden: bool,
-    /// Arrowhead and leader styles (leader texts). Not saved in .skp.
-    pub arrow: ArrowStyle,
-    pub leader_style: LeaderStyle,
+    /// Font, color and leader set by Model Info > Text > Update Selected; `None`
+    /// follows the model's `text_style` (not saved in .skp).
+    pub style: Option<crate::model_data::TextStyle>,
 }
 
 impl Text {
@@ -181,8 +163,7 @@ impl Text {
             text,
             screen: false,
             hidden: false,
-            arrow: ArrowStyle::default(),
-            leader_style: LeaderStyle::default(),
+            style: None,
         }
     }
 
@@ -193,8 +174,7 @@ impl Text {
             text,
             screen: true,
             hidden: false,
-            arrow: ArrowStyle::default(),
-            leader_style: LeaderStyle::default(),
+            style: None,
         }
     }
 }

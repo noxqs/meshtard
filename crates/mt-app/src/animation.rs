@@ -90,13 +90,17 @@ impl App {
                     .is_some_and(|i| self.tray_event(mt_ui::Event::SceneActivate(i)))
             }
             "view.anim_play" => {
-                if count == 0 {
+                // Scenes left out of the animation (Scenes panel) are skipped.
+                let first = self
+                    .document
+                    .as_ref()
+                    .and_then(|d| crate::tray_more::step_animated(&d.model.pages, active, 1));
+                let Some(first) = first else {
                     self.message = Some("Add scenes to play an animation.".into());
                     return false;
-                }
+                };
                 self.animation.playing = Some(None);
-                step_scene(active, count, 1)
-                    .is_some_and(|i| self.tray_event(mt_ui::Event::SceneActivate(i)))
+                self.tray_event(mt_ui::Event::SceneActivate(first))
             }
             "view.anim_settings" => {
                 let a = &self.animation;
@@ -135,7 +139,9 @@ impl App {
             }
             Some(at) if now >= at => {
                 self.animation.playing = Some(None);
-                let next = step_scene(self.active_scene.filter(|&i| i < count), count, 1);
+                let next = self.document.as_ref().and_then(|d| {
+                    crate::tray_more::step_animated(&d.model.pages, self.active_scene, 1)
+                });
                 if let Some(i) = next
                     && self.tray_event(mt_ui::Event::SceneActivate(i))
                     && let Some(rs) = frame.wgpu_render_state()

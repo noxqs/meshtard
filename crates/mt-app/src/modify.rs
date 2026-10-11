@@ -493,7 +493,9 @@ impl Transform {
             if u == DVec3::ZERO || w == DVec3::ZERO {
                 return None;
             }
-            return Some((n, u.cross(w).dot(n).atan2(u.dot(w))));
+            // Model Info > Units angle snapping.
+            let a = mt_infer::units::snap_angle_display(u.cross(w).dot(n).atan2(u.dot(w)));
+            return Some((n, a));
         }
         let (u, w) = ((s - c).normalize_or_zero(), (p - c).normalize_or_zero());
         if u == DVec3::ZERO || w == DVec3::ZERO {
@@ -505,7 +507,8 @@ impl Transform {
         } else {
             axis.normalize()
         };
-        Some((axis, u.dot(w).clamp(-1.0, 1.0).acos()))
+        let a = u.dot(w).clamp(-1.0, 1.0).acos();
+        Some((axis, mt_infer::units::snap_angle_display(a)))
     }
 
     fn needed(&self) -> usize {
@@ -580,7 +583,7 @@ impl ModifyTool for Transform {
             (Kind::Rotate, [c, s], Some(p)) => (
                 "Angle",
                 self.rotation(*c, *s, p)
-                    .map(|(_, a)| format!("{:.1}", a.abs().to_degrees()))
+                    .map(|(_, a)| mt_infer::units::angle_text(a.abs().to_degrees()))
                     .unwrap_or_default(),
             ),
             (Kind::Move, ..) => ("Distance", String::new()),

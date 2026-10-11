@@ -492,7 +492,10 @@ mod tests {
         text.click(&mut e, &on_face);
         assert!(text.double_click(&mut e, &on_face));
         assert_eq!(e.texts[0].text, "1 ft²");
-        assert_eq!(e.texts[0].leader_style, mt_kernel::LeaderStyle::Hidden);
+        assert_eq!(
+            e.texts[0].style.map(|s| s.leader),
+            Some(mt_kernel::model_data::LeaderKind::Hidden)
+        );
         // A leader on a component says its name.
         text.hover(&DrawHover {
             instance_name: Some("Chair".into()),

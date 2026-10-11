@@ -28,7 +28,7 @@ row = 0
 columns = 1
 visible = true
 items = [
-  { id = "tool.select", tooltip = "Select" },
+  { id = "tool.select", tooltip = "Select", flyout = ["tool.select", "tool.lasso"] },
   { id = "edit.make_component", tooltip = "Make Component" },
   { id = "tool.eraser", tooltip = "Eraser" },
   { separator = true },
@@ -66,7 +66,7 @@ row = 0
 columns = 2
 visible = true
 items = [
-  { id = "tool.select", tooltip = "Select" },
+  { id = "tool.select", tooltip = "Select", flyout = ["tool.select", "tool.lasso"] },
   { id = "edit.make_component", tooltip = "Make Component" },
   { id = "tool.paint_bucket", tooltip = "Paint Bucket" },
   { id = "tool.eraser", tooltip = "Eraser" },
@@ -234,7 +234,7 @@ row = 1
 columns = 1
 visible = false
 items = [
-  { id = "tool.select", tooltip = "Select" },
+  { id = "tool.select", tooltip = "Select", flyout = ["tool.select", "tool.lasso"] },
   { id = "edit.make_component", tooltip = "Make Component" },
   { id = "tool.paint_bucket", tooltip = "Paint Bucket" },
   { id = "tool.eraser", tooltip = "Eraser" },

@@ -283,6 +283,10 @@ pub fn describe(doc: &Document, inst: &mt_kernel::Instance, info: &mut mt_ui::En
 /// A volume in cubic inches shown in `unit`s cubed, e.g. "1000.00 in³" (SketchUp's
 /// format and precision unverified).
 pub fn format_volume(cubic_inches: f64, unit: LengthUnit) -> String {
+    // The open model's Model Info > Units volume unit and precision.
+    if let Some(o) = mt_infer::units::display_options() {
+        return mt_infer::units::format_volume(cubic_inches, &o);
+    }
     let name = match unit {
         LengthUnit::Inch => "in",
         LengthUnit::Foot => "ft",

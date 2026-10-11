@@ -50,8 +50,12 @@ pub fn cursor_for(tool: Tool, mods: Mods, state: State) -> Cursor {
     }
     let copy = if state.copy { Badge::Plus } else { Badge::None };
     match tool {
-        Tool::Select => Cursor::with(
-            Kind::Arrow,
+        Tool::Select | Tool::Lasso => Cursor::with(
+            if tool == Tool::Lasso {
+                Kind::Lasso
+            } else {
+                Kind::Arrow
+            },
             match Mode::from_modifiers(mods.ctrl, mods.shift) {
                 Mode::Replace => Badge::None,
                 Mode::Add => Badge::Plus,
@@ -208,6 +212,7 @@ mod tests {
     fn all_tools() -> Vec<Tool> {
         let ids = [
             "tool.select",
+            "tool.lasso",
             "tool.eraser",
             "tool.line",
             "tool.rectangle",
@@ -269,6 +274,7 @@ mod tests {
     fn variant_name(t: Tool) -> &'static str {
         match t {
             Tool::Select => "Select",
+            Tool::Lasso => "Lasso",
             Tool::Draw(_) => "Draw",
             Tool::Modify(_) => "Modify",
             Tool::Eraser => "Eraser",
@@ -312,7 +318,7 @@ mod tests {
             tools.iter().map(|&t| variant_name(t)).collect();
         assert_eq!(
             variants.len(),
-            13,
+            14,
             "a Tool variant is missing from all_tools"
         );
         for &t in &tools {
@@ -361,6 +367,7 @@ mod tests {
         let t = |id| Tool::from_command(id).unwrap();
         let k = |id| kind(t(id));
         assert_eq!(k("tool.select"), Kind::Arrow);
+        assert_eq!(k("tool.lasso"), Kind::Lasso);
         assert_eq!(k("tool.line"), Kind::Pencil);
         assert_eq!(k("tool.rectangle"), Kind::Rectangle);
         assert_eq!(k("tool.eraser"), Kind::Eraser);

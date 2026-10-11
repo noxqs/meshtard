@@ -94,6 +94,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
             name: l.name.clone(),
             color: l.color,
             visible: !l.hidden,
+            ..Layer::default()
         });
     }
 
@@ -107,6 +108,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
             is_group: d.name.starts_with("Group#"),
             is_image: d.is_image,
             attributes: Default::default(),
+            ..Default::default()
         });
         maps.definitions.insert(id, key);
     }
@@ -178,6 +180,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
                 .iter()
                 .filter_map(|n| maps.layers.get(n.as_str()).copied())
                 .collect(),
+            ..Default::default()
         });
     }
     model
@@ -491,6 +494,7 @@ mod merge_tests {
             name: "Walls".into(),
             color: [0; 3],
             visible: true,
+            ..Layer::default()
         });
         let inner = src.definitions.insert(Definition {
             name: "Chair".into(),
