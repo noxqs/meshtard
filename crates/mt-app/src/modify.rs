@@ -99,6 +99,20 @@ pub trait ModifyTool {
     fn keeps_selection(&self) -> bool {
         false
     }
+    /// After a change, the entities to select instead (Paste selects what it placed).
+    fn take_selection(&mut self) -> Option<Vec<Owner>> {
+        None
+    }
+    /// The tool is done: the app goes back to the Select tool (Paste after its click
+    /// or Escape).
+    fn finished(&self) -> bool {
+        false
+    }
+    /// A ghost of entities that are not in the model yet, drawn following the cursor:
+    /// the transform from the ghost's coordinates to the context's (Paste).
+    fn ghost(&self, _cur: &Inference) -> Option<DMat4> {
+        None
+    }
 }
 
 pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
@@ -1330,6 +1344,113 @@ impl ModifyTool for PlaceComponent {
     }
 
     fn cancel(&mut self) {}
+}
+
+// ------------------------------------------------------------------ Paste
+
+/// Edit > Paste: the clipboard follows the cursor, held at its grab point, and a click
+/// places it into the open context (merging loose geometry like drawing does). The
+/// placed entities become the selection and the Select tool comes back; Escape cancels.
+///
+/// The grab point is the minimum corner of the clipboard's bounding box (unverified:
+/// SketchUp's grab point is to be checked in the trial). Going back to the Select tool
+/// afterwards is also unverified.
+#[derive(Debug)]
+pub struct Paste {
+    /// The clipboard, in world coordinates.
+    clip: Entities,
+    /// World-space point of the clipboard held at the cursor.
+    grab: DVec3,
+    /// The open context's transform (context to world) when the paste started.
+    ctx_xf: DMat4,
+    placed: Option<Vec<Owner>>,
+    done: bool,
+}
+
+impl Paste {
+    pub fn new(clip: Entities, grab: DVec3, ctx_xf: DMat4) -> Self {
+        Self {
+            clip,
+            grab,
+            ctx_xf,
+            placed: None,
+            done: false,
+        }
+    }
+
+    /// Clipboard (world) to context space with the grab point at context point `p`.
+    fn xf(&self, p: DVec3) -> DMat4 {
+        let target = self.ctx_xf.transform_point3(p);
+        self.ctx_xf.inverse() * DMat4::from_translation(target - self.grab)
+    }
+}
+
+/// The entities a paste created, as selectable owners.
+pub fn pasted_owners(p: &mt_kernel::clipboard::Pasted) -> Vec<Owner> {
+    p.edges
+        .iter()
+        .map(|&e| Owner::Edge(e))
+        .chain(p.faces.iter().map(|&f| Owner::Face(f)))
+        .chain(p.instances.iter().map(|&i| Owner::Instance(i)))
+        .chain(p.dimensions.iter().map(|&i| Owner::Dimension(i)))
+        .chain(p.texts.iter().map(|&i| Owner::Text(i)))
+        .collect()
+}
+
+impl ModifyTool for Paste {
+    fn status(&self) -> String {
+        // Draft wording (unverified).
+        "Select a point to place the pasted entities. Esc = cancel.".into()
+    }
+
+    fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        ("", String::new())
+    }
+
+    fn anchor(&self) -> Option<DVec3> {
+        None
+    }
+
+    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        if self.done {
+            return false;
+        }
+        let xf = self.xf(inf.point);
+        let pasted = mt_kernel::clipboard::paste(ctx.ents, &self.clip, xf, |_| true);
+        self.placed = Some(pasted_owners(&pasted));
+        self.done = true;
+        true
+    }
+
+    fn typed(
+        &mut self,
+        _ctx: &mut Ctx,
+        _cur: Option<&Inference>,
+        _text: &str,
+        _units: LengthUnit,
+    ) -> bool {
+        false
+    }
+
+    fn preview(&self, _ents: &Entities, _cur: &Inference) -> Vec<Vec<DVec3>> {
+        Vec::new()
+    }
+
+    fn cancel(&mut self) {
+        self.done = true;
+    }
+
+    fn take_selection(&mut self) -> Option<Vec<Owner>> {
+        self.placed.take()
+    }
+
+    fn finished(&self) -> bool {
+        self.done
+    }
+
+    fn ghost(&self, cur: &Inference) -> Option<DMat4> {
+        (!self.done).then(|| self.xf(cur.point))
+    }
 }
 
 // ------------------------------------------------------------------ Section Plane

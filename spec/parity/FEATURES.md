@@ -16,7 +16,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
    A camera history in `App` (push on each finished orbit/pan/zoom/view command, cap ~50). Trial: is a single wheel step one entry?
 5. [x] **Hide / Unhide (Selected, Last, All)** (`edit.hide`, `edit.unhide_*`) S.
    `hidden` flags exist on edges, faces, instances, annotations and the renderer skips them. Add the commands with undo; "Last" needs the last hidden set kept in the document. Depends on item 8 (Hidden Geometry) to select hidden things for Unhide Selected.
-6. [ ] **Cut / Copy / Paste / Paste In Place** (`edit.cut|copy|paste|paste_in_place`) M.
+6. [x] **Cut / Copy / Paste / Paste In Place** (`edit.cut|copy|paste|paste_in_place`) M.
    Clipboard = a detached `Entities` (selection copied with its connected edges, components by definition). Paste starts a Move-like placement with the cursor (reuse `modify.rs` Move preview); Paste In Place inserts at the original coordinates in the active context. Internal clipboard first; system clipboard later. Trial: paste grab point (bounding box corner?).
 7. [x] **Invert Selection** (`edit.invert_selection`, Ctrl+Shift+I) S.
    Everything visible in the active context minus the selection.

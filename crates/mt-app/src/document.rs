@@ -431,6 +431,37 @@ impl Document {
         scene
     }
 
+    /// Faces and edges of entities that are not in the model (the clipboard while
+    /// Paste places it), in their own coordinates, drawn with the model's materials,
+    /// tags and style.
+    pub fn ghost_scene(&self, ents: &Entities) -> Scene {
+        let mut scene = Scene::default();
+        // The same texture numbering as `scene` (the viewport holds those textures).
+        let mut next = 0;
+        scene.texture_of = self
+            .model
+            .materials
+            .iter()
+            .map(|m| match m.texture {
+                Some(_) => {
+                    next += 1;
+                    next - 1
+                }
+                None => FaceVertex::NO_TEXTURE,
+            })
+            .collect();
+        self.collect(
+            ents,
+            DMat4::IDENTITY,
+            None,
+            // Owners are not used: the ghost is not pickable.
+            Level::Inside(Owner::Instance(usize::MAX)),
+            &mut HashSet::new(),
+            &mut scene,
+        );
+        scene
+    }
+
     /// Section plane objects of the open context (selectable) and its active cut.
     fn section_planes(&self, scene: &mut Scene) {
         let ents = self.active();
