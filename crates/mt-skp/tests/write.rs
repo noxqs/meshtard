@@ -719,7 +719,14 @@ fn round_trip_details_ours() {
     let d: Vec<_> = m
         .dimensions
         .iter()
-        .map(|d| (d.a.unwrap(), d.b.unwrap(), d.offset, d.offset_direction.unwrap()))
+        .map(|d| {
+            (
+                d.a.unwrap(),
+                d.b.unwrap(),
+                d.offset,
+                d.offset_direction.unwrap(),
+            )
+        })
         .collect();
     // The writer's plane normal is +Z, so the offset goes along Z x (b - a).
     assert_eq!(

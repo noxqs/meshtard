@@ -103,3 +103,23 @@ fn corpus_imports_with_valid_topology() {
         );
     }
 }
+
+/// Legacy files open in their saved face style and colors, with their texts and
+/// dimensions placed.
+#[test]
+fn legacy_style_and_annotations() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/openskp/capilla_quiroz_v17.skp");
+    let Ok(src) = mt_skp::read(path) else {
+        return;
+    };
+    let m = import::from_skp(&src);
+    assert_eq!(
+        m.style.face_style,
+        mt_kernel::model::FaceStyle::ShadedWithTextures
+    );
+    assert_eq!(m.back_color, [164, 178, 187]);
+    assert_eq!(m.root.dimensions.len(), 26);
+    assert_eq!(m.root.texts.len(), 1);
+    assert_eq!(m.root.texts[0].text, "4.06 m\u{b2}");
+}

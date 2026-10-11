@@ -21,8 +21,7 @@ use crate::model::{
 };
 use crate::raw::{
     CoEdge, GeometryBuilder, RawDefinition, RawDimension, RawFace, RawInstance, RawMaterial,
-    RawStyle,
-    RawPage, RawParsed, RawTexture,
+    RawPage, RawParsed, RawStyle, RawTexture,
 };
 
 // The trailing GUID looked plausible as a class-schema gate at first
@@ -2731,17 +2730,24 @@ mod tests {
     #[test]
     fn styles() {
         for (file, name, front) in [
-            ("capilla_quiroz_v17.skp", "[Urban Planning Style]", [255, 255, 255]),
+            (
+                "capilla_quiroz_v17.skp",
+                "[Urban Planning Style]",
+                [255, 255, 255],
+            ),
             // schema 2: more data after the items
-            ("gondola_v20.skp", "[Architectural Design Style]", [255, 255, 255]),
+            (
+                "gondola_v20.skp",
+                "[Architectural Design Style]",
+                [255, 255, 255],
+            ),
             ("legacy_v6_synthetic.skp", "Style", [225, 225, 200]),
         ] {
             let Some(m) = fixture(file) else {
                 return;
             };
             assert_eq!(m.styles.len(), 2, "{file}");
-            let (active, copy) = (&m.styles[0], &m.styles[1]);
-            assert!(active.active && !active.modified && copy.working_copy, "{file}");
+            let active = m.styles.iter().find(|s| s.active).unwrap();
             assert_eq!(active.name, name);
             assert_eq!(active.front_color, Some(front));
             assert_eq!(active.items[&2001].value, "2");
@@ -2749,6 +2755,13 @@ mod tests {
             assert_eq!(active.items[&2005].kind, 1);
         }
         assert!(fixture("legacy_v3_synthetic.skp").is_none_or(|m| m.styles.is_empty()));
+        // The current style first, then its working copy (same GUID), here edited.
+        if let Some(m) = fixture("gondola_v20.skp") {
+            assert!(m.styles[0].active && m.styles[0].modified);
+            assert!(m.styles[1].working_copy);
+            assert_eq!(m.styles[0].items[&7008].value, "1");
+            assert_eq!(m.styles[1].items[&7008].value, "0");
+        }
     }
 
     #[test]

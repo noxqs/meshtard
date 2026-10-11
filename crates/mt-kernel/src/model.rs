@@ -60,7 +60,7 @@ impl GlueTo {
             Self::Any => true,
             Self::Horizontal => z > 1.0 - 1e-6,
             Self::Vertical => z < 1e-6,
-            Self::Sloped => z >= 1e-6 && z <= 1.0 - 1e-6,
+            Self::Sloped => (1e-6..=1.0 - 1e-6).contains(&z),
         }
     }
 }

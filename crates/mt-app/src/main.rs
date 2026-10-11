@@ -485,6 +485,9 @@ impl App {
                     }
                     if copy {
                         copies.push(c);
+                        if selected {
+                            seg.color = SELECTED;
+                        }
                     } else {
                         seg = c;
                     }
