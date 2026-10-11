@@ -225,6 +225,10 @@ impl Flip {
 }
 
 impl ModifyTool for Flip {
+    fn direction_locks(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> String {
         let text = if self.drag.is_some() {
             "Drag the plane along its axis and release to flip, or type a distance."

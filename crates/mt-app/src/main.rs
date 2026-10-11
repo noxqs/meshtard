@@ -19,6 +19,7 @@ mod filedialog;
 mod flip;
 mod image_entity;
 mod import;
+mod locks;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod material_edit;
@@ -360,8 +361,8 @@ struct App {
     live: Option<(Vec<Owner>, glam::DMat4, bool)>,
     /// Edges picked during an Eraser drag, erased on release.
     erase_drag: Vec<Owner>,
-    /// The direction lock comes from holding Shift (released with it).
-    shift_lock: bool,
+    /// What Shift and Alt locked (released with them; `locks`).
+    shift_lock: locks::ModifierLocks,
     /// Error from the last command, shown in the status bar until the next one.
     message: Option<String>,
     /// Edit > Copy / Cut: a copy of the selection in world coordinates (internal; the
@@ -476,7 +477,7 @@ impl App {
             zoom_box: None,
             viewport_px: DVec2::ZERO,
             erase_drag: Vec::new(),
-            shift_lock: false,
+            shift_lock: locks::ModifierLocks::default(),
             message: None,
             clipboard: None,
             ghost: None,
@@ -914,7 +915,7 @@ impl App {
                 m.set_material(self.current_material);
             }
             self.erase_drag.clear();
-            self.engine.unlock();
+            self.shift_lock.reset(&mut self.engine);
             self.inference = None;
         } else if id == "view.shadows" {
             if let Some(doc) = &mut self.document {
@@ -1604,7 +1605,7 @@ impl App {
         device: &wgpu::Device,
     ) {
         let ppp = ui.ctx().pixels_per_point();
-        let (keys, shift) = ui.input(|i| {
+        let (keys, shift, alt) = ui.input(|i| {
             let k = |key| i.key_pressed(key);
             (
                 [
@@ -1615,6 +1616,7 @@ impl App {
                     k(egui::Key::Escape),
                 ],
                 i.modifiers.shift,
+                i.modifiers.alt,
             )
         });
         let [right, left, up, down, escape] = keys;
@@ -1635,20 +1637,27 @@ impl App {
             self.engine.toggle_parallel_lock(&self.geometry);
         }
         if escape {
+            self.shift_lock
+                .release(&mut self.engine, &mut locks::Draw(draw.as_mut()));
             draw.cancel();
-            self.engine.unlock();
+            self.shift_lock.reset(&mut self.engine);
         }
-        // Holding Shift locks the current direction; releasing it unlocks.
-        if shift && !self.shift_lock {
-            if let (Some(inf), Some(a)) = (&self.inference, draw.anchor()) {
-                self.engine
-                    .lock_current(inf, self.ctx_xf.transform_point3(a));
-            }
-            self.shift_lock = self.engine.is_locked();
-        } else if !shift && self.shift_lock {
-            self.engine.unlock();
-            self.shift_lock = false;
-        }
+        // Shift locks the direction or the plane, Alt cycles the Line tool's
+        // inferences (see `locks`).
+        let anchor = draw.anchor().map(|a| self.ctx_xf.transform_point3(a));
+        let is_line = self.tool == Tool::Draw("tool.line");
+        self.shift_lock.update(
+            &mut self.engine,
+            &mut locks::Draw(draw.as_mut()),
+            self.inference.as_ref(),
+            anchor,
+            locks::Keys {
+                shift,
+                alt,
+                shift_locks: true,
+                alt_cycles: is_line && anchor.is_some(),
+            },
+        );
 
         let cursor = response
             .hover_pos()
@@ -1692,8 +1701,7 @@ impl App {
             false
         };
         if changed {
-            self.engine.unlock();
-            self.shift_lock = false;
+            self.shift_lock.after_change(&mut self.engine);
             self.rebuild(device);
         }
     }
@@ -1709,7 +1717,7 @@ impl App {
         device: &wgpu::Device,
     ) {
         let ppp = ui.ctx().pixels_per_point();
-        let (escape, ctrl, arrows) = ui.input(|i| {
+        let (escape, ctrl, arrows, down, shift, alt) = ui.input(|i| {
             let k = |key| i.key_pressed(key);
             (
                 k(egui::Key::Escape),
@@ -1719,6 +1727,9 @@ impl App {
                     k(egui::Key::ArrowLeft),
                     k(egui::Key::ArrowUp),
                 ],
+                k(egui::Key::ArrowDown),
+                i.modifiers.shift,
+                i.modifiers.alt,
             )
         });
         // Pressing Ctrl (Option on macOS in SketchUp; unverified) toggles copy / new
@@ -1748,13 +1759,36 @@ impl App {
                 self.engine.toggle_axis_lock(axis);
             }
         }
+        // Down: parallel to the reference edge, as in the drawing tools.
+        if down && tool.direction_locks() {
+            self.engine.toggle_parallel_lock(&self.geometry);
+        }
         if escape {
+            self.shift_lock
+                .release(&mut self.engine, &mut locks::Modify(tool.as_mut()));
             tool.cancel();
-            self.engine.unlock();
+            self.shift_lock.reset(&mut self.engine);
             if tool.finished() {
                 ui.ctx().request_repaint();
             }
         }
+        // Shift locks the direction (or Rotate's plane) where the tool has no own use
+        // for it and no constraint of its own (Push/Pull, Flip drags).
+        let anchor = tool.anchor().map(|a| self.ctx_xf.transform_point3(a));
+        let shift_locks =
+            tool.direction_locks() && !tool.shift_is_modifier() && tool.constraint().is_none();
+        self.shift_lock.update(
+            &mut self.engine,
+            &mut locks::Modify(tool.as_mut()),
+            self.inference.as_ref(),
+            anchor,
+            locks::Keys {
+                shift,
+                alt,
+                shift_locks,
+                alt_cycles: false,
+            },
+        );
         if let Some(dir) = tool.constraint() {
             self.engine.lock_direction(
                 self.ctx_xf.transform_vector3(dir),
@@ -1877,10 +1911,10 @@ impl App {
             return;
         }
         if tool.constraint().is_none() && tool.anchor().is_none() {
-            self.engine.unlock();
+            self.shift_lock.after_change(&mut self.engine);
         }
         if changed {
-            self.engine.unlock();
+            self.shift_lock.after_change(&mut self.engine);
             if let Some(items) = tool.take_selection() {
                 ui.ctx().request_repaint();
                 self.selection.clear();
@@ -2305,6 +2339,12 @@ impl eframe::App for App {
             .message
             .clone()
             .unwrap_or_else(|| match (&self.draw, self.tool) {
+                // The Line tool's inference mode (Alt cycles it after the first click).
+                (Some(d), Tool::Draw("tool.line")) if d.anchor().is_some() => format!(
+                    "{} Alt = cycle inferences: {}.",
+                    d.status(),
+                    self.engine.filter.label()
+                ),
                 (Some(d), Tool::Draw(_)) => d.status(),
                 (_, Tool::Modify(_)) if self.modify.is_some() => {
                     self.modify.as_ref().map(|m| m.status()).unwrap_or_default()

@@ -4,7 +4,8 @@
 //! geometry inside its groups and components, and the faded rest of the model. Points
 //! inside a group or component carry it ([`mt_infer::Container`]): the overlay draws
 //! them magenta with an "in Group" / "in Component" tooltip, as SketchUp's help
-//! describes. The active section plane's cut lines give "On Section".
+//! describes. The active section plane's cut lines give "On Section", the open
+//! context's instances "Component Origin" and its arcs "Midpoint of Arc".
 
 use glam::{DMat4, DVec3};
 use mt_infer::Geometry;
@@ -70,9 +71,23 @@ pub fn geometry(scene: &Scene, doc: Option<&Document>, ctx_xf: DMat4) -> Geometr
             center: ctx_xf.transform_point3(arc.center),
             normal: ctx_xf.transform_vector3(arc.normal).normalize_or_zero(),
             radius: ctx_xf.transform_vector3(arc.x_axis * arc.radius).length(),
+            midpoint: (!arc.is_circle()).then(|| {
+                let m = (arc.start_angle + arc.end_angle) / 2.0;
+                let local =
+                    arc.center + (arc.x_axis * m.cos() + arc.y_axis() * m.sin()) * arc.radius;
+                ctx_xf.transform_point3(local)
+            }),
         };
         geometry.add_arc(curve, edges);
     }
+    // Origins of the open context's visible groups and components ("Component
+    // Origin").
+    geometry.component_origins = ents
+        .instances
+        .iter()
+        .filter(|i| !i.hidden)
+        .map(|i| (ctx_xf * i.transform).transform_point3(DVec3::ZERO))
+        .collect();
     geometry
 }
 

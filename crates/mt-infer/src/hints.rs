@@ -1,7 +1,8 @@
 //! Shape hints for the drawing tools: SketchUp's "Square" and "Golden Section"
-//! diagonals for the Rectangle tool, and "Half Circle" and "Tangent at Vertex" for the
-//! arc tools. Each takes the cursor's inference and the shape's state and returns the
-//! inference snapped to the hint (with its [`Kind`] for the tooltip), or `None`.
+//! diagonals for the Rectangle tool, and "Half Circle", "Quarter Circle",
+//! "Three-Quarter Circle" and "Tangent at Vertex" for the arc tools. Each takes the
+//! cursor's inference and the shape's state and returns the inference snapped to the
+//! hint (with its [`Kind`] for the tooltip), or `None`.
 //!
 //! Hints apply only to a cursor without a stronger inference ([`accepts_hint`]): a
 //! point on the ground or on a face. Tolerances are angles ([`HINT_ANGLE`]) so they do
@@ -140,8 +141,10 @@ pub fn two_point_arc(
     Some(hinted(inf, inf.point + m * (s - bulge), kind, None))
 }
 
-/// Arc (center, start, end), end step: `inf` snapped opposite the start ("Half
-/// Circle") when the swept angle is within [`HINT_ANGLE`] of 180 degrees.
+/// Arc (center, start, end), end step: `inf` snapped to a swept angle of 90 ("Quarter
+/// Circle"), 180 ("Half Circle") or 270 degrees ("Three-Quarter Circle") when within
+/// [`HINT_ANGLE`] of it (the sweep runs counterclockwise about `normal`, as the Arc
+/// tool's).
 pub fn center_arc(
     inf: &Inference,
     center: DVec3,
@@ -158,11 +161,21 @@ pub fn center_arc(
     }
     let d = inf.point - center;
     let d = d - n * d.dot(n);
-    let angle = d.dot(n.cross(x)).atan2(d.dot(x));
-    if d.length() <= mt_kernel::TOL || std::f64::consts::PI - angle.abs() > HINT_ANGLE {
+    if d.length() <= mt_kernel::TOL {
         return None;
     }
-    Some(hinted(inf, center - x * d.length(), Kind::HalfCircle, None))
+    let y = n.cross(x);
+    let sweep = d.dot(y).atan2(d.dot(x)).rem_euclid(std::f64::consts::TAU);
+    let q = std::f64::consts::FRAC_PI_2;
+    let (target, kind) = [
+        (q, Kind::QuarterCircle),
+        (2.0 * q, Kind::HalfCircle),
+        (3.0 * q, Kind::ThreeQuarterCircle),
+    ]
+    .into_iter()
+    .find(|(t, _)| (t - sweep).abs() <= HINT_ANGLE)?;
+    let p = center + (x * target.cos() + y * target.sin()) * d.length();
+    Some(hinted(inf, p, kind, None))
 }
 
 fn hinted(inf: &Inference, point: DVec3, kind: Kind, guide: Option<(DVec3, DVec3)>) -> Inference {
@@ -266,5 +279,20 @@ mod tests {
         assert_eq!(i.kind, Kind::HalfCircle);
         assert!((i.point - (c - DVec3::X * DVec3::new(-20.0, 0.5, 0.0).length())).length() < 1e-9);
         assert!(center_arc(&free(c + DVec3::new(-20.0, 5.0, 0.0)), c, s, DVec3::Z).is_none());
+    }
+
+    #[test]
+    fn center_arc_quarter_and_three_quarter() {
+        let c = DVec3::ZERO;
+        let s = DVec3::new(10.0, 0.0, 0.0);
+        // Counterclockwise about +z: +y is 90 degrees, -y is 270.
+        let i = center_arc(&free(DVec3::new(0.5, 20.0, 0.0)), c, s, DVec3::Z).unwrap();
+        assert_eq!(i.kind, Kind::QuarterCircle);
+        assert!((i.point - DVec3::new(0.0, (400.25f64).sqrt(), 0.0)).length() < 1e-9);
+        let i = center_arc(&free(DVec3::new(-0.5, -20.0, 0.0)), c, s, DVec3::Z).unwrap();
+        assert_eq!(i.kind, Kind::ThreeQuarterCircle);
+        assert!(i.point.x.abs() < 1e-9 && i.point.y < 0.0);
+        assert!(i.kind.is_hint());
+        assert!(center_arc(&free(DVec3::new(10.0, 10.0, 0.0)), c, s, DVec3::Z).is_none());
     }
 }

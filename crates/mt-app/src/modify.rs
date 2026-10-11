@@ -131,6 +131,25 @@ pub trait ModifyTool {
     fn arrow(&mut self, _axis: mt_infer::Axis) -> bool {
         false
     }
+    /// The tool takes the drawing tools' direction locks besides the arrow keys:
+    /// Down (parallel to the reference edge) and Shift held (the direction under the
+    /// cursor, or through the point hovered).
+    fn direction_locks(&self) -> bool {
+        false
+    }
+    /// Shift is the tool's own modifier (Scale: uniform), not a direction lock.
+    fn shift_is_modifier(&self) -> bool {
+        false
+    }
+    /// Shift held over a face locks the tool's plane to the face's (`Some(normal)`;
+    /// `None` on release). Returns whether the tool has a plane (Rotate).
+    fn lock_face_plane(&mut self, _normal: Option<DVec3>) -> bool {
+        false
+    }
+    /// Alt frees the center point while the plane stays locked (Rotate).
+    fn alt_frees_center(&self) -> bool {
+        false
+    }
     /// Translucent planes to draw over the view (Flip).
     fn planes(&self, _cur: &Inference) -> Vec<Plane> {
         Vec::new()
@@ -314,6 +333,10 @@ impl PushPull {
 }
 
 impl ModifyTool for PushPull {
+    fn direction_locks(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> String {
         if self.start.is_some() {
             "Select distance or enter value."
@@ -437,6 +460,10 @@ pub struct Transform {
     copy: bool,
     /// The last copy, for `5x` / `/5` arrays: transform per step and copy count.
     last_copy: Option<(Vec<Owner>, DMat4)>,
+    /// Rotate: the plane normal held with Shift over a face, and the one taken at the
+    /// center click (the rotation axis).
+    plane_lock: Option<DVec3>,
+    plane: Option<DVec3>,
 }
 
 impl Transform {
@@ -447,7 +474,33 @@ impl Transform {
             targets: Vec::new(),
             copy: false,
             last_copy: None,
+            plane_lock: None,
+            plane: None,
         }
+    }
+
+    /// Rotate about center `c` from `s` to `p`: unit axis and angle. In a locked plane
+    /// the axis is its normal and the angle is signed; else the axis is `u x w`.
+    fn rotation(&self, c: DVec3, s: DVec3, p: DVec3) -> Option<(DVec3, f64)> {
+        if let Some(n) = self.plane.or(self.plane_lock) {
+            let flat = |v: DVec3| (v - n * v.dot(n)).normalize_or_zero();
+            let (u, w) = (flat(s - c), flat(p - c));
+            if u == DVec3::ZERO || w == DVec3::ZERO {
+                return None;
+            }
+            return Some((n, u.cross(w).dot(n).atan2(u.dot(w))));
+        }
+        let (u, w) = ((s - c).normalize_or_zero(), (p - c).normalize_or_zero());
+        if u == DVec3::ZERO || w == DVec3::ZERO {
+            return None;
+        }
+        let axis = u.cross(w);
+        let axis = if axis.length() < 1e-9 {
+            DVec3::Z
+        } else {
+            axis.normalize()
+        };
+        Some((axis, u.dot(w).clamp(-1.0, 1.0).acos()))
     }
 
     fn needed(&self) -> usize {
@@ -462,17 +515,7 @@ impl Transform {
         match (self.kind, &self.points[..]) {
             (Kind::Move, [a]) => Some(DMat4::from_translation(p - *a)),
             (Kind::Rotate, [c, s]) => {
-                let (u, w) = ((*s - *c).normalize_or_zero(), (p - *c).normalize_or_zero());
-                if u == DVec3::ZERO || w == DVec3::ZERO {
-                    return None;
-                }
-                let axis = u.cross(w);
-                let axis = if axis.length() < 1e-9 {
-                    DVec3::Z
-                } else {
-                    axis.normalize()
-                };
-                let angle = u.dot(w).clamp(-1.0, 1.0).acos();
+                let (axis, angle) = self.rotation(*c, *s, p)?;
                 Some(rotation_about(*c, axis, angle))
             }
             _ => None,
@@ -482,6 +525,7 @@ impl Transform {
     fn finish(&mut self, ctx: &mut Ctx, xf: DMat4) -> bool {
         let targets = std::mem::take(&mut self.targets);
         self.points.clear();
+        self.plane = None;
         if targets.is_empty() {
             return false;
         }
@@ -528,13 +572,12 @@ impl ModifyTool for Transform {
         let p = cur.map(|c| c.point);
         match (self.kind, &self.points[..], p) {
             (Kind::Move, [a], Some(p)) => ("Distance", units.format(a.distance(p))),
-            (Kind::Rotate, [c, s], Some(p)) => {
-                let (u, w) = ((*s - *c).normalize_or_zero(), (p - *c).normalize_or_zero());
-                (
-                    "Angle",
-                    format!("{:.1}", u.dot(w).clamp(-1.0, 1.0).acos().to_degrees()),
-                )
-            }
+            (Kind::Rotate, [c, s], Some(p)) => (
+                "Angle",
+                self.rotation(*c, *s, p)
+                    .map(|(_, a)| format!("{:.1}", a.abs().to_degrees()))
+                    .unwrap_or_default(),
+            ),
             (Kind::Move, ..) => ("Distance", String::new()),
             (Kind::Rotate, ..) => ("Angle", String::new()),
         }
@@ -558,6 +601,9 @@ impl ModifyTool for Transform {
                 .last()
                 .is_none_or(|q| q.distance(inf.point) > mt_kernel::TOL)
             {
+                if self.points.is_empty() {
+                    self.plane = self.plane_lock;
+                }
                 self.points.push(inf.point);
             }
             return false;
@@ -621,13 +667,9 @@ impl ModifyTool for Transform {
                 let Ok(deg) = text.trim().trim_end_matches('°').parse::<f64>() else {
                     return false;
                 };
-                let (u, w) = ((*s - *c).normalize_or_zero(), (p - *c).normalize_or_zero());
-                let axis = u.cross(w);
-                let axis = if axis.length() < 1e-9 {
-                    DVec3::Z
-                } else {
-                    axis.normalize()
-                };
+                let (axis, angle) = self.rotation(*c, *s, p).unwrap_or((DVec3::Z, 1.0));
+                // Toward the side the cursor is on.
+                let axis = if angle < 0.0 { -axis } else { axis };
                 Some(rotation_about(*c, axis, deg.to_radians()))
             }
             _ => None,
@@ -660,6 +702,23 @@ impl ModifyTool for Transform {
     fn cancel(&mut self) {
         self.points.clear();
         self.targets.clear();
+        self.plane = None;
+    }
+
+    fn direction_locks(&self) -> bool {
+        true
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        if self.kind != Kind::Rotate || !self.points.is_empty() {
+            return false;
+        }
+        self.plane_lock = normal.map(|n| n.normalize_or(DVec3::Z));
+        true
+    }
+
+    fn alt_frees_center(&self) -> bool {
+        self.kind == Kind::Rotate && self.points.is_empty()
     }
 
     fn live(&self, cur: &Inference) -> Option<(&[Owner], DMat4, bool)> {
@@ -953,6 +1012,14 @@ impl Scale {
 }
 
 impl ModifyTool for Scale {
+    fn direction_locks(&self) -> bool {
+        true
+    }
+
+    fn shift_is_modifier(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> String {
         let text = match (&self.grab, &self.bbox) {
             (Some(_), _) => "Select second point or enter scale value (2, 2,1,1 or 200mm).",
@@ -1145,6 +1212,10 @@ impl Offset {
 }
 
 impl ModifyTool for Offset {
+    fn direction_locks(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> String {
         if self.start.is_some() {
             "Select offset distance or enter value."
@@ -1211,6 +1282,10 @@ impl ModifyTool for Offset {
 pub struct FollowMe;
 
 impl ModifyTool for FollowMe {
+    fn direction_locks(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> String {
         "Select a profile face to extrude along the selected path.".into()
     }

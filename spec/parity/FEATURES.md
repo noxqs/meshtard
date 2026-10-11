@@ -181,7 +181,7 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
 
 ## Inference locking (requested 2026-10-11)
 
-70. [ ] **Modifier-key inference locks as in SketchUp** M. Source: help.sketchup.com/en/sketchup/introducing-drawing-basics-and-concepts ([doc]). Meshtard has arrow-key axis locks and the Down parallel lock and Shift direction lock in drawing tools, and hover acquisition.
+70. [x] **Modifier-key inference locks as in SketchUp** M. Done (`mt-infer` `Engine::lock_current` / `lock_plane` / `Filter`, `mt-app/src/locks.rs`; STATUS.md Inference rows). Left: Arc Side and Center and Circle/Polygon Center hints, Intersection with Hidden Section, Shift plane lock for Rotated Rectangle and 3 Point Arc, release rules to check in the trial (1e). Source: help.sketchup.com/en/sketchup/introducing-drawing-basics-and-concepts ([doc]). Meshtard has arrow-key axis locks and the Down parallel lock and Shift direction lock in drawing tools, and hover acquisition.
     - Shift through-point lock [doc]: after the first click, hover a second point (endpoint, midpoint, guide point...) and hold Shift: the direction locks from the start through that point (today Shift only locks axis/parallel/perpendicular directions).
     - Shift plane lock [doc]: hovering a face and holding Shift locks the drawing plane for plane tools (Rectangle, Circle, Polygon, Arc, Rotate, Protractor).
     - Shift+Alt [doc]: locks the drawing plane and the tool to the inferenced face's plane.

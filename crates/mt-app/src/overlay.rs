@@ -26,14 +26,7 @@ pub fn paint(
         let stroke = egui::Stroke::new(1.0, color32(inf.kind.color()));
         painter.extend(egui::Shape::dashed_line(&[a, b], stroke, 3.0, 3.0));
     }
-    let directional = matches!(
-        inf.kind,
-        Kind::Along(_)
-            | Kind::Parallel
-            | Kind::Perpendicular
-            | Kind::FromPoint(_)
-            | Kind::PerpendicularToFace
-    );
+    let directional = inf.kind.is_direction();
     for line in previews {
         let rubber_band = previews.len() == 1 && line.len() == 2 && Some(line[0]) == anchor;
         let (color, width) = if rubber_band && directional {
@@ -58,7 +51,13 @@ pub fn paint(
     let fill = color32(inf.color());
     let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
     match inf.kind {
-        Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::GuidePoint | Kind::Center => {
+        Kind::Endpoint
+        | Kind::Midpoint
+        | Kind::Origin
+        | Kind::GuidePoint
+        | Kind::Center
+        | Kind::ComponentOrigin
+        | Kind::ArcMidpoint => {
             painter.circle(p, 5.0, fill, outline);
         }
         Kind::Intersection => {
@@ -97,7 +96,10 @@ pub fn paint(
         | Kind::HalfCircle
         | Kind::Tangent
         | Kind::PerpendicularToFace
-        | Kind::ExtendEdge => {
+        | Kind::ExtendEdge
+        | Kind::ThroughPoint(_)
+        | Kind::QuarterCircle
+        | Kind::ThreeQuarterCircle => {
             painter.circle_stroke(p, 2.5, egui::Stroke::new(1.0, egui::Color32::BLACK));
         }
     }

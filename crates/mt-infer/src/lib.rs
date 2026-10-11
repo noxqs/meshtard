@@ -8,7 +8,9 @@
 //! hovered), and "from point" tracking from the last endpoint or midpoint hovered.
 //! A point inference beats a direction except "on face", which loses to a direction.
 //! A locked direction (Shift or arrow keys) constrains the point to that line; point
-//! inferences are then projected onto it.
+//! inferences are then projected onto it. Shift over a point locks the line from the
+//! anchor through it ([`Kind::ThroughPoint`]); a locked plane ([`Engine::lock_plane`])
+//! holds points to a plane. [`Filter`] drops linear inferences (the Line tool's Alt).
 //!
 //! "From point" acquisition: with [`Engine::infer_at`] a point is acquired only after
 //! the cursor has rested on it for [`ACQUIRE_DELAY`] seconds; [`Engine::infer`]
@@ -114,6 +116,18 @@ pub enum Kind {
     PerpendicularToFace,
     /// On the line through the edge hovered last, beyond its ends.
     ExtendEdge,
+    /// Locked (Shift) on the line from the anchor through a point inference; carries
+    /// the color of that point's marker.
+    ThroughPoint([u8; 3]),
+    /// The origin of a group or component instance (its axes' origin).
+    ComponentOrigin,
+    /// The middle of an arc curve (not of one of its segments), shown after hovering
+    /// the arc.
+    ArcMidpoint,
+    /// Shape hint of the Arc and Pie tools: a sweep of 90 degrees.
+    QuarterCircle,
+    /// Shape hint of the Arc and Pie tools: a sweep of 270 degrees.
+    ThreeQuarterCircle,
 }
 
 /// The kind of instance an inferred point lies in, relative to the open context:
@@ -163,6 +177,11 @@ impl Kind {
             Kind::OnSection => "On Section".into(),
             Kind::PerpendicularToFace => "Perpendicular to Face".into(),
             Kind::ExtendEdge => "Extend Edge".into(),
+            Kind::ThroughPoint(_) => "Through Point".into(),
+            Kind::ComponentOrigin => "Component Origin".into(),
+            Kind::ArcMidpoint => "Midpoint of Arc".into(),
+            Kind::QuarterCircle => "Quarter Circle".into(),
+            Kind::ThreeQuarterCircle => "Three-Quarter Circle".into(),
         }
     }
 
@@ -189,6 +208,12 @@ impl Kind {
             // the edge-related directions.
             Kind::OnSection => [230, 120, 0],
             Kind::PerpendicularToFace | Kind::ExtendEdge => [220, 0, 220],
+            Kind::ThroughPoint(c) => c,
+            // Unverified: the component origin and arc midpoint marker colors (taken
+            // from the origin and the midpoint).
+            Kind::ComponentOrigin => [230, 200, 0],
+            Kind::ArcMidpoint => [0, 200, 220],
+            Kind::QuarterCircle | Kind::ThreeQuarterCircle => [220, 0, 220],
         }
     }
 
@@ -196,8 +221,32 @@ impl Kind {
     pub fn is_hint(self) -> bool {
         matches!(
             self,
-            Kind::Square | Kind::GoldenSection | Kind::HalfCircle | Kind::Tangent
+            Kind::Square
+                | Kind::GoldenSection
+                | Kind::HalfCircle
+                | Kind::Tangent
+                | Kind::QuarterCircle
+                | Kind::ThreeQuarterCircle
         )
+    }
+
+    /// A direction from the anchor (axis, parallel, perpendicular, through point...):
+    /// the rubber band takes its color.
+    pub fn is_direction(self) -> bool {
+        matches!(
+            self,
+            Kind::Along(_)
+                | Kind::Parallel
+                | Kind::Perpendicular
+                | Kind::FromPoint(_)
+                | Kind::PerpendicularToFace
+                | Kind::ThroughPoint(_)
+        )
+    }
+
+    /// Point inferences that Shift locks a direction through (from the anchor).
+    pub fn locks_through(self) -> bool {
+        self.is_point() || matches!(self, Kind::ExtendEdge)
     }
 
     /// Points that can be acquired for "from point" tracking (center and intersection
@@ -205,7 +254,13 @@ impl Kind {
     fn is_acquirable(self) -> bool {
         matches!(
             self,
-            Kind::Endpoint | Kind::Midpoint | Kind::Origin | Kind::Center | Kind::Intersection
+            Kind::Endpoint
+                | Kind::Midpoint
+                | Kind::Origin
+                | Kind::Center
+                | Kind::Intersection
+                | Kind::ComponentOrigin
+                | Kind::ArcMidpoint
         )
     }
 
@@ -222,6 +277,8 @@ impl Kind {
                 | Kind::OnGuide
                 | Kind::OnAxis(_)
                 | Kind::OnSection
+                | Kind::ComponentOrigin
+                | Kind::ArcMidpoint
         )
     }
 }
@@ -272,6 +329,8 @@ pub struct ArcCurve {
     /// Unit normal of the arc's plane.
     pub normal: DVec3,
     pub radius: f64,
+    /// The middle of the arc ("Midpoint of Arc"); `None` for a full circle.
+    pub midpoint: Option<DVec3>,
 }
 
 /// Snappable geometry in world space.
@@ -295,6 +354,8 @@ pub struct Geometry {
     pub tri_container: Vec<Option<Container>>,
     /// Cut lines of the active section plane ("On Section").
     pub section_lines: Vec<[DVec3; 2]>,
+    /// Origins of the group and component instances ("Component Origin").
+    pub component_origins: Vec<DVec3>,
 }
 
 impl Geometry {
@@ -414,7 +475,64 @@ impl Axes {
     }
 }
 
+/// Which inferences the Line tool offers; Alt cycles them after the first click
+/// (SketchUp 2026 help, "Introducing Drawing Basics and Concepts").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    /// Every inference.
+    #[default]
+    All,
+    /// No linear inferences (axes, parallel, perpendicular, from point, extend edge);
+    /// point inferences stay.
+    PointsOnly,
+    /// Point inferences plus parallel and perpendicular (to edges and faces) only.
+    ParallelPerpendicular,
+}
+
+impl Filter {
+    /// The next mode in Alt's cycle.
+    pub fn next(self) -> Self {
+        match self {
+            Filter::All => Filter::PointsOnly,
+            Filter::PointsOnly => Filter::ParallelPerpendicular,
+            Filter::ParallelPerpendicular => Filter::All,
+        }
+    }
+
+    /// Status bar text, as the help names the modes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Filter::All => "All Inferences On",
+            Filter::PointsOnly => "All Inferences Off",
+            Filter::ParallelPerpendicular => "Parallel and Perpendicular Only",
+        }
+    }
+
+    fn allows(self, kind: Kind) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::PointsOnly => false,
+            Filter::ParallelPerpendicular => matches!(
+                kind,
+                Kind::Parallel | Kind::Perpendicular | Kind::PerpendicularToFace
+            ),
+        }
+    }
+}
+
 /// The inference state carried between mouse moves.
+///
+/// Locks and how they end (SketchUp's release rules are not in the help; to check in
+/// the trial, TRIAL_CHECKLIST.md 1e):
+/// - Arrow keys lock an axis direction and the same arrow again unlocks; Down locks
+///   parallel to the reference edge and Down again unlocks. Another arrow switches.
+/// - Shift held locks the direction under the cursor: an axis, parallel or
+///   perpendicular as it is, or through the point inference hovered
+///   ([`Kind::ThroughPoint`]); releasing Shift unlocks ([`Engine::unlock`]).
+/// - Shift on a face locks the plane ([`Engine::lock_plane`]; the app also tells
+///   plane tools); releasing Shift unlocks ([`Engine::unlock_plane`]).
+/// - Escape cancels the tool and the app drops every lock; a click that completes a
+///   segment or shape drops the direction lock too (the app calls `unlock`).
 #[derive(Debug, Clone, Default)]
 pub struct Engine {
     /// The drawing axes (world axes by default).
@@ -428,8 +546,18 @@ pub struct Engine {
     pub arc: Option<usize>,
     /// Normal of the face hovered last: the reference for "Perpendicular to Face".
     pub reference_face: Option<DVec3>,
+    /// Which inferences are offered (the Line tool's Alt cycle).
+    pub filter: Filter,
     /// Locked direction and the inference kind that locked it.
     lock: Option<(DVec3, Kind)>,
+    /// The point a [`Kind::ThroughPoint`] lock goes through (for its guide line).
+    through: Option<DVec3>,
+    /// Locked plane (a point on it and its unit normal): points are projected onto
+    /// the plane parallel to it through the anchor (through the point before one).
+    plane: Option<(DVec3, DVec3)>,
+    /// The plane lock is suspended (Alt in Rotate and Protractor frees the center
+    /// point while the tool keeps the plane).
+    pub plane_free: bool,
     /// The acquirable point under the cursor and since when (seconds), for delayed
     /// acquisition.
     hover: Option<(DVec3, f64)>,
@@ -473,6 +601,7 @@ impl Engine {
             Some((_, k)) if k == kind => None,
             _ => Some((self.axes.dir(axis), kind)),
         };
+        self.through = None;
     }
 
     /// Locks to parallel of the reference edge (down arrow), if there is one.
@@ -484,30 +613,65 @@ impl Engine {
             (Some((_, Kind::Parallel)), _) | (_, None) => None,
             (_, Some([a, b])) => Some(((*b - *a).normalize(), Kind::Parallel)),
         };
+        self.through = None;
     }
 
-    /// Shift: locks the direction of the current inference from the anchor.
-    pub fn lock_current(&mut self, inference: &Inference, anchor: DVec3) {
+    /// Shift: locks the direction of the current inference from the anchor. An axis,
+    /// parallel or perpendicular direction is locked as it is; a point inference
+    /// (endpoint, midpoint, guide point, on edge, intersection, center...) locks the
+    /// line from the anchor through that point ([`Kind::ThroughPoint`], drawn in the
+    /// point's color, magenta inside groups). Returns whether it locked.
+    pub fn lock_current(&mut self, inference: &Inference, anchor: DVec3) -> bool {
         let d = inference.point - anchor;
-        if d.length() > 1e-9
-            && matches!(
-                inference.kind,
-                Kind::Along(_) | Kind::Parallel | Kind::Perpendicular | Kind::PerpendicularToFace
-            )
-        {
-            self.lock = Some((d.normalize(), inference.kind));
+        if d.length() <= 1e-9 {
+            return false;
         }
+        let kind = match inference.kind {
+            k @ (Kind::Along(_)
+            | Kind::Parallel
+            | Kind::Perpendicular
+            | Kind::PerpendicularToFace) => k,
+            k if k.locks_through() => Kind::ThroughPoint(inference.color()),
+            _ => return false,
+        };
+        self.lock = Some((d.normalize(), kind));
+        self.through = matches!(kind, Kind::ThroughPoint(_)).then_some(inference.point);
+        true
+    }
+
+    /// Locks the drawing plane to the plane through `point` with `normal` (Shift on a
+    /// face): until [`Engine::unlock_plane`], inferred points are projected onto the
+    /// parallel plane through the anchor, and points off it land where the view ray
+    /// meets it. A locked direction wins over the plane.
+    pub fn lock_plane(&mut self, point: DVec3, normal: DVec3) {
+        let n = normal.normalize_or_zero();
+        if n != DVec3::ZERO {
+            self.plane = Some((point, n));
+        }
+    }
+
+    pub fn unlock_plane(&mut self) {
+        self.plane = None;
+        self.plane_free = false;
+    }
+
+    /// The locked plane (point, unit normal).
+    pub fn locked_plane(&self) -> Option<(DVec3, DVec3)> {
+        self.plane
     }
 
     /// Holds the cursor to a line through the anchor (Push/Pull along a face normal).
     pub fn lock_direction(&mut self, dir: DVec3, kind: Kind) {
         if dir.length() > 1e-9 {
             self.lock = Some((dir.normalize(), kind));
+            self.through = None;
         }
     }
 
+    /// Drops the direction lock (not the plane lock).
     pub fn unlock(&mut self) {
         self.lock = None;
+        self.through = None;
     }
 
     pub fn is_locked(&self) -> bool {
@@ -591,7 +755,13 @@ impl Engine {
         if matches!(i.kind, Kind::Endpoint | Kind::Midpoint | Kind::OnEdge) {
             i.container = i.edge.and_then(|e| geom.container_of_edge(e));
         }
-        i
+        match self.plane {
+            Some((p0, n)) if !i.locked && !self.plane_free => {
+                let ray = view.camera.ray(cursor, view.viewport);
+                on_plane(i, anchor.unwrap_or(p0), n, ray.origin, ray.dir)
+            }
+            _ => i,
+        }
     }
 
     fn infer_point(
@@ -636,7 +806,7 @@ impl Engine {
                     point: p,
                     kind,
                     edge: None,
-                    guide: None,
+                    guide: self.through.map(|t| (a, t)),
                     locked: true,
                     normal: None,
                     segment: None,
@@ -655,7 +825,10 @@ impl Engine {
             self.remember(geom, &p);
             return p;
         }
-        if let Some(t) = self.tracking(view, cursor, ray.origin, ray.dir, None) {
+        if let Some(t) = (self.filter == Filter::All)
+            .then(|| self.tracking(view, cursor, ray.origin, ray.dir, None))
+            .flatten()
+        {
             return t;
         }
         Inference {
@@ -819,6 +992,9 @@ impl Engine {
         // The line through the edge hovered last, beyond its ends (up to
         // EXTEND_FACTOR edge lengths; SketchUp's reach is unverified).
         let extend_edge = || {
+            if self.filter != Filter::All {
+                return None;
+            }
             let e = self.reference_edge?;
             let [a, b] = *geom.edges.get(e)?;
             let d = b - a;
@@ -876,6 +1052,24 @@ impl Engine {
                 Kind::Center,
             )
         };
+        // Middle of the arc hovered last (circles have none).
+        let arc_midpoint = || {
+            best_point(
+                &mut self
+                    .arc
+                    .and_then(|a| geom.arcs.get(a))
+                    .and_then(|a| a.midpoint)
+                    .map(|p| (p, None))
+                    .into_iter(),
+                Kind::ArcMidpoint,
+            )
+        };
+        let component_origin = || {
+            best_point(
+                &mut geom.component_origins.iter().map(|&p| (p, None)),
+                Kind::ComponentOrigin,
+            )
+        };
         let intersection = || {
             let hit = face_normal
                 .filter(|_| face_t.is_finite())
@@ -891,9 +1085,22 @@ impl Engine {
                 container: None,
             })
         };
+        // The arc's middle and a segment's midpoint can be a few pixels apart (odd
+        // segment counts): the nearer one wins.
+        let midpoints = || match (midpoint(), arc_midpoint()) {
+            (Some(m), Some(a)) => Some(
+                if view.screen_dist(a.point, cursor) <= view.screen_dist(m.point, cursor) {
+                    a
+                } else {
+                    m
+                },
+            ),
+            (m, a) => m.or(a),
+        };
         endpoint
-            .or_else(midpoint)
+            .or_else(midpoints)
             .or_else(center)
+            .or_else(component_origin)
             .or_else(intersection)
             .or_else(guide_point)
             .or_else(origin)
@@ -950,6 +1157,7 @@ impl Engine {
         }
         let best = dirs
             .into_iter()
+            .filter(|(_, kind)| self.filter.allows(*kind))
             .map(|(d, kind)| {
                 let p = closest_on_line(a, d, ro, rd);
                 (view.screen_dist(p, cursor), p, kind)
@@ -1122,6 +1330,39 @@ fn intersection(
         .filter(|(d, _)| *d <= POINT_APERTURE)
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, x)| x)
+}
+
+/// Holds `i` to the plane through `p0` with unit normal `n`: a point inference is
+/// projected onto it, a direction or face point off the plane is replaced by where the
+/// view ray meets it ("On Face" of the locked plane, `locked`).
+fn on_plane(i: Inference, p0: DVec3, n: DVec3, ro: DVec3, rd: DVec3) -> Inference {
+    let off = (i.point - p0).dot(n);
+    let tol = 1e-6 * (1.0 + i.point.distance(p0));
+    if off.abs() <= tol {
+        return i;
+    }
+    if i.kind.is_point() {
+        return Inference {
+            point: i.point - n * off,
+            ..i
+        };
+    }
+    let denom = rd.dot(n);
+    let point = if denom.abs() > 1e-9 {
+        ro + rd * ((p0 - ro).dot(n) / denom)
+    } else {
+        i.point - n * off
+    };
+    Inference {
+        point,
+        kind: Kind::OnFace,
+        edge: None,
+        guide: None,
+        locked: true,
+        normal: Some(n),
+        segment: None,
+        container: None,
+    }
 }
 
 /// A point with no inference: on the ground plane (the drawing axes' red-green plane),
@@ -1369,6 +1610,7 @@ mod tests {
                 center: c,
                 normal: DVec3::Z,
                 radius: r,
+                midpoint: None,
             },
             0..24,
         );
@@ -1564,5 +1806,183 @@ mod tests {
         let i = infer(&mut e, &g, &b, at(target), Some(a));
         assert_eq!(i.kind, Kind::PerpendicularToFace);
         assert!((i.point - target).length() < 1e-3, "{:?}", i.point);
+    }
+
+    #[test]
+    fn shift_locks_through_a_hovered_point() {
+        let (g, b) = square();
+        let mut e = Engine::default();
+        let a = DVec3::new(-100.0, -50.0, 0.0);
+        // Hover the midpoint of the top edge (50, 100, 0) and lock through it.
+        let mid = DVec3::new(50.0, 100.0, 0.0);
+        let i = infer(&mut e, &g, &b, at(mid), Some(a));
+        assert_eq!(i.kind, Kind::Midpoint);
+        assert!(e.lock_current(&i, a));
+        assert_eq!(
+            e.lock.map(|l| l.1),
+            Some(Kind::ThroughPoint(Kind::Midpoint.color()))
+        );
+        // Anywhere else, the cursor slides on the line anchor -> midpoint, even over
+        // another point inference (projected).
+        let dir = (mid - a).normalize();
+        for p in [
+            DVec3::new(100.0, 100.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(200.0, 300.0, 0.0),
+        ] {
+            let i = infer(&mut e, &g, &b, at(p), Some(a));
+            assert!(i.locked);
+            assert!(matches!(i.kind, Kind::ThroughPoint(_)));
+            let d = i.point - a;
+            assert!(d.cross(dir).length() < 1e-6, "{:?} off the line", i.point);
+            assert_eq!(i.guide, Some((a, mid)));
+        }
+        // Shift released.
+        e.unlock();
+        assert!(!e.is_locked());
+        // Axis directions still lock as themselves; free points do not lock.
+        let i = infer(&mut e, &g, &b, at(a + DVec3::X * 300.0), Some(a));
+        assert_eq!(i.kind, Kind::Along(Axis::Red));
+        assert!(e.lock_current(&i, a));
+        assert_eq!(e.lock.map(|l| l.1), Some(Kind::Along(Axis::Red)));
+        e.unlock();
+        let free = Inference {
+            kind: Kind::Free,
+            ..i
+        };
+        assert!(!e.lock_current(&free, a));
+    }
+
+    #[test]
+    fn through_point_lock_inside_a_group_is_magenta() {
+        let (mut g, b) = square();
+        g.edge_container = vec![Some(Container::Group); 4];
+        let mut e = Engine::default();
+        let a = DVec3::new(-100.0, -50.0, 0.0);
+        let i = infer(&mut e, &g, &b, at(DVec3::new(100.0, 100.0, 0.0)), Some(a));
+        assert_eq!(i.kind, Kind::Endpoint);
+        assert!(e.lock_current(&i, a));
+        let i = infer(&mut e, &g, &b, at(DVec3::new(10.0, 10.0, 0.0)), Some(a));
+        assert_eq!(i.kind, Kind::ThroughPoint(CONTAINER_COLOR));
+    }
+
+    #[test]
+    fn plane_lock_projects_onto_the_face_plane() {
+        let (g, b) = square();
+        let mut e = Engine::default();
+        // Lock to a vertical plane (normal green) through the origin.
+        e.lock_plane(DVec3::ZERO, DVec3::Y);
+        // Over the face (on the ground, off the plane): where the ray meets the plane.
+        let i = infer(&mut e, &g, &b, at(DVec3::new(60.0, 70.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::OnFace);
+        assert!(i.locked);
+        assert!(i.point.y.abs() < 1e-6, "{:?}", i.point);
+        // A point inference off the plane is projected onto it.
+        let i = infer(&mut e, &g, &b, at(DVec3::new(100.0, 100.0, 0.0)), None);
+        assert_eq!(i.kind, Kind::Endpoint);
+        assert!((i.point - DVec3::new(100.0, 0.0, 0.0)).length() < 1e-9);
+        // With an anchor the plane goes through the anchor.
+        let a = DVec3::new(0.0, 50.0, 0.0);
+        let i = infer(&mut e, &g, &b, at(DVec3::new(30.0, 80.0, 0.0)), Some(a));
+        assert!((i.point.y - 50.0).abs() < 1e-6, "{:?}", i.point);
+        // Alt (Rotate, Protractor) frees the point; the lock stays.
+        e.plane_free = true;
+        let i = infer(&mut e, &g, &b, at(DVec3::new(60.0, 70.0, 0.0)), None);
+        assert!((i.point.y - 70.0).abs() < 1e-6);
+        assert!(e.locked_plane().is_some());
+        e.unlock_plane();
+        assert!(e.locked_plane().is_none() && !e.plane_free);
+        let i = infer(&mut e, &g, &b, at(DVec3::new(60.0, 70.0, 0.0)), None);
+        assert!(!i.locked);
+    }
+
+    #[test]
+    fn filter_modes_drop_linear_inferences() {
+        let c = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(100.0, 60.0, 0.0)];
+        let g = Geometry::from_edges(vec![c]);
+        let b = Bvh::default();
+        let mut e = Engine::default();
+        infer(&mut e, &g, &b, at(DVec3::new(30.0, 18.0, 0.0)), None);
+        let a = DVec3::new(0.0, 150.0, 0.0);
+        let red = a + DVec3::X * 200.0;
+        let par = a + (c[1] - c[0]) * 0.8;
+        assert_eq!(
+            infer(&mut e, &g, &b, at(red), Some(a)).kind,
+            Kind::Along(Axis::Red)
+        );
+        assert_eq!(e.filter.label(), "All Inferences On");
+        e.filter = e.filter.next();
+        assert_eq!(e.filter, Filter::PointsOnly);
+        assert_eq!(infer(&mut e, &g, &b, at(red), Some(a)).kind, Kind::Free);
+        assert_eq!(infer(&mut e, &g, &b, at(par), Some(a)).kind, Kind::Free);
+        // Point inferences stay.
+        assert_eq!(
+            infer(&mut e, &g, &b, at(c[1]), Some(a)).kind,
+            Kind::Endpoint
+        );
+        e.filter = e.filter.next();
+        assert_eq!(e.filter, Filter::ParallelPerpendicular);
+        assert_eq!(infer(&mut e, &g, &b, at(red), Some(a)).kind, Kind::Free);
+        assert_eq!(infer(&mut e, &g, &b, at(par), Some(a)).kind, Kind::Parallel);
+        e.filter = e.filter.next();
+        assert_eq!(e.filter, Filter::All);
+        e.filter = Filter::PointsOnly;
+        e.reset();
+        assert_eq!(e.filter, Filter::All);
+    }
+
+    #[test]
+    fn component_origin_and_arc_midpoint() {
+        let mut g = Geometry::default();
+        g.component_origins.push(DVec3::new(200.0, 0.0, 0.0));
+        let b = Bvh::default();
+        let mut e = Engine::default();
+        let i = infer(
+            &mut e,
+            &g,
+            &b,
+            at(DVec3::new(200.0, 0.0, 0.0)) + DVec2::new(2.0, 1.0),
+            None,
+        );
+        assert_eq!(
+            (i.kind, i.point),
+            (Kind::ComponentOrigin, DVec3::new(200.0, 0.0, 0.0))
+        );
+        assert_eq!(i.label(), "Component Origin");
+        assert_eq!(e.acquired, Some(i.point));
+
+        // A half circle of 5 segments: its middle lies on the middle segment's arc,
+        // not on a vertex.
+        let c = DVec3::new(60.0, 40.0, 0.0);
+        let r = 40.0;
+        let pts: Vec<DVec3> = (0..=5)
+            .map(|i| {
+                let t = std::f64::consts::PI * f64::from(i) / 5.0;
+                c + DVec3::new(t.cos(), t.sin(), 0.0) * r
+            })
+            .collect();
+        let mut g = Geometry::from_edges(pts.windows(2).map(|w| [w[0], w[1]]).collect());
+        let mid = c + DVec3::Y * r;
+        g.add_arc(
+            ArcCurve {
+                center: c,
+                normal: DVec3::Z,
+                radius: r,
+                midpoint: Some(mid),
+            },
+            0..5,
+        );
+        let seg_mid = (pts[2] + pts[3]) / 2.0;
+        let mut e = Engine::default();
+        // Before hovering the arc, its middle is not offered.
+        let i = infer(&mut e, &g, &b, at(mid), None);
+        assert_ne!(i.kind, Kind::ArcMidpoint);
+        infer(&mut e, &g, &b, at(pts[0].lerp(pts[1], 0.3)), None);
+        let i = infer(&mut e, &g, &b, at(mid), None);
+        assert_eq!((i.kind, i.point), (Kind::ArcMidpoint, mid));
+        assert_eq!(i.label(), "Midpoint of Arc");
+        // On the middle segment's own midpoint, that one.
+        let i = infer(&mut e, &g, &b, at(seg_mid), None);
+        assert_eq!(i.kind, Kind::Midpoint);
     }
 }

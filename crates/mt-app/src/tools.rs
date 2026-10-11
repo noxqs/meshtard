@@ -5,7 +5,8 @@
 //!
 //! Shapes lie in the plane of the face clicked first, else on the ground; arrow keys
 //! lock the plane (right: red normal, left: green, up: blue), also after the first point
-//! of a Rectangle, Circle or Polygon. Rectangle sides and the default start angle follow
+//! of a Rectangle, Circle or Polygon, and Shift held over a face locks it to the
+//! face's plane ([`PlaneLock`]; key handling in `locks`). Rectangle sides and the default start angle follow
 //! [`plane_axes`]: red/green on level planes, else the level line and the fall line
 //! (horizontal and vertical on walls). Behaviors are drafts from
 //! memory of SketchUp (`spec/parity/STATUS.md`).
@@ -43,6 +44,16 @@ pub trait DrawTool {
     fn cancel(&mut self);
     /// Arrow keys lock the drawing plane; tools without a plane ignore it.
     fn lock_plane(&mut self, _axis: Axis) -> bool {
+        false
+    }
+    /// Shift held over a face locks the drawing plane to the face's (`Some(normal)`);
+    /// `None` when Shift is released. Returns whether the tool has a plane to lock.
+    fn lock_face_plane(&mut self, _normal: Option<DVec3>) -> bool {
+        false
+    }
+    /// The tool works in a plane and Alt frees its center point while that plane
+    /// stays locked (Rotate, Protractor).
+    fn alt_frees_center(&self) -> bool {
         false
     }
     /// Pointer pressed and dragged: by default the press and release are clicks.
@@ -97,6 +108,30 @@ pub fn parse_segments(text: &str) -> Option<usize> {
 fn parse_pair(text: &str, units: LengthUnit) -> Option<(f64, f64)> {
     let (a, b) = text.split_once([',', ';'])?;
     Some((parse_length(a, units)?, parse_length(b, units)?))
+}
+
+/// A plane tool's locked plane normal: an arrow key's axis (pressed again to unlock)
+/// or, while Shift is held over a face, that face's normal, which wins. The face
+/// lock is taken into the shape's plane when its first point is placed, so the shape
+/// stays on that plane after Shift is released.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct PlaneLock {
+    axis: Option<DVec3>,
+    face: Option<DVec3>,
+}
+
+impl PlaneLock {
+    pub fn get(&self) -> Option<DVec3> {
+        self.face.or(self.axis)
+    }
+
+    fn toggle(&mut self, axis: Axis) {
+        self.axis = if self.axis == Some(axis.dir()) {
+            None
+        } else {
+            Some(axis.dir())
+        };
+    }
 }
 
 /// Plane normal for a shape started at `inf`: the locked one, the face's, else up.
@@ -246,7 +281,7 @@ impl DrawTool for LineTool {
 pub struct Rectangle {
     /// First corner and the normal of the face it was placed on (up off faces).
     first: Option<(DVec3, DVec3)>,
-    lock: Option<DVec3>,
+    lock: PlaneLock,
 }
 
 impl Rectangle {
@@ -254,7 +289,7 @@ impl Rectangle {
     /// An arrow key pressed after the first corner re-orients the rectangle.
     fn plane(&self) -> Option<(DVec3, DVec3)> {
         let (a, n) = self.first?;
-        Some((a, self.lock.unwrap_or(n).normalize()))
+        Some((a, self.lock.get().unwrap_or(n).normalize()))
     }
 
     fn corners(&self, b: DVec3) -> Option<[DVec3; 4]> {
@@ -309,7 +344,7 @@ impl DrawTool for Rectangle {
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         match self.corners(inf.point) {
             None => {
-                self.first = Some((inf.point, plane_normal(None, inf)));
+                self.first = Some((inf.point, plane_normal(self.lock.face, inf)));
                 false
             }
             Some(c) => self.make(ents, c),
@@ -349,11 +384,12 @@ impl DrawTool for Rectangle {
     }
 
     fn lock_plane(&mut self, axis: Axis) -> bool {
-        self.lock = if self.lock == Some(axis.dir()) {
-            None
-        } else {
-            Some(axis.dir())
-        };
+        self.lock.toggle(axis);
+        true
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        self.lock.face = normal;
         true
     }
 }
@@ -482,7 +518,7 @@ pub struct Polygon {
     sides: usize,
     /// Center and the normal of the face it was placed on (up off faces).
     center: Option<(DVec3, DVec3)>,
-    lock: Option<DVec3>,
+    lock: PlaneLock,
 }
 
 impl Polygon {
@@ -491,7 +527,7 @@ impl Polygon {
             is_circle: true,
             sides: CIRCLE_SIDES,
             center: None,
-            lock: None,
+            lock: PlaneLock::default(),
         }
     }
 
@@ -500,7 +536,7 @@ impl Polygon {
             is_circle: false,
             sides: POLYGON_SIDES,
             center: None,
-            lock: None,
+            lock: PlaneLock::default(),
         }
     }
 
@@ -509,7 +545,7 @@ impl Polygon {
     fn arc(&self, toward: DVec3, radius: Option<f64>) -> Option<Arc> {
         let (c, n) = self.center?;
         // An arrow key pressed after the center re-orients the shape.
-        let n = self.lock.unwrap_or(n).normalize();
+        let n = self.lock.get().unwrap_or(n).normalize();
         let d = toward - c;
         let x = (d - n * d.dot(n)).normalize_or_zero();
         let x = if x == DVec3::ZERO { plane_axes(n).0 } else { x };
@@ -555,7 +591,7 @@ impl DrawTool for Polygon {
 
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         if self.center.is_none() {
-            self.center = Some((inf.point, plane_normal(None, inf)));
+            self.center = Some((inf.point, plane_normal(self.lock.face, inf)));
             return false;
         }
         match self.arc(inf.point, None) {
@@ -602,11 +638,12 @@ impl DrawTool for Polygon {
     }
 
     fn lock_plane(&mut self, axis: Axis) -> bool {
-        self.lock = if self.lock == Some(axis.dir()) {
-            None
-        } else {
-            Some(axis.dir())
-        };
+        self.lock.toggle(axis);
+        true
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        self.lock.face = normal;
         true
     }
 }
@@ -696,7 +733,7 @@ pub struct TwoPointArc {
     /// Direction of the edge ending at the start point, for "Tangent at Vertex".
     tangent: Option<DVec3>,
     segments: Option<usize>,
-    lock: Option<DVec3>,
+    lock: PlaneLock,
 }
 
 impl TwoPointArc {
@@ -775,7 +812,7 @@ impl DrawTool for TwoPointArc {
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         match self.points.len() {
             0 => {
-                self.normal = plane_normal(self.lock, inf);
+                self.normal = plane_normal(self.lock.get(), inf);
                 self.tangent = mt_infer::hints::tangent_at(inf);
                 self.points.push(inf.point);
                 false
@@ -844,11 +881,12 @@ impl DrawTool for TwoPointArc {
     }
 
     fn lock_plane(&mut self, axis: Axis) -> bool {
-        self.lock = if self.lock == Some(axis.dir()) {
-            None
-        } else {
-            Some(axis.dir())
-        };
+        self.lock.toggle(axis);
+        true
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        self.lock.face = normal;
         true
     }
 }
@@ -860,7 +898,7 @@ pub struct CenterArc {
     center: Option<(DVec3, DVec3)>,
     start: Option<DVec3>,
     segments: Option<usize>,
-    lock: Option<DVec3>,
+    lock: PlaneLock,
 }
 
 impl CenterArc {
@@ -870,7 +908,7 @@ impl CenterArc {
             center: None,
             start: None,
             segments: None,
-            lock: None,
+            lock: PlaneLock::default(),
         }
     }
 
@@ -941,7 +979,7 @@ impl DrawTool for CenterArc {
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         match (self.center, self.start) {
             (None, _) => {
-                self.center = Some((inf.point, plane_normal(self.lock, inf)));
+                self.center = Some((inf.point, plane_normal(self.lock.get(), inf)));
                 false
             }
             (Some((c, n)), None) => {
@@ -1021,11 +1059,12 @@ impl DrawTool for CenterArc {
     }
 
     fn lock_plane(&mut self, axis: Axis) -> bool {
-        self.lock = if self.lock == Some(axis.dir()) {
-            None
-        } else {
-            Some(axis.dir())
-        };
+        self.lock.toggle(axis);
+        true
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        self.lock.face = normal;
         true
     }
 }
@@ -1319,7 +1358,7 @@ pub struct Protractor {
     center: Option<(DVec3, DVec3)>,
     /// Unit start direction in the plane, and the protractor radius.
     base: Option<(DVec3, f64)>,
-    lock: Option<DVec3>,
+    lock: PlaneLock,
 }
 
 /// Protractor ticks every 15 degrees (SketchUp's default angle snap).
@@ -1367,7 +1406,7 @@ impl DrawTool for Protractor {
 
     fn status(&self) -> String {
         match (self.center, self.base) {
-            (None, _) => "Place the protractor center. Arrow keys lock its orientation.",
+            (None, _) => "Place the protractor center. Arrow keys or Shift on a face lock its orientation; Alt frees the center.",
             (Some(_), None) => "Select the start of the angle.",
             _ => "Select the angle or enter value (degrees or rise:run).",
         }
@@ -1384,7 +1423,7 @@ impl DrawTool for Protractor {
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
         match (self.center, self.base) {
             (None, _) => {
-                self.center = Some((inf.point, plane_normal(self.lock, inf)));
+                self.center = Some((inf.point, plane_normal(self.lock.get(), inf)));
                 false
             }
             (Some(_), None) => {
@@ -1461,15 +1500,26 @@ impl DrawTool for Protractor {
         if self.base.is_some() {
             return false;
         }
-        self.lock = if self.lock == Some(axis.dir()) {
-            None
-        } else {
-            Some(axis.dir())
-        };
+        self.lock.toggle(axis);
         if let Some((c, _)) = self.center {
-            self.center = Some((c, self.lock.unwrap_or(DVec3::Z)));
+            self.center = Some((c, self.lock.get().unwrap_or(DVec3::Z)));
         }
         true
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        if self.base.is_some() {
+            return false;
+        }
+        self.lock.face = normal;
+        if let (Some((c, _)), Some(n)) = (self.center, normal) {
+            self.center = Some((c, n));
+        }
+        true
+    }
+
+    fn alt_frees_center(&self) -> bool {
+        self.center.is_none()
     }
 }
 
