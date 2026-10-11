@@ -195,7 +195,15 @@ fn insert_gathered(ents: &mut Entities, g: Gathered) -> (Vec<EdgeId>, Vec<FaceId
     let curve_map: HashMap<CurveId, CurveId> = g
         .curves
         .into_iter()
-        .map(|(c, arc)| (c, ents.curves.insert(Curve { arc })))
+        .map(|(c, arc)| {
+            (
+                c,
+                ents.curves.insert(Curve {
+                    arc,
+                    polygon: false,
+                }),
+            )
+        })
         .collect();
     let mut segments = g.segments;
     for (_, _, attrs) in &mut segments {

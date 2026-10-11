@@ -553,7 +553,10 @@ pub fn add_curve(
     points: &[DVec3],
     arc: Option<crate::entities::Arc>,
 ) -> Vec<EdgeId> {
-    let curve = ents.curves.insert(crate::entities::Curve { arc });
+    let curve = ents.curves.insert(crate::entities::Curve {
+        arc,
+        polygon: false,
+    });
     let mut edges = Vec::new();
     for w in points.windows(2) {
         // Edges covering the segment that existed before it was added lie along it, so

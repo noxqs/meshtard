@@ -161,6 +161,10 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
                 camera.set_fov(camera.fov_deg + input.left_drag.y * FOV_DEG_PER_PX)
             }
             Tool::Pan => camera.pan(input.left_drag, viewport),
+            // Shift held: the drag changes the field of view [doc].
+            Tool::Zoom if input.shift => {
+                camera.set_fov(camera.fov_deg + input.left_drag.y * FOV_DEG_PER_PX)
+            }
             Tool::Zoom => camera.zoom_drag(input.left_drag.y, viewport),
         }
     }

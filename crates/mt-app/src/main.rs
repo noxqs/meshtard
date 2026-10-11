@@ -9,6 +9,7 @@ mod camera_tools;
 mod commands;
 mod component_dialog;
 mod confirm;
+mod context_extra;
 mod context_menu;
 mod cursor;
 mod document;
@@ -35,6 +36,7 @@ mod presentation;
 mod print;
 mod report;
 mod sandbox;
+mod search;
 mod section_export;
 mod selection;
 mod settings;
@@ -46,6 +48,7 @@ mod spring;
 mod templates;
 mod text3d;
 mod texture_position;
+mod tool_extra;
 mod tools;
 mod tray;
 
@@ -246,6 +249,41 @@ const IMPLEMENTED: &[&str] = &[
     "help.welcome",
     "help.knowledge_center",
     "help.contact",
+    // More context menu commands (context_extra.rs) and Help > Search.
+    "edit.find_center",
+    "edit.convert_to_polygon",
+    "camera.align_view",
+    "edit.align_axes",
+    "edit.area_selection",
+    "edit.area_tag",
+    "edit.area_material",
+    "edit.section_active",
+    "edit.section_reverse",
+    "edit.section_slice_group",
+    "edit.section_troubleshoot",
+    "edit.dim_text_start",
+    "edit.dim_text_center",
+    "edit.dim_text_end",
+    "edit.dim_type_radius",
+    "edit.dim_type_diameter",
+    "edit.text_arrow_none",
+    "edit.text_arrow_dot",
+    "edit.text_arrow_closed",
+    "edit.text_arrow_open",
+    "edit.text_leader_view",
+    "edit.text_leader_pushpin",
+    "edit.text_leader_hidden",
+    "view.axes_place",
+    "view.axes_move",
+    "view.axes_reset",
+    "view.axes_hide",
+    "edit.change_axes",
+    "edit.unglue",
+    "edit.component_save_as",
+    "edit.component_reload",
+    "edit.select_instances",
+    "edit.replace_selected",
+    "help.search",
 ];
 
 fn main() -> eframe::Result {
@@ -398,6 +436,8 @@ struct App {
     ctx_menu: context_menu::ContextMenu,
     /// Texture Position and externally edited textures.
     textures: texture_position::Textures,
+    /// Dialogs and state of the extra context items, tool modifiers and Search.
+    extra: context_extra::Extra,
 }
 
 impl App {
@@ -495,6 +535,7 @@ impl App {
             present: Default::default(),
             ctx_menu: Default::default(),
             textures: Default::default(),
+            extra: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -917,6 +958,10 @@ impl App {
             self.erase_drag.clear();
             self.shift_lock.reset(&mut self.engine);
             self.inference = None;
+            self.extra.change_axes = None;
+        } else if id == "help.search" {
+            self.open_search();
+        } else if id == "edit.undo" && self.undo_cancels_tool() {
         } else if id == "view.shadows" {
             if let Some(doc) = &mut self.document {
                 // A view setting, not an undo step in this draft (SketchUp records
@@ -950,6 +995,7 @@ impl App {
             self.rebuild(&device);
         } else if self.camera_command(id)
             || self.context_command(frame, id)
+            || self.context_extra_command(frame, id)
             || self.extra_command(ctx, frame, id)
             || self.m13_command(ctx, frame, id)
             || self.presentation_command(ctx, frame, id)
@@ -1470,6 +1516,7 @@ impl App {
             _ => self.inference = None,
         }
         self.context_menu(ui, &response, rect, viewport_px, &render_state.device);
+        self.orbit_double_click(ui, &response, rect, viewport_px);
         self.tool_cursor(ui, &response, rect, viewport_px);
         self.update_live(&render_state.device);
 
@@ -1509,6 +1556,7 @@ impl App {
         self.draw_selection_box(ui, &response, rect);
         self.draw_zoom_box(ui, &response, rect);
         self.pick_overlay(ui, rect);
+        self.context_extra_paint(ui, rect);
         self.texture_position_paint(ui, rect, viewport_px);
         if self.annotations(ui, rect, viewport_px) {
             self.rebuild(&render_state.device);
@@ -1668,6 +1716,10 @@ impl App {
                     f64::from((p.y - rect.min.y) * ppp),
                 )
             });
+        self.draw_tool_pre(ui, cursor, viewport_px);
+        let Some(draw) = self.draw.as_mut() else {
+            return;
+        };
         let anchor = draw.anchor().map(|a| self.ctx_xf.transform_point3(a));
         let now = ui.input(|i| i.time);
         let ctx_xf = self.ctx_xf;
@@ -1700,6 +1752,7 @@ impl App {
             }
             false
         };
+        let changed = self.draw_tool_post(response, &inf) | changed;
         if changed {
             self.shift_lock.after_change(&mut self.engine);
             self.rebuild(device);
@@ -2431,6 +2484,9 @@ impl eframe::App for App {
         self.model_info_ui(ui.ctx(), frame);
         self.preferences_ui(ui.ctx());
         self.presentation_ui(ui.ctx(), frame);
+        self.context_extra_ui(ui.ctx(), frame);
+        self.tool_extra_ui(ui.ctx(), frame);
+        self.search_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),

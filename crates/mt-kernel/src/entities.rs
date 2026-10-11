@@ -77,6 +77,9 @@ impl Arc {
 pub struct Curve {
     /// `None` for a free-form curve (Freehand).
     pub arc: Option<Arc>,
+    /// Context menu > Convert to Polygon: the curve shows and reports as a polygon
+    /// (Entity Info, inference on its segments); the arc data stays for its center.
+    pub polygon: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +157,9 @@ pub struct InstanceAttrs {
     /// from memory, unverified).
     pub status: String,
     pub owner: String,
+    /// Placed glued to a face (a component whose definition glues); context menu
+    /// Unglue clears it. Not saved in .skp.
+    pub glued: bool,
 }
 
 #[derive(Debug, Clone)]

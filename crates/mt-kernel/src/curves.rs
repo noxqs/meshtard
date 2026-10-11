@@ -306,7 +306,10 @@ pub fn weld_edges(ents: &mut Entities, edges: &[EdgeId]) -> Vec<CurveId> {
         if comp.len() < 2 || chain_of(ents, &comp).is_none() {
             continue;
         }
-        let curve = ents.curves.insert(Curve { arc: None });
+        let curve = ents.curves.insert(Curve {
+            arc: None,
+            polygon: false,
+        });
         let mut old: HashSet<CurveId> = HashSet::new();
         for &e in &comp {
             let a = &mut ents.edges[e].attrs;

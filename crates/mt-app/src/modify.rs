@@ -193,6 +193,11 @@ pub trait ModifyTool {
     fn take_model_edit(&mut self) -> Option<ModelEdit> {
         None
     }
+    /// Section Plane: a plane placed by a click, waiting for the name prompt; the app
+    /// adds it to the model when the prompt is answered.
+    fn take_section(&mut self) -> Option<mt_kernel::SectionPlane> {
+        None
+    }
 }
 
 /// See [`ModifyTool::take_model_edit`].
@@ -208,7 +213,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.follow_me" => Box::new(FollowMe),
         "tool.paint_bucket" => Box::new(crate::paint::PaintBucket::default()),
         "tool.flip" => Box::new(crate::flip::Flip::default()),
-        "tool.section_plane" => Box::new(SectionPlaneTool),
+        "tool.section_plane" => Box::new(SectionPlaneTool::default()),
         "tool.axes" => Box::new(crate::component_dialog::AxesPick::model_axes()),
         "tool.sandbox_from_scratch" => Box::new(crate::sandbox::FromScratch::default()),
         _ => return None,
@@ -554,7 +559,7 @@ impl ModifyTool for Transform {
         let text: String = match (self.kind, self.points.len()) {
             (Kind::Move, 0) => "Select object to move. Ctrl = toggle copy.",
             (Kind::Move, _) => {
-                "Select destination or enter distance. After a copy: 5x or /5 for arrays."
+                "Select destination or enter distance, [x,y,z] or <x,y,z>. After a copy: 5x or /5 for arrays."
             }
             (Kind::Rotate, 0) => "Select center of rotation. Ctrl = toggle copy.",
             (Kind::Rotate, 1) => "Select start point of the angle.",
@@ -652,6 +657,17 @@ impl ModifyTool for Transform {
             self.last_copy = None;
             return true;
         }
+        if let (Kind::Move, [a], Some(c)) = (
+            self.kind,
+            &self.points[..],
+            crate::tools::parse_coords(text, units),
+        ) {
+            let v = match c {
+                crate::tools::Coords::Absolute(p) => p - *a,
+                crate::tools::Coords::Relative(v) => v,
+            };
+            return self.finish(ctx, DMat4::from_translation(v));
+        }
         let Some(p) = cur.map(|c| c.point) else {
             return false;
         };
@@ -664,13 +680,14 @@ impl ModifyTool for Transform {
                 (dir != DVec3::ZERO).then(|| DMat4::from_translation(dir * d))
             }
             (Kind::Rotate, [c, s]) => {
-                let Ok(deg) = text.trim().trim_end_matches('°').parse::<f64>() else {
+                // Degrees, or a slope `rise:run` (`8:12`) [doc].
+                let Some(rad) = crate::tools::parse_angle(text) else {
                     return false;
                 };
                 let (axis, angle) = self.rotation(*c, *s, p).unwrap_or((DVec3::Z, 1.0));
                 // Toward the side the cursor is on.
                 let axis = if angle < 0.0 { -axis } else { axis };
-                Some(rotation_about(*c, axis, deg.to_radians()))
+                Some(rotation_about(*c, axis, rad))
             }
             _ => None,
         };
@@ -860,6 +877,9 @@ pub fn grip_box(
 pub struct Grab {
     pub grip: Grip,
     pub bbox: OrientedBox,
+    /// Shift held: a corner grip scales non-uniformly, an edge or face grip uniformly
+    /// [doc].
+    pub swap: bool,
 }
 
 /// A typed scale value: a factor, or a length (the size wanted).
@@ -899,7 +919,7 @@ impl Grab {
             .filter(|&i| self.bbox.half[i] > mt_kernel::TOL)
             .count();
         let n = self.axes().len();
-        n >= 2 && n == solid
+        (n >= 2 && n == solid) != self.swap
     }
 
     /// The grip's position.
@@ -993,7 +1013,9 @@ pub struct Scale {
     /// Grip under the cursor.
     hot: Option<Grip>,
     grab: Option<Grab>,
+    /// Ctrl held: scale about the center [doc] (held, not toggled).
     about_center: bool,
+    held: crate::cursor::Mods,
     /// The last scale (targets, grip, transform): a typed value replaces it.
     last: Option<(Vec<Owner>, Grab, DMat4)>,
 }
@@ -1023,7 +1045,9 @@ impl ModifyTool for Scale {
     fn status(&self) -> String {
         let text = match (&self.grab, &self.bbox) {
             (Some(_), _) => "Select second point or enter scale value (2, 2,1,1 or 200mm).",
-            (None, Some(_)) => "Select a grip to scale. Ctrl = toggle scale about center.",
+            (None, Some(_)) => {
+                "Select a grip to scale. Hold Ctrl = about center, Shift = uniform / non-uniform."
+            }
             (None, None) => "Select an entity to scale.",
         };
         if self.about_center {
@@ -1106,7 +1130,11 @@ impl ModifyTool for Scale {
             };
         }
         if let (Some(grip), Some(bbox)) = (self.hot, self.bbox) {
-            self.grab = Some(Grab { grip, bbox });
+            self.grab = Some(Grab {
+                grip,
+                bbox,
+                swap: self.held.shift,
+            });
             self.last = None;
             return false;
         }
@@ -1166,8 +1194,15 @@ impl ModifyTool for Scale {
         }
     }
 
-    fn toggle_ctrl(&mut self) {
-        self.about_center = !self.about_center;
+    /// Ctrl and Shift are held modifiers here, read in [`Self::input`].
+    fn toggle_ctrl(&mut self) {}
+
+    fn input(&mut self, i: &Input) {
+        self.held = i.held;
+        self.about_center = i.held.ctrl;
+        if let Some(g) = self.grab.as_mut() {
+            g.swap = i.held.shift;
+        }
     }
 
     fn live(&self, cur: &Inference) -> Option<(&[Owner], DMat4, bool)> {
@@ -1185,9 +1220,14 @@ impl ModifyTool for Scale {
 
 // ------------------------------------------------------------------ Offset
 
+/// Offset: click a face, then the distance. Alt held keeps overlapping offsets
+/// [doc]; a double click on another face repeats the last distance [doc].
 #[derive(Debug, Default)]
 pub struct Offset {
     start: Option<(FaceId, DVec3)>,
+    /// Alt held: offsets that overlap are kept (no trimming).
+    overlap: bool,
+    last: Option<f64>,
 }
 
 impl Offset {
@@ -1205,9 +1245,19 @@ impl Offset {
         let Some((f, _)) = self.start.take() else {
             return false;
         };
-        ctx.ents.faces.contains_key(f)
-            && d.abs() > mt_kernel::TOL
-            && !mt_kernel::offset::offset_face(ctx.ents, f, d).is_empty()
+        if !ctx.ents.faces.contains_key(f) || d.abs() <= mt_kernel::TOL {
+            return false;
+        }
+        let made = if self.overlap {
+            mt_kernel::offset_face_overlapping(ctx.ents, f, d)
+        } else {
+            mt_kernel::offset::offset_face(ctx.ents, f, d)
+        };
+        if made.is_empty() {
+            return false;
+        }
+        self.last = Some(d);
+        true
     }
 }
 
@@ -1217,12 +1267,29 @@ impl ModifyTool for Offset {
     }
 
     fn status(&self) -> String {
-        if self.start.is_some() {
-            "Select offset distance or enter value."
+        let text = if self.start.is_some() {
+            "Select offset distance or enter value. Alt = allow overlap."
         } else {
-            "Select a face to offset."
+            "Select a face to offset. Double-click a face to repeat the last offset."
+        };
+        if self.overlap {
+            format!("{text} (Allow overlap)")
+        } else {
+            text.into()
         }
-        .into()
+    }
+
+    fn input(&mut self, i: &Input) {
+        self.overlap = i.held.alt;
+    }
+
+    fn double_click(&mut self, ctx: &mut Ctx, _inf: &Inference) -> bool {
+        // The double click's first click started an offset on the face.
+        let (Some(d), Some(Owner::Face(f))) = (self.last, ctx.picked) else {
+            return false;
+        };
+        self.start = Some((f, DVec3::ZERO));
+        self.finish(ctx, d)
     }
 
     fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
@@ -1376,8 +1443,9 @@ impl ModifyTool for PlaceComponent {
     }
 
     fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        let glued = inf.normal.is_some_and(|n| self.glue.accepts(n));
         let transform = match inf.normal {
-            Some(n) if self.glue.accepts(n) => crate::component_dialog::glued_frame(inf.point, n),
+            Some(n) if glued => crate::component_dialog::glued_frame(inf.point, n),
             _ => DMat4::from_translation(inf.point),
         };
         ctx.ents.instances.push(mt_kernel::Instance {
@@ -1388,7 +1456,10 @@ impl ModifyTool for PlaceComponent {
             locked: false,
             layer: None,
             material: None,
-            attrs: Default::default(),
+            attrs: mt_kernel::InstanceAttrs {
+                glued,
+                ..Default::default()
+            },
         });
         true
     }
@@ -1525,20 +1596,37 @@ impl ModifyTool for Paste {
 // ------------------------------------------------------------------ Section Plane
 
 /// Places a section plane on the face under the cursor (facing the way the face does),
-/// or horizontally elsewhere, and makes it the active cut. SketchUp 2026 asks for a
-/// name and symbol first (not implemented); arrow-key orientation locks are missing.
-#[derive(Debug)]
-pub struct SectionPlaneTool;
+/// or horizontally elsewhere, and makes it the active cut once the app's Name Section
+/// Plane prompt is answered (name and symbol [doc]). Arrow keys and Shift lock the
+/// orientation.
+#[derive(Debug, Default)]
+pub struct SectionPlaneTool {
+    /// Orientation locked by an arrow key (right red, left green, up blue normal;
+    /// pressed again to unlock) [doc] (the key-to-axis mapping follows the drawing
+    /// tools, unverified).
+    axis: Option<DVec3>,
+    /// Orientation held with Shift: the face's normal under the cursor when Shift
+    /// went down [doc].
+    shift: Option<DVec3>,
+    /// The plane clicked, waiting for the name prompt.
+    placed: Option<mt_kernel::SectionPlane>,
+    /// The number of planes in the context, for the default name.
+    count: usize,
+}
 
 impl SectionPlaneTool {
-    fn normal(inf: &Inference) -> DVec3 {
-        inf.normal.filter(|n| n.length() > 0.5).unwrap_or(DVec3::Z)
+    fn normal(&self, inf: &Inference) -> DVec3 {
+        self.shift
+            .or(self.axis)
+            .or(inf.normal.filter(|n| n.length() > 0.5))
+            .unwrap_or(DVec3::Z)
     }
 }
 
 impl ModifyTool for SectionPlaneTool {
     fn status(&self) -> String {
-        "Select a face to place the section plane on.".into()
+        "Select a face to place the section plane on. Arrow keys or Shift lock its orientation."
+            .into()
     }
 
     fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
@@ -1549,17 +1637,34 @@ impl ModifyTool for SectionPlaneTool {
         None
     }
 
-    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
-        let n = ctx.ents.section_planes.len() + 1;
-        ctx.ents.section_planes.push(mt_kernel::SectionPlane {
+    fn input(&mut self, i: &Input) {
+        if !i.held.shift {
+            self.shift = None;
+        } else if self.shift.is_none() {
+            self.shift = i.cur.and_then(|c| c.normal).filter(|n| n.length() > 0.5);
+        }
+    }
+
+    fn hover(&mut self, h: &Hover) {
+        self.count = h.ents.section_planes.len();
+    }
+
+    fn arrow(&mut self, axis: mt_infer::Axis) -> bool {
+        let d = axis.dir();
+        self.axis = if self.axis == Some(d) { None } else { Some(d) };
+        true
+    }
+
+    /// The plane is added after the name prompt (`take_section`).
+    fn click(&mut self, _ctx: &mut Ctx, inf: &Inference) -> bool {
+        self.placed = Some(mt_kernel::SectionPlane {
             point: inf.point,
-            normal: Self::normal(inf),
-            name: format!("Section Plane {n}"),
+            normal: self.normal(inf),
+            name: format!("Section Plane {}", self.count + 1),
             hidden: false,
             symbol: String::new(),
         });
-        ctx.ents.active_section = Some(ctx.ents.section_planes.len() - 1);
-        true
+        false
     }
 
     fn typed(
@@ -1573,7 +1678,7 @@ impl ModifyTool for SectionPlaneTool {
     }
 
     fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
-        let n = Self::normal(cur);
+        let n = self.normal(cur);
         let (u, v) = n.any_orthonormal_pair();
         let c = cur.point;
         let h = 20.0;
@@ -1590,7 +1695,14 @@ impl ModifyTool for SectionPlaneTool {
         vec![ring, vec![c, c + n * h * 0.5]]
     }
 
-    fn cancel(&mut self) {}
+    fn cancel(&mut self) {
+        self.axis = None;
+        self.placed = None;
+    }
+
+    fn take_section(&mut self) -> Option<mt_kernel::SectionPlane> {
+        self.placed.take()
+    }
 }
 
 #[cfg(test)]
@@ -1767,6 +1879,7 @@ mod tests {
         let corner = Grab {
             grip: [1, 1, 1],
             bbox,
+            swap: false,
         };
         assert!(corner.uniform());
         let s = corner
@@ -1782,6 +1895,7 @@ mod tests {
         let face = Grab {
             grip: [1, 0, 0],
             bbox,
+            swap: false,
         };
         assert!(!face.uniform());
         let s = face.factors_at(DVec3::new(15.0, 3.0, 99.0), false).unwrap();
@@ -1795,6 +1909,7 @@ mod tests {
         let edge = Grab {
             grip: [1, -1, 0],
             bbox,
+            swap: false,
         };
         let s = edge
             .factors_at(DVec3::new(20.0, -20.0, 0.0), false)
@@ -1811,6 +1926,7 @@ mod tests {
         let g = Grab {
             grip: [1, 0, 0],
             bbox,
+            swap: false,
         };
         let h = g.handle();
         assert!((h - DVec3::new(-10.0, 10.0, 15.0)).length() < 1e-9, "{h}");
@@ -1831,10 +1947,12 @@ mod tests {
         let corner = Grab {
             grip: [1, 1, 1],
             bbox,
+            swap: false,
         };
         let face = Grab {
             grip: [0, 1, 0],
             bbox,
+            swap: false,
         };
         let v = |t: &str| parse_scale_values(t, u).unwrap();
         assert_eq!(corner.factors_typed(&v("2")), Some(DVec3::splat(2.0)));

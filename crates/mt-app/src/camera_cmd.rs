@@ -213,7 +213,7 @@ impl App {
 
     /// Moves to `to` with the scene transition animation; a projection change is
     /// immediate.
-    fn go(&mut self, to: Camera) {
+    pub(crate) fn go(&mut self, to: Camera) {
         let projection_only =
             to.perspective != self.camera.perspective || to.two_point != self.camera.two_point;
         if projection_only && to.eye == self.camera.eye {

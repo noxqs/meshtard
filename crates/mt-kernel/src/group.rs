@@ -66,6 +66,7 @@ pub fn copy_raw(
             Some(*cmap.entry(c).or_insert_with(|| {
                 dst.curves.insert(Curve {
                     arc: curve.arc.map(|a| transform_arc(a, xf)),
+                    polygon: curve.polygon,
                 })
             }))
         });

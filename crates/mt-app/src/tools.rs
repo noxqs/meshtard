@@ -76,6 +76,133 @@ pub trait DrawTool {
     fn finish_text(&mut self, _ents: &mut Entities) -> bool {
         false
     }
+    /// Ctrl pressed (Tape Measure cycles its mode).
+    fn toggle_ctrl(&mut self) {}
+    /// A double click (after the click it also is). Returns whether the model changed.
+    fn double_click(&mut self, _ents: &mut Entities, _inf: &Inference) -> bool {
+        false
+    }
+    /// What is under the cursor before a click (the Text tool's component name).
+    fn hover(&mut self, _h: &DrawHover) {}
+    /// Ctrl+plus / Ctrl+minus: more or fewer segments (arcs, circles, polygons,
+    /// Freehand). Returns whether the tool used it.
+    fn step_segments(&mut self, _more: bool) -> bool {
+        false
+    }
+    /// Tape Measure: a length typed after a measurement, to rescale the model: the
+    /// measured length and the one wanted (inches).
+    fn take_rescale(&mut self) -> Option<(f64, f64)> {
+        None
+    }
+}
+
+/// What a drawing tool sees under the cursor before a click.
+pub struct DrawHover {
+    /// The group's or component's name under the cursor (instance name, else the
+    /// definition's), when the cursor is over one.
+    pub instance_name: Option<String>,
+    pub units: LengthUnit,
+}
+
+/// A typed point: `[x,y,z]` absolute (context coordinates) or `<x,y,z>` relative to
+/// the last point (SketchUp's Measurements box syntax for Line and Move [doc]; that
+/// absolute coordinates follow the drawing axes rather than the open context's is
+/// not done, unverified which SketchUp uses).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Coords {
+    Absolute(DVec3),
+    Relative(DVec3),
+}
+
+/// Parses `[x,y,z]` or `<x,y,z>` (`;` also separates, for decimal commas). Each
+/// value is a length in the model's units.
+pub fn parse_coords(text: &str, units: LengthUnit) -> Option<Coords> {
+    let t = text.trim();
+    let (inner, abs) = if let Some(x) = t.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+        (x, true)
+    } else {
+        (t.strip_prefix('<')?.strip_suffix('>')?, false)
+    };
+    let sep = if inner.contains(';') { ';' } else { ',' };
+    let v: Vec<f64> = inner
+        .split(sep)
+        .map(|p| parse_length(p.trim(), units))
+        .collect::<Option<_>>()?;
+    let [x, y, z] = v[..] else { return None };
+    let p = DVec3::new(x, y, z);
+    Some(if abs {
+        Coords::Absolute(p)
+    } else {
+        Coords::Relative(p)
+    })
+}
+
+/// Segment settings of the arc tools: a fixed count (`12s`), or a count taken from
+/// a circle of `n` sides (`20c`: an arc gets the share of the 20 its sweep covers
+/// [doc]). Ctrl+plus / minus change the count by one (step unverified).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct ArcSegments {
+    fixed: Option<usize>,
+    circle: Option<usize>,
+}
+
+impl ArcSegments {
+    /// Segments for an arc sweeping `sweep` radians.
+    pub fn count(&self, sweep: f64) -> usize {
+        match self.circle {
+            Some(n) => ((n as f64 * sweep.abs() / TAU).round() as usize).max(1),
+            None => self.fixed.unwrap_or(ARC_SEGMENTS),
+        }
+    }
+
+    /// `12s` or `20c`; returns whether `text` was one.
+    pub fn parse(&mut self, text: &str) -> bool {
+        if let Some(n) = parse_segments(text) {
+            *self = Self {
+                fixed: Some(n),
+                circle: None,
+            };
+            return true;
+        }
+        let circle = text
+            .trim()
+            .strip_suffix(['c', 'C'])
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .filter(|n| (3..=999).contains(n));
+        if let Some(n) = circle {
+            *self = Self {
+                fixed: None,
+                circle: Some(n),
+            };
+        }
+        circle.is_some()
+    }
+
+    pub fn step(&mut self, more: bool) {
+        let step = |n: usize| {
+            if more {
+                (n + 1).min(999)
+            } else {
+                n.saturating_sub(1).max(2)
+            }
+        };
+        match &mut self.circle {
+            Some(n) => *n = step(*n).max(3),
+            None => self.fixed = Some(step(self.fixed.unwrap_or(ARC_SEGMENTS))),
+        }
+    }
+
+    fn apply(&self, mut a: Arc) -> Arc {
+        a.segments = self.count(a.end_angle - a.start_angle);
+        a
+    }
+
+    fn label(&self) -> String {
+        match self.circle {
+            Some(n) => format!("{n}c"),
+            None => self.fixed.unwrap_or(ARC_SEGMENTS).to_string(),
+        }
+    }
 }
 
 pub fn for_command(id: &str) -> Option<Box<dyn DrawTool>> {
@@ -249,6 +376,19 @@ impl DrawTool for LineTool {
         text: &str,
         units: LengthUnit,
     ) -> bool {
+        match parse_coords(text, units) {
+            // Without a start point, either form is where the line starts.
+            Some(Coords::Absolute(p) | Coords::Relative(p)) if self.anchor.is_none() => {
+                self.anchor = Some(p);
+                return false;
+            }
+            Some(Coords::Absolute(p)) => return self.segment(ents, p),
+            Some(Coords::Relative(v)) => {
+                let a = self.anchor.unwrap_or_default();
+                return self.segment(ents, a + v);
+            }
+            None => {}
+        }
         let (Some(a), Some(c), Some(len)) = (self.anchor, cur, parse_length(text, units)) else {
             return false;
         };
@@ -646,6 +786,15 @@ impl DrawTool for Polygon {
         self.lock.face = normal;
         true
     }
+
+    fn step_segments(&mut self, more: bool) -> bool {
+        self.sides = if more {
+            (self.sides + 1).min(999)
+        } else {
+            self.sides.saturating_sub(1).max(3)
+        };
+        true
+    }
 }
 
 // ------------------------------------------------------------------ Arcs
@@ -732,11 +881,48 @@ pub struct TwoPointArc {
     normal: DVec3,
     /// Direction of the edge ending at the start point, for "Tangent at Vertex".
     tangent: Option<DVec3>,
-    segments: Option<usize>,
+    segments: ArcSegments,
     lock: PlaneLock,
+    /// Radius of the last arc, repeated by a double click on a corner.
+    last_radius: Option<f64>,
 }
 
 impl TwoPointArc {
+    /// A double click on a corner where two straight edges meet: the last arc's radius
+    /// rounds it (a fillet tangent to both edges) and the corner's waste goes, as
+    /// SketchUp's "double-click to repeat the 2-point arc" [doc] (exact cleanup
+    /// unverified).
+    fn fillet(&mut self, ents: &mut Entities, at: DVec3) -> bool {
+        let Some(r) = self.last_radius else {
+            return false;
+        };
+        let Some(v) = ents.find_vertex(at) else {
+            return false;
+        };
+        let edges: Vec<_> = ents
+            .edges
+            .iter()
+            .filter(|(_, e)| e.start == v || e.end == v)
+            .map(|(id, e)| (id, ents.pos(e.other(v))))
+            .collect();
+        let [(_, p1), (_, p2)] = edges[..] else {
+            return false;
+        };
+        let Some((t1, t2, arc)) = fillet_arc(ents.pos(v), p1, p2, r, self.segments) else {
+            return false;
+        };
+        add_curve(ents, &arc.points(), Some(arc));
+        // The edges from the tangent points to the corner are the waste.
+        for t in [t1, t2] {
+            if let (Some(a), Some(b)) = (ents.find_vertex(t), ents.find_vertex(at))
+                && let Some(e) = ents.edge_between(a, b)
+            {
+                mt_kernel::erase_edge(ents, e);
+            }
+        }
+        true
+    }
+
     fn bulge_of(&self, p: DVec3) -> Option<(DVec3, DVec3, f64)> {
         let [a, b] = self.points[..] else { return None };
         let dir = (b - a).normalize_or_zero();
@@ -751,13 +937,7 @@ impl TwoPointArc {
 
     fn arc(&self, bulge: f64) -> Option<Arc> {
         let [a, b] = self.points[..] else { return None };
-        arc_from_bulge(
-            a,
-            b,
-            bulge,
-            self.normal,
-            self.segments.unwrap_or(ARC_SEGMENTS),
-        )
+        arc_from_bulge(a, b, bulge, self.normal, ARC_SEGMENTS).map(|x| self.segments.apply(x))
     }
 
     fn make(&mut self, ents: &mut Entities, bulge: f64) -> bool {
@@ -766,6 +946,7 @@ impl TwoPointArc {
         };
         match self.arc(bulge) {
             Some(arc) => {
+                self.last_radius = Some(arc.radius);
                 add_curve(ents, &arc.points(), Some(arc));
             }
             None => {
@@ -837,8 +1018,7 @@ impl DrawTool for TwoPointArc {
         text: &str,
         units: LengthUnit,
     ) -> bool {
-        if let Some(n) = parse_segments(text) {
-            self.segments = Some(n);
+        if self.segments.parse(text) {
             return false;
         }
         let (Some(c), Some(v)) = (cur, parse_length(text, units)) else {
@@ -889,6 +1069,59 @@ impl DrawTool for TwoPointArc {
         self.lock.face = normal;
         true
     }
+
+    fn step_segments(&mut self, more: bool) -> bool {
+        self.segments.step(more);
+        true
+    }
+
+    fn double_click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        // The double click's first click started an arc at the corner.
+        if self.points.len() == 1 && self.points[0].distance(inf.point) <= mt_kernel::TOL {
+            self.points.clear();
+            return self.fillet(ents, inf.point);
+        }
+        false
+    }
+}
+
+/// The fillet of radius `r` at corner `v` between the lines to `p1` and `p2`: the
+/// tangent points on each line and the arc between them; `None` when the lines are
+/// collinear or too short for the radius.
+pub fn fillet_arc(
+    v: DVec3,
+    p1: DVec3,
+    p2: DVec3,
+    r: f64,
+    segments: ArcSegments,
+) -> Option<(DVec3, DVec3, Arc)> {
+    let (d1, d2) = ((p1 - v).normalize_or_zero(), (p2 - v).normalize_or_zero());
+    let theta = d1.dot(d2).clamp(-1.0, 1.0).acos();
+    if !(1e-6..std::f64::consts::PI - 1e-6).contains(&theta) || r <= mt_kernel::TOL {
+        return None;
+    }
+    let along = r / (theta / 2.0).tan();
+    if along >= v.distance(p1) - mt_kernel::TOL || along >= v.distance(p2) - mt_kernel::TOL {
+        return None;
+    }
+    let (t1, t2) = (v + d1 * along, v + d2 * along);
+    let center = v + (d1 + d2).normalize() * (r / (theta / 2.0).sin());
+    let n = (t1 - center).cross(t2 - center).normalize_or_zero();
+    if n == DVec3::ZERO {
+        return None;
+    }
+    let x = (t1 - center).normalize();
+    let sweep = angle_of(t2, center, x, n);
+    let arc = Arc {
+        center,
+        normal: n,
+        x_axis: x,
+        radius: r,
+        start_angle: 0.0,
+        end_angle: sweep,
+        segments: ARC_SEGMENTS,
+    };
+    Some((t1, t2, segments.apply(arc)))
 }
 
 /// Arc (center, start, end) or Pie (the same, closed with two radii into a face).
@@ -897,7 +1130,7 @@ pub struct CenterArc {
     pie: bool,
     center: Option<(DVec3, DVec3)>,
     start: Option<DVec3>,
-    segments: Option<usize>,
+    segments: ArcSegments,
     lock: PlaneLock,
 }
 
@@ -907,7 +1140,7 @@ impl CenterArc {
             pie,
             center: None,
             start: None,
-            segments: None,
+            segments: ArcSegments::default(),
             lock: PlaneLock::default(),
         }
     }
@@ -927,7 +1160,7 @@ impl CenterArc {
             radius: r,
             start_angle: 0.0,
             end_angle: sweep,
-            segments: self.segments.unwrap_or(ARC_SEGMENTS),
+            segments: self.segments.count(sweep),
         })
     }
 
@@ -1005,8 +1238,7 @@ impl DrawTool for CenterArc {
         text: &str,
         units: LengthUnit,
     ) -> bool {
-        if let Some(n) = parse_segments(text) {
-            self.segments = Some(n);
+        if self.segments.parse(text) {
             return false;
         }
         let Some(cur) = cur else { return false };
@@ -1030,6 +1262,7 @@ impl DrawTool for CenterArc {
                     return false;
                 };
                 a.end_angle = deg.to_radians().clamp(-TAU, TAU);
+                let a = self.segments.apply(a);
                 self.make(ents, a)
             }
             _ => false,
@@ -1067,12 +1300,17 @@ impl DrawTool for CenterArc {
         self.lock.face = normal;
         true
     }
+
+    fn step_segments(&mut self, more: bool) -> bool {
+        self.segments.step(more);
+        true
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct ThreePointArc {
     points: Vec<DVec3>,
-    segments: Option<usize>,
+    segments: ArcSegments,
 }
 
 impl DrawTool for ThreePointArc {
@@ -1090,10 +1328,7 @@ impl DrawTool for ThreePointArc {
     }
 
     fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
-        (
-            "Segments",
-            self.segments.unwrap_or(ARC_SEGMENTS).to_string(),
-        )
+        ("Segments", self.segments.label())
     }
 
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
@@ -1107,12 +1342,9 @@ impl DrawTool for ThreePointArc {
             }
             return false;
         }
-        let Some(arc) = arc_three_points(
-            self.points[0],
-            self.points[1],
-            inf.point,
-            self.segments.unwrap_or(ARC_SEGMENTS),
-        ) else {
+        let Some(arc) = arc_three_points(self.points[0], self.points[1], inf.point, ARC_SEGMENTS)
+            .map(|a| self.segments.apply(a))
+        else {
             return false;
         };
         add_curve(ents, &arc.points(), Some(arc));
@@ -1127,10 +1359,10 @@ impl DrawTool for ThreePointArc {
         text: &str,
         _units: LengthUnit,
     ) -> bool {
-        if let Some(n) =
-            parse_segments(text).or_else(|| text.trim().parse().ok().filter(|n: &usize| *n >= 2))
+        if !self.segments.parse(text)
+            && let Some(n) = text.trim().parse().ok().filter(|n: &usize| *n >= 2)
         {
-            self.segments = Some(n);
+            self.segments.parse(&format!("{n}s"));
         }
         false
     }
@@ -1139,7 +1371,9 @@ impl DrawTool for ThreePointArc {
         match self.points[..] {
             [a] => vec![vec![a, cur.point]],
             [a, b] => {
-                match arc_three_points(a, b, cur.point, self.segments.unwrap_or(ARC_SEGMENTS)) {
+                match arc_three_points(a, b, cur.point, ARC_SEGMENTS)
+                    .map(|x| self.segments.apply(x))
+                {
                     Some(arc) => vec![arc.points()],
                     None => vec![vec![a, b, cur.point]],
                 }
@@ -1151,14 +1385,31 @@ impl DrawTool for ThreePointArc {
     fn cancel(&mut self) {
         self.points.clear();
     }
+
+    fn step_segments(&mut self, more: bool) -> bool {
+        self.segments.step(more);
+        true
+    }
 }
 
 // ------------------------------------------------------------------ Freehand
 
-/// Press and drag to draw a free-form curve.
-#[derive(Debug, Default)]
+/// Press and drag to draw a free-form curve. Ctrl+plus / minus make the points
+/// closer or farther apart (finer or coarser curves; what SketchUp's Ctrl+/- changes
+/// in Freehand is unverified).
+#[derive(Debug)]
 pub struct Freehand {
     points: Vec<DVec3>,
+    step: f64,
+}
+
+impl Default for Freehand {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            step: FREEHAND_STEP,
+        }
+    }
 }
 
 /// Minimum spacing between freehand points, in inches (draft).
@@ -1170,7 +1421,10 @@ impl DrawTool for Freehand {
     }
 
     fn status(&self) -> String {
-        "Click and drag to draw.".into()
+        format!(
+            "Click and drag to draw. Ctrl+plus / minus: finer or coarser ({:.2}\" spacing).",
+            self.step
+        )
     }
 
     fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
@@ -1206,7 +1460,7 @@ impl DrawTool for Freehand {
         if self
             .points
             .last()
-            .is_some_and(|p| p.distance(inf.point) >= FREEHAND_STEP)
+            .is_some_and(|p| p.distance(inf.point) >= self.step)
         {
             self.points.push(inf.point);
         }
@@ -1221,17 +1475,65 @@ impl DrawTool for Freehand {
         add_curve(ents, &pts, None);
         true
     }
+
+    fn step_segments(&mut self, more: bool) -> bool {
+        self.step = if more {
+            self.step / 2.0
+        } else {
+            self.step * 2.0
+        }
+        .clamp(0.05, 8.0);
+        true
+    }
 }
 
 // ------------------------------------------------------------------ Tape Measure
 
+/// What the Tape Measure makes at its second click; Ctrl cycles the modes (SketchUp
+/// 2026.1 [doc]: Guide Line, Guide Point, Measure; the order and the status text are
+/// unverified).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TapeMode {
+    /// A guide line parallel to the edge it started on, else a guide point.
+    #[default]
+    GuideLine,
+    /// Always a guide point at the end.
+    GuidePoint,
+    /// Only measures.
+    Measure,
+}
+
+impl TapeMode {
+    fn next(self) -> Self {
+        match self {
+            Self::GuideLine => Self::GuidePoint,
+            Self::GuidePoint => Self::Measure,
+            Self::Measure => Self::GuideLine,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GuideLine => "Guide Line",
+            Self::GuidePoint => "Guide Point",
+            Self::Measure => "Measure",
+        }
+    }
+}
+
 /// Measures between two points. Started on an edge it makes a guide line parallel to the
-/// edge through the end point; otherwise a guide point at the end. Typing a distance
-/// places the guide that far away (perpendicular to the edge, or towards the cursor).
+/// edge through the end point; otherwise a guide point at the end (see [`TapeMode`]).
+/// Typing a distance places the guide that far away (perpendicular to the edge, or
+/// towards the cursor); typed after a measurement, it rescales the model by the
+/// ratio (the app asks first). A double click drops a guide point.
 #[derive(Debug, Default)]
 pub struct TapeMeasure {
     /// Start point and, when started on an edge, the edge direction.
     start: Option<(DVec3, Option<DVec3>)>,
+    mode: TapeMode,
+    /// The last measured length, which a typed length rescales.
+    last: Option<f64>,
+    rescale: Option<(f64, f64)>,
 }
 
 impl TapeMeasure {
@@ -1251,18 +1553,21 @@ impl DrawTool for TapeMeasure {
     }
 
     fn status(&self) -> String {
-        if self.start.is_some() {
+        let step = if self.start.is_some() {
             "Select second point to measure or create a guide."
+        } else if self.last.is_some() {
+            "Select first point, or type a length to resize the model."
         } else {
             "Select first point."
-        }
-        .into()
+        };
+        format!("{step} Ctrl = mode ({}).", self.mode.label())
     }
 
     fn measurement(&self, cur: Option<&Inference>, units: LengthUnit) -> (&'static str, String) {
         let v = cur
             .and_then(|c| self.offset(c.point))
-            .map(|o| units.format(o.length()));
+            .map(|o| units.format(o.length()))
+            .or_else(|| self.last.map(|l| units.format(l)));
         ("Length", v.unwrap_or_default())
     }
 
@@ -1276,10 +1581,17 @@ impl DrawTool for TapeMeasure {
             self.start = Some((inf.point, dir));
             return false;
         };
+        let measured = self.offset(inf.point).map_or(0.0, |o| o.length());
         self.start = None;
         if s.distance(inf.point) <= mt_kernel::TOL {
             return false;
         }
+        self.last = (measured > mt_kernel::TOL).then_some(measured);
+        let dir = match self.mode {
+            TapeMode::GuideLine => dir,
+            TapeMode::GuidePoint => None,
+            TapeMode::Measure => return false,
+        };
         ents.guides.push(mt_kernel::Guide {
             point: inf.point,
             dir,
@@ -1294,7 +1606,18 @@ impl DrawTool for TapeMeasure {
         text: &str,
         units: LengthUnit,
     ) -> bool {
-        let (Some(c), Some(d)) = (cur, parse_length(text, units)) else {
+        let Some(d) = parse_length(text, units) else {
+            return false;
+        };
+        if self.start.is_none() {
+            if let Some(m) = self.last
+                && d > mt_kernel::TOL
+            {
+                self.rescale = Some((m, d));
+            }
+            return false;
+        }
+        let Some(c) = cur else {
             return false;
         };
         let (Some((s, _)), Some(away)) = (self.start, self.offset(c.point)) else {
@@ -1317,6 +1640,24 @@ impl DrawTool for TapeMeasure {
 
     fn cancel(&mut self) {
         self.start = None;
+    }
+
+    fn toggle_ctrl(&mut self) {
+        self.mode = self.mode.next();
+    }
+
+    fn double_click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        // The double click's two clicks measured nothing: drop a guide point.
+        self.start = None;
+        ents.guides.push(mt_kernel::Guide {
+            point: inf.point,
+            dir: None,
+        });
+        true
+    }
+
+    fn take_rescale(&mut self) -> Option<(f64, f64)> {
+        self.rescale.take()
     }
 }
 
@@ -1695,10 +2036,8 @@ impl TextLabel {
     }
 
     /// The default text for a click at `inf`: an edge's (or its curve's) length, a
-    /// face's area, a point's coordinates; `None` on empty space.
-    ///
-    /// SketchUp shows a component's name on components; here a click on a component
-    /// gives the coordinates (unverified formats throughout).
+    /// face's area, a point's coordinates; `None` on empty space. A click on a group
+    /// or component gives its name instead (see [`TextTool`]; formats unverified).
     pub fn at(ents: &Entities, inf: &Inference) -> Option<Self> {
         use mt_infer::Kind;
         Some(match inf.kind {
@@ -1775,6 +2114,10 @@ pub struct TextTool {
     /// The leader's point and the default label, waiting for the label position.
     anchor: Option<(DVec3, TextLabel)>,
     draft: Option<TextDraft>,
+    /// The group's or component's name under the cursor: a leader pointing at a
+    /// component says its name by default [doc].
+    instance_name: Option<String>,
+    units: Option<LengthUnit>,
 }
 
 impl TextTool {
@@ -1824,7 +2167,11 @@ impl DrawTool for TextTool {
             });
             return false;
         }
-        match TextLabel::at(ents, inf) {
+        let label = match (inf.container, &self.instance_name) {
+            (Some(_), Some(name)) => Some(TextLabel::Plain(name.clone())),
+            _ => TextLabel::at(ents, inf),
+        };
+        match label {
             Some(label) => self.anchor = Some((inf.point, label)),
             None => {
                 self.draft = Some(TextDraft {
@@ -1876,6 +2223,36 @@ impl DrawTool for TextTool {
 
     fn finish_text(&mut self, ents: &mut Entities) -> bool {
         self.finish(ents)
+    }
+
+    fn hover(&mut self, h: &DrawHover) {
+        self.instance_name = h.instance_name.clone();
+        self.units = Some(h.units);
+    }
+
+    /// A double click on a face: a text with the face's area at the point, without a
+    /// leader [doc] (no leader and no arrow is how it is drawn here; unverified).
+    fn double_click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        let Some(d) = self.draft.as_ref() else {
+            return false;
+        };
+        let TextLabel::Area(area) = d.label else {
+            return false;
+        };
+        if d.text.screen || d.text.leader.length() > mt_kernel::TOL {
+            return false;
+        }
+        self.draft = None;
+        ents.texts.push(mt_kernel::Text {
+            leader_style: mt_kernel::LeaderStyle::Hidden,
+            arrow: mt_kernel::ArrowStyle::None,
+            ..mt_kernel::Text::leader(
+                inf.point,
+                DVec3::ZERO,
+                crate::annot::area_label(area, self.units.unwrap_or(LengthUnit::Inch)),
+            )
+        });
+        true
     }
 }
 

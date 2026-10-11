@@ -36,7 +36,7 @@ pub mod transform;
 pub mod validate;
 pub mod visibility;
 
-pub use annotation::{Dimension, DimensionKind, Text};
+pub use annotation::{ArrowStyle, Dimension, DimensionKind, LeaderStyle, Text, TextPosition};
 pub use entities::*;
 pub use follow_me::follow_me;
 pub use intersect::intersect_faces;
@@ -44,7 +44,7 @@ pub use model::{
     Definition, DefinitionAttrs, FaceStyle, FogSettings, GlueTo, Layer, Material, Model, Page,
     ShadowSettings, StyleSettings,
 };
-pub use offset::offset_face;
+pub use offset::{offset_face, offset_face_overlapping};
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};
 pub use push_pull::push_pull;
 pub use solid::{SolidError, SolidInput, is_solid};

@@ -19,6 +19,40 @@ pub enum DimensionKind {
     Diameter,
 }
 
+/// Where a linear dimension's label sits along its dimension line (context menu Text
+/// Position).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextPosition {
+    /// Outside the start (`a`) end of the dimension line.
+    OutsideStart,
+    #[default]
+    Center,
+    /// Outside the end (`b`) end of the dimension line.
+    OutsideEnd,
+}
+
+/// A leader text's arrowhead (context menu Arrow; SketchUp's default is Closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArrowStyle {
+    None,
+    Dot,
+    #[default]
+    Closed,
+    Open,
+}
+
+/// A leader text's leader (context menu Leader; SketchUp's default is Pushpin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeaderStyle {
+    /// The label keeps its screen offset from the point as the view turns
+    /// (drawn like Pushpin here; unverified).
+    ViewBased,
+    #[default]
+    Pushpin,
+    /// No leader line: only the label.
+    Hidden,
+}
+
 /// A dimension between two points.
 ///
 /// Linear: extension lines run from `a` and `b` to `a + offset` and `b + offset`, and
@@ -33,6 +67,8 @@ pub struct Dimension {
     pub text: Option<String>,
     pub kind: DimensionKind,
     pub hidden: bool,
+    /// Label position along a linear dimension's line. Not saved in .skp.
+    pub text_position: TextPosition,
 }
 
 impl Dimension {
@@ -44,6 +80,7 @@ impl Dimension {
             text: None,
             kind: DimensionKind::Linear,
             hidden: false,
+            text_position: TextPosition::Center,
         }
     }
 
@@ -64,7 +101,16 @@ impl Dimension {
     /// leader of a radial dimension.
     pub fn label_point(&self) -> DVec3 {
         match self.kind {
-            DimensionKind::Linear => (self.a + self.b) / 2.0 + self.offset,
+            DimensionKind::Linear => {
+                // Outside an end: a fifth of the length beyond it (unverified).
+                let out = (self.b - self.a) * 0.2;
+                let at = match self.text_position {
+                    TextPosition::Center => (self.a + self.b) / 2.0,
+                    TextPosition::OutsideStart => self.a - out,
+                    TextPosition::OutsideEnd => self.b + out,
+                };
+                at + self.offset
+            }
             DimensionKind::Radius | DimensionKind::Diameter => self.b + self.offset,
         }
     }
@@ -77,6 +123,12 @@ impl Dimension {
         match self.kind {
             DimensionKind::Linear => {
                 let mut out = vec![[p, q]];
+                // A label outside an end sits on the dimension line extended to it.
+                match self.text_position {
+                    TextPosition::Center => {}
+                    TextPosition::OutsideStart => out.push([p, self.label_point()]),
+                    TextPosition::OutsideEnd => out.push([q, self.label_point()]),
+                }
                 let len = self.offset.length();
                 if len > crate::TOL {
                     let over = self.offset / len * overshoot;
@@ -116,6 +168,9 @@ pub struct Text {
     pub text: String,
     pub screen: bool,
     pub hidden: bool,
+    /// Arrowhead and leader styles (leader texts). Not saved in .skp.
+    pub arrow: ArrowStyle,
+    pub leader_style: LeaderStyle,
 }
 
 impl Text {
@@ -126,6 +181,8 @@ impl Text {
             text,
             screen: false,
             hidden: false,
+            arrow: ArrowStyle::default(),
+            leader_style: LeaderStyle::default(),
         }
     }
 
@@ -136,6 +193,8 @@ impl Text {
             text,
             screen: true,
             hidden: false,
+            arrow: ArrowStyle::default(),
+            leader_style: LeaderStyle::default(),
         }
     }
 }

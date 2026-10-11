@@ -54,6 +54,9 @@ pub(crate) const COMMANDS: &[&str] = &[
 #[derive(Default)]
 pub(crate) struct ContextMenu {
     pending: Option<String>,
+    /// The last right click was on the drawing axes (empty selection): the axes'
+    /// menu (Place, Move, Reset, Hide).
+    axes: bool,
 }
 
 /// What the selection holds, for building the menu and greying items.
@@ -76,6 +79,10 @@ struct Facts {
     skewed: bool,
     hidden_geometry_shown: bool,
     context_open: bool,
+    /// The items of `context_extra`.
+    extra: crate::context_extra::ExtraFacts,
+    /// Right click on the drawing axes.
+    axes: bool,
 }
 
 impl Facts {
@@ -128,8 +135,16 @@ impl Facts {
     }
 
     fn enabled(&self, id: &str) -> bool {
+        if let Some(e) = self.extra.enabled(id) {
+            return e;
+        }
         let any = self.geometry() || !self.instances.is_empty();
+        // Section planes, dimensions and texts can be erased, hidden and zoomed to.
+        let annotation = !self.extra.sections.is_empty()
+            || !self.extra.dims.is_empty()
+            || !self.extra.texts.is_empty();
         match id {
+            "edit.delete" | "edit.hide" | "camera.zoom_selection" if annotation => true,
             "edit.select_connected_faces" | "edit.select_all_connected" => self.geometry(),
             "edit.select_bounding_edges" | "edit.deselect_faces" => !self.faces.is_empty(),
             "edit.deselect_edges" => !self.edges.is_empty(),
@@ -206,6 +221,14 @@ fn sep() -> MenuItem {
 
 /// The menu for a selection with `f` (empty: the empty-space menu).
 fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
+    if empty && f.axes {
+        return vec![
+            cmd("view.axes_place", "Place"),
+            cmd("view.axes_move", "Move..."),
+            cmd("view.axes_reset", "Reset"),
+            cmd("view.axes_hide", "Hide"),
+        ];
+    }
     if empty {
         return vec![
             cmd("edit.select_all", "Select All"),
@@ -255,12 +278,75 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
         v.push(cmd("edit.divide", "Divide"));
         v.push(cmd("edit.weld_edges", "Weld Edges"));
         v.push(cmd("edit.explode_curve", "Explode Curve"));
+        if f.extra.curves {
+            v.push(cmd("edit.find_center", "Find Center"));
+            v.push(cmd("edit.convert_to_polygon", "Convert to Polygon"));
+        }
+    }
+    let x = &f.extra;
+    if !x.sections.is_empty() {
+        v.push(cmd("edit.section_active", "Active Cut"));
+        v.push(cmd("edit.section_reverse", "Reverse"));
+        v.push(cmd("camera.align_view", "Align View"));
+        v.push(cmd("edit.section_slice_group", "Create Group from Slice"));
+        v.push(cmd(
+            "edit.section_troubleshoot",
+            "Troubleshoot Section Fill",
+        ));
+    }
+    if !x.dims.is_empty() {
+        v.push(sub(
+            "Text Position",
+            vec![
+                cmd("edit.dim_text_start", "Outside Start"),
+                cmd("edit.dim_text_center", "Center"),
+                cmd("edit.dim_text_end", "Outside End"),
+            ],
+        ));
+        if x.radial {
+            v.push(sub(
+                "Type",
+                vec![
+                    cmd("edit.dim_type_radius", "Radius"),
+                    cmd("edit.dim_type_diameter", "Diameter"),
+                ],
+            ));
+        }
+    }
+    if x.leader {
+        v.push(sub(
+            "Arrow",
+            vec![
+                cmd("edit.text_arrow_none", "None"),
+                cmd("edit.text_arrow_dot", "Dot"),
+                cmd("edit.text_arrow_closed", "Closed"),
+                cmd("edit.text_arrow_open", "Open"),
+            ],
+        ));
+        v.push(sub(
+            "Leader",
+            vec![
+                cmd("edit.text_leader_view", "View Based"),
+                cmd("edit.text_leader_pushpin", "Pushpin"),
+                cmd("edit.text_leader_hidden", "Hidden"),
+            ],
+        ));
     }
     v.push(sep());
     if !f.instances.is_empty() {
         v.push(cmd("edit.reset_scale", "Reset Scale"));
         v.push(cmd("edit.reset_skew", "Reset Skew"));
         v.push(cmd("edit.scale_definition", "Scale Definition"));
+    }
+    if f.component {
+        v.push(cmd("edit.change_axes", "Change Axes"));
+        if x.glued {
+            v.push(cmd("edit.unglue", "Unglue"));
+        }
+        v.push(cmd("edit.component_reload", "Reload..."));
+        v.push(cmd("edit.component_save_as", "Save As..."));
+        v.push(cmd("edit.select_instances", "Select Instances"));
+        v.push(cmd("edit.replace_selected", "Replace Selected"));
     }
     v.push(cmd("edit.make_component", "Make Component..."));
     v.push(cmd("edit.create_group", "Make Group"));
@@ -276,11 +362,25 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
         v.push(cmd("edit.reverse_faces", "Reverse Faces"));
         v.push(cmd("edit.orient_faces", "Orient Faces"));
         if f.faces.len() == 1 {
-            v.push(sub(
-                "Texture",
-                vec![cmd("tool.texture_position", "Position")],
-            ));
+            v.push(cmd("camera.align_view", "Align View"));
+            v.push(cmd("edit.align_axes", "Align Axes"));
         }
+    }
+    if !f.faces.is_empty() || !f.instances.is_empty() {
+        v.push(sub(
+            "Area",
+            vec![
+                cmd("edit.area_selection", "Selection"),
+                cmd("edit.area_tag", "Tag"),
+                cmd("edit.area_material", "Material"),
+            ],
+        ));
+    }
+    if f.faces.len() == 1 {
+        v.push(sub(
+            "Texture",
+            vec![cmd("tool.texture_position", "Position")],
+        ));
     }
     if !f.instances.is_empty() {
         let whose = if f.group && !f.component {
@@ -303,6 +403,51 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
     }
     v.push(cmd("camera.zoom_selection", "Zoom Selection"));
     v
+}
+
+/// Every item the right-click menus can show, for Help > Search: (id, label,
+/// submenu path).
+pub(crate) fn all_items() -> Vec<(String, String, String)> {
+    let full = Facts {
+        faces: vec![FaceId::default()],
+        edges: vec![EdgeId::default()],
+        instances: vec![0],
+        component: true,
+        group: true,
+        extra: crate::context_extra::ExtraFacts {
+            curves: true,
+            sections: vec![0],
+            dims: vec![0],
+            radial: true,
+            leader: true,
+            glued: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let axes = Facts {
+        axes: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    fn walk(items: &[MenuItem], path: &str, out: &mut Vec<(String, String, String)>) {
+        for i in items {
+            match i {
+                MenuItem::Command { id, label } => {
+                    if !out.iter().any(|(x, _, _)| x == id) {
+                        out.push((id.clone(), label.clone(), path.to_owned()));
+                    }
+                }
+                MenuItem::Submenu { label, items } => {
+                    walk(items, &format!("{path} > {label}"), out)
+                }
+                MenuItem::Separator { .. } => {}
+            }
+        }
+    }
+    walk(&menu(&full, false), "Context menu", &mut out);
+    walk(&menu(&axes, true), "Context menu > Axes", &mut out);
+    out
 }
 
 /// Bounds of the selected entities as drawn (world space).
@@ -486,12 +631,15 @@ impl App {
                 (None, _) => self.select(device, Mode::Replace, Vec::new()),
                 _ => {}
             }
+            self.ctx_menu.axes = hit.is_none() && self.near_axes(cursor, viewport_px);
         }
         let Some(doc) = &self.document else {
             return;
         };
         let items = self.selection.items().to_vec();
-        let facts = Facts::of(doc, &items);
+        let mut facts = Facts::of(doc, &items);
+        facts.extra = self.extra_facts(doc);
+        facts.axes = self.ctx_menu.axes;
         let list = menu(&facts, items.is_empty());
         let spec = &self.spec;
         let mut picked = None;
@@ -502,6 +650,28 @@ impl App {
         if picked.is_some() {
             self.ctx_menu.pending = picked;
         }
+    }
+
+    /// The cursor (viewport pixels) is within a few pixels of a drawn axis line.
+    fn near_axes(&self, cursor: DVec2, viewport_px: DVec2) -> bool {
+        let Some(doc) = &self.document else {
+            return false;
+        };
+        if !doc.model.style.axes {
+            return false;
+        }
+        let a = crate::model_axes::axes_of(doc.model.axes);
+        let len = self.camera.distance() * 0.5;
+        let o = self.camera.project(a.origin, viewport_px);
+        a.dirs.iter().any(|d| {
+            let (Some(p), Some(q)) = (o, self.camera.project(a.origin + *d * len, viewport_px))
+            else {
+                return false;
+            };
+            let pq = q - p;
+            let t = ((cursor - p).dot(pq) / pq.length_squared().max(1e-9)).clamp(0.0, 1.0);
+            (p + pq * t).distance(cursor) <= 6.0
+        })
     }
 
     /// Runs the command picked in the context menu (after the shell is drawn).

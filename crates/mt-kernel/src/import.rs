@@ -334,9 +334,12 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             hidden: e.hidden,
             layer: None,
             curve: e.curve_id.map(|c| {
-                *curves
-                    .entry(c)
-                    .or_insert_with(|| ents.curves.insert(crate::entities::Curve { arc: None }))
+                *curves.entry(c).or_insert_with(|| {
+                    ents.curves.insert(crate::entities::Curve {
+                        arc: None,
+                        polygon: false,
+                    })
+                })
             }),
         };
         edges.insert(id, ents.add_raw_edge(a, b, attrs));

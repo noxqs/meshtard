@@ -8,7 +8,7 @@
 
 use glam::{DMat4, DVec2, DVec3};
 use mt_infer::units::LengthUnit;
-use mt_kernel::{Dimension, DimensionKind, Entities};
+use mt_kernel::{ArrowStyle, Dimension, DimensionKind, Entities};
 use mt_render::Segment;
 
 use crate::document::{Document, Owner, Scene};
@@ -43,6 +43,9 @@ pub struct Annotation {
     pub arrows: Vec<[DVec3; 2]>,
     /// The point a leader text points at.
     pub dot: Option<DVec3>,
+    /// Arrowheads drawn as open V shapes instead of filled ones (leader text Arrow >
+    /// Open).
+    pub open: bool,
 }
 
 fn trim_number(v: f64) -> String {
@@ -150,6 +153,7 @@ fn add(
             at: Anchor::World(w(d.label_point())),
             arrows,
             dot: None,
+            open: false,
         });
     }
     for (i, t) in ents.texts.iter().enumerate() {
@@ -157,23 +161,74 @@ fn add(
             continue;
         }
         let owner = owned.then_some(Owner::Text(i));
+        let has_leader = !t.screen
+            && t.leader.length() > mt_kernel::TOL
+            && t.leader_style != mt_kernel::LeaderStyle::Hidden;
         let at = if t.screen {
             Anchor::Screen(t.point.truncate())
         } else {
-            if t.leader.length() > mt_kernel::TOL {
+            if has_leader {
                 line(t.point, t.point + t.leader, owner);
             }
             Anchor::World(w(t.point + t.leader))
         };
+        let head = |style| has_leader && t.arrow == style;
+        let arrows = if head(ArrowStyle::Closed) || head(ArrowStyle::Open) {
+            vec![[w(t.point), w(t.point + t.leader)]]
+        } else {
+            Vec::new()
+        };
         labels.push(Annotation {
             owner,
-            text: t.text.clone(),
+            text: live_text(ents, t, units),
             at,
-            arrows: Vec::new(),
-            dot: (!t.screen).then(|| w(t.point)),
+            arrows,
+            dot: head(ArrowStyle::Dot).then(|| w(t.point)),
+            open: t.arrow == ArrowStyle::Open,
         });
     }
     scene.annotations.extend(labels);
+}
+
+/// The placeholder in a text that shows the measured value of what the leader points
+/// at, kept up to date (`Width: <>`). From the SketchUp 2025 release notes as
+/// summarised in HELP_COMPARISON.md; the exact behaviour is unverified.
+pub const LIVE_VALUE: &str = "<>";
+
+/// A text's label with [`LIVE_VALUE`] replaced by the current value at its point.
+pub fn live_text(ents: &Entities, t: &mt_kernel::Text, units: LengthUnit) -> String {
+    if t.screen || !t.text.contains(LIVE_VALUE) {
+        return t.text.clone();
+    }
+    t.text
+        .replace(LIVE_VALUE, &live_value(ents, t.point, units))
+}
+
+/// What a leader at `p` measures now: the length of the edge (or its whole curve)
+/// through `p`, else the area of the face under `p`, else `p`'s coordinates.
+pub fn live_value(ents: &Entities, p: DVec3, units: LengthUnit) -> String {
+    let on_edge = ents.edges.iter().find(|(_, e)| {
+        let (a, b) = (ents.pos(e.start), ents.pos(e.end));
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        (a + ab * t).distance(p) <= 1e-6
+    });
+    if let Some((id, e)) = on_edge {
+        let len = |e: &mt_kernel::Edge| ents.pos(e.start).distance(ents.pos(e.end));
+        let total = match e.attrs.curve {
+            Some(c) => ents
+                .curve_edges(c)
+                .iter()
+                .map(|&x| len(&ents.edges[x]))
+                .sum(),
+            None => len(&ents.edges[id]),
+        };
+        return units.format(total);
+    }
+    if let Some(f) = ents.faces.keys().find(|&f| ents.face_contains(f, p)) {
+        return area_label(crate::tools::face_area(ents, f), units);
+    }
+    point_label(p, units)
 }
 
 /// Removes the dimensions and texts among `items` from `ents`.
@@ -309,11 +364,17 @@ pub fn paint(
             }
             let side = egui::vec2(-dir.y, dir.x) * ARROW.1;
             let base = t + dir * ARROW.0;
-            painter.add(egui::Shape::convex_polygon(
-                vec![t, base + side, base - side],
-                color,
-                egui::Stroke::NONE,
-            ));
+            if a.open {
+                let stroke = egui::Stroke::new(1.0, color);
+                painter.line_segment([t, base + side * 1.4], stroke);
+                painter.line_segment([t, base - side * 1.4], stroke);
+            } else {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![t, base + side, base - side],
+                    color,
+                    egui::Stroke::NONE,
+                ));
+            }
         }
         if let Some(p) = a.dot.and_then(to_screen) {
             painter.circle_filled(p, 2.5, color);

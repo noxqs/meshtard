@@ -52,6 +52,10 @@ impl App {
     /// The Axes tool finished with `local` (open-context space): sets the model's
     /// axes and goes back to Select.
     pub(crate) fn set_model_axes(&mut self, local: DMat4, device: &wgpu::Device) {
+        // Context menu > Change Axes uses the same tool for a component's axes.
+        if self.finish_change_axes(local, device) {
+            return;
+        }
         self.modify = None;
         self.tool = Tool::Select;
         self.engine.unlock();

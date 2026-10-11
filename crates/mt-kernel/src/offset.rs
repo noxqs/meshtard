@@ -93,6 +93,35 @@ pub fn offset_face(ents: &mut Entities, face: FaceId, distance: f64) -> Vec<Edge
     before.added_on(ents, &segments)
 }
 
+/// Offset with Alt held (SketchUp: "allow overlap"): every loop's raw offset is added
+/// as it is, without trimming where it crosses itself or other loops, so offsets
+/// that overlap stay. Arc pieces are added as straight segments of the concentric
+/// polyline. Returns the new edges (empty when nothing was added).
+pub fn offset_face_overlapping(ents: &mut Entities, face: FaceId, distance: f64) -> Vec<EdgeId> {
+    if !ents.faces.contains_key(face) || distance.abs() <= TOL || !distance.is_finite() {
+        return Vec::new();
+    }
+    ents.ensure_index();
+    let plane = ents.face_plane(face);
+    let Some(input) = face_loops(ents, face, &plane) else {
+        return Vec::new();
+    };
+    let segments: Vec<(DVec3, DVec3)> = input
+        .iter()
+        .flat_map(|l| raw_offset(&plane, l, distance))
+        .filter(|s| s.a.distance(s.b) > TOL)
+        .map(|s| (lift(&plane, s.a), lift(&plane, s.b)))
+        .collect();
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let before = EdgeSnapshot::near(ents, &segments);
+    for &(a, b) in &segments {
+        add_line(ents, a, b);
+    }
+    before.added_on(ents, &segments)
+}
+
 /// A 2D segment.
 type Seg2 = (DVec2, DVec2);
 

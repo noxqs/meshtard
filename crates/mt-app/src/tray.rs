@@ -559,7 +559,7 @@ impl App {
 
 /// Component definitions in Components panel order (groups and images are not
 /// listed).
-fn component_definitions(m: &Model) -> Vec<mt_kernel::DefinitionId> {
+pub(crate) fn component_definitions(m: &Model) -> Vec<mt_kernel::DefinitionId> {
     m.definitions
         .iter()
         .filter(|(_, d)| !d.is_group && !d.is_image)

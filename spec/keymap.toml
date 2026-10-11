@@ -23,6 +23,7 @@ verified = false
 "camera.zoom" = "Z"
 "camera.zoom_window" = "Ctrl+Shift+W"
 "camera.zoom_extents" = "Shift+Z"
+"help.search" = "Shift+S"
 "view.anim_previous" = "PageUp"
 "view.anim_next" = "PageDown"
 "tool.select" = "Space"

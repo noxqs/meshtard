@@ -1,13 +1,14 @@
 //! Click tools that act on whole entities picked in the view: the Solid Tools (click
 //! the first solid, then the second) and the Tag tool (click entities to move them to
-//! the active tag; Alt+click samples an entity's tag).
+//! the active tag; Alt+click samples an entity's tag, Shift+click replaces the tag of
+//! every entity tagged like the clicked one, Ctrl+click tags every instance of the
+//! clicked component; help page "Controlling visibility with tags" [doc]).
 //!
 //! Unverified against SketchUp 2026: the cursor feedback (a 1 / 2 badge for the pick
 //! and a circle-slash badge over non-solids, see `cursor.rs`, plus a label by the
-//! cursor that SketchUp may not show), the Tag
-//! tool's keys (Alt to sample is from memory of the 2025 Tag tool; Ctrl, said to keep
-//! the selection, is not done) and that a click on a selected entity tags the whole
-//! selection (as the Paint Bucket does).
+//! cursor that SketchUp may not show), Alt to sample (from memory of the 2025 Tag
+//! tool), how far Replace All reaches (here the open context), and that a click on a
+//! selected entity tags the whole selection (as the Paint Bucket does).
 
 use eframe::egui;
 use egui_wgpu::wgpu;
@@ -87,6 +88,28 @@ pub fn tag_entities(ents: &mut Entities, items: &[Owner], layer: Option<usize>) 
     changed
 }
 
+/// Tag tool with Ctrl: every unlocked instance of `def` in the model gets `layer`.
+pub fn tag_all_instances(
+    model: &mut mt_kernel::Model,
+    def: mt_kernel::DefinitionId,
+    layer: Option<usize>,
+) -> bool {
+    let mut changed = false;
+    let mut fix = |ents: &mut Entities| {
+        for i in &mut ents.instances {
+            if i.definition == def && !i.locked && i.layer != layer {
+                i.layer = layer;
+                changed = true;
+            }
+        }
+    };
+    fix(&mut model.root);
+    for d in model.definitions.values_mut() {
+        fix(&mut d.entities);
+    }
+    changed
+}
+
 /// The tag of `o` (0 for Untagged), for sampling.
 pub fn tag_of(ents: &Entities, o: Owner) -> Option<usize> {
     match o {
@@ -152,7 +175,7 @@ impl App {
                         }
                     });
                 format!(
-                    "Click entities to move them to tag \"{name}\". Alt+click samples an entity's tag."
+                    "Click entities to move them to tag \"{name}\". Alt = sample, Shift = replace all with the clicked tag, Ctrl = all instances."
                 )
             }
         }
@@ -195,7 +218,8 @@ impl App {
             )
         });
         let clicked = response.clicked_by(egui::PointerButton::Primary);
-        let alt = ui.input(|i| i.modifiers.alt);
+        let (alt, shift, ctrl) =
+            ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.modifiers.command));
         let Some(doc) = self.document.as_mut() else {
             return;
         };
@@ -264,12 +288,27 @@ impl App {
                     }
                     return;
                 }
-                let items = if self.selection.contains(&o) {
+                let layer = (self.active_tag > 0).then_some(self.active_tag);
+                // Ctrl: every instance of the clicked component, anywhere [doc].
+                if ctrl && let Owner::Instance(i) = o {
+                    let def = doc.active().instances.get(i).map(|x| x.definition);
+                    if let Some(def) = def
+                        && doc.edit_whole(|m| tag_all_instances(m, def, layer))
+                    {
+                        self.message = None;
+                        self.rebuild(device);
+                    }
+                    return;
+                }
+                let items = if shift {
+                    // Shift: Replace All, every entity with the clicked one's tag [doc]
+                    // (in the open context; unverified whether SketchUp goes deeper).
+                    crate::context_menu::same(doc.active(), &[o], false)
+                } else if self.selection.contains(&o) {
                     self.selection.items().to_vec()
                 } else {
                     vec![o]
                 };
-                let layer = (self.active_tag > 0).then_some(self.active_tag);
                 if doc.edit(|ents| tag_entities(ents, &items, layer)) {
                     self.message = None;
                     self.rebuild(device);
