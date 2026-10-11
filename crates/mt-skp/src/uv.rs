@@ -85,6 +85,22 @@ impl UvMapping {
         }
     }
 
+    /// Homogeneous texture coordinates of point `p`: `[u q, v q, q]` with `[u, v]`
+    /// what [`UvMapping::uv`] returns. All three are linear in `p` (on the face's
+    /// plane), so they interpolate exactly across a triangle where `u`, `v` do not
+    /// for a projective (distorted) mapping. `q` is 1 for affine mappings.
+    pub fn uvq(&self, p: [f64; 3]) -> [f64; 3] {
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (px, py) = (dot(p, self.xr), dot(p, self.yr));
+        let Some(inv) = self.inverse else {
+            return [px / self.tile[0], py / self.tile[1], 1.0];
+        };
+        let u = px * inv[0] + py * inv[3] + inv[6];
+        let v = px * inv[1] + py * inv[4] + inv[7];
+        let q = px * inv[2] + py * inv[5] + inv[8];
+        [u / self.tile[0], v / self.tile[1], q]
+    }
+
     /// UV of point `p` (inches, in the face's own definition space), in repeats.
     pub fn uv(&self, p: [f64; 3]) -> [f64; 2] {
         let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];

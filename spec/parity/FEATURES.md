@@ -141,9 +141,12 @@ Source: help.sketchup.com pages and the 2024.0-2026.2 release notes; the per-ite
 49. [ ] **Inference inside an open group or component** M (STATUS `missing`): magenta markers, "in group" tooltip; also On Section, Perpendicular to Face, Extend Edge.
 50. [ ] **Paint Bucket modes** S: Alt sample, Shift all matching, Ctrl all connected, Ctrl+Shift same object; Default material.
 51. [ ] **Divide; Weld Edges / Explode Curve** S-M: live division points, typed segment count or length.
-52. [ ] **Entity Info fields** M: visibility / lock / shadow toggles, instance name vs definition, advanced attributes, editable length / radius / segments, soft/smooth on edges, section plane name and symbol, text and dimension options.
-53. [ ] **Materials Edit tab** M: color wheel / RGB / HSL / HEX, texture load/replace, size with aspect lock, external editor.
-54. [ ] **Texture Position** L: pins (move, scale/rotate, shear, distort), flip/rotate/reset, free pins.
+52. [x] **Entity Info fields** M: visibility / lock / shadow toggles, instance name vs definition, advanced attributes, editable length / radius / segments, soft/smooth on edges, section plane name and symbol, text and dimension options.
+    Done: typed fields in `mt_ui::EntityInfo` (`InfoField`, `Event::EntityInfoEdit`), app side `crates/mt-app/src/entity_info.rs`, geometry edits in `mt_kernel::entity_edit`; each edit one undo step. Shadow flags and Advanced Attributes are stored only (renderer and .skp writer ignore them); text and dimension color, font and arrow are left out (the model has none).
+53. [x] **Materials Edit tab** M: color wheel / RGB / HSL / HEX, texture load/replace, size with aspect lock, external editor.
+    Done: `crates/mt-ui/src/panels.rs` Edit tab and `crates/mt-app/src/material_edit.rs` (`Event::MaterialTexture`); Wheel is egui's picker; PNG/JPEG only.
+54. [x] **Texture Position** L: pins (move, scale/rotate, shear, distort), flip/rotate/reset, free pins.
+    Done: command `tool.texture_position` (Tools menu, Materials Position Texture button; the face context menu's Texture > Position can run the same command id), `crates/mt-app/src/texture_position.rs`, pin math in `mt_kernel::texture` (`uv_from_pins`, `drag_pin`, `pin_action`); distorted mappings render perspective-correct (`FaceVertex::q`). Projected textures are not supported.
 
 ### M17: regular gaps (Medium)
 55. [ ] **Context items for curves, sections, text, axes, images** S-M: Find Center, Convert to Polygon, Align View / Align Axes, Area (selection / tag / material); section plane Reverse, Align View, Create Group from Slice, Troubleshoot Fill; dimension Text Position and Radius/Diameter type; leader Arrow and Leader style; axes Place / Move dialog / Reset; component Change Axes, Unglue, Save As, Reload, Select Instances, Replace Selected.

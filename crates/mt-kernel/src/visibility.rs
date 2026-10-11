@@ -156,6 +156,7 @@ mod tests {
             locked: false,
             layer: None,
             material: None,
+            attrs: Default::default(),
         }
     }
 

@@ -231,6 +231,7 @@ impl App {
                 locked: false,
                 layer: None,
                 material: None,
+                attrs: Default::default(),
             });
             placed = Some(active.instances.len() - 1);
             true

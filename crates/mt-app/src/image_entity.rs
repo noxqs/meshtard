@@ -115,6 +115,7 @@ impl PlaceImage {
                 locked: false,
                 layer: None,
                 material: None,
+                attrs: Default::default(),
             });
             vec![Owner::Instance(active.instances.len() - 1)]
         }));

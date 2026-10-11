@@ -122,6 +122,38 @@ pub struct FaceAttrs {
     /// Positioned texture mappings; `None` (the common case) when both sides use the
     /// default projection.
     pub uv: Option<Box<crate::texture::FaceUv>>,
+    /// Entity Info > Cast Shadows / Receive Shadows (both on by default). Stored only:
+    /// the renderer does not use them yet, and the .skp writer does not save them.
+    pub shadows: ShadowFlags,
+}
+
+/// SketchUp's per-entity "Cast Shadows" and "Receive Shadows" toggles (faces, groups
+/// and components).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowFlags {
+    pub cast: bool,
+    pub receive: bool,
+}
+
+impl Default for ShadowFlags {
+    fn default() -> Self {
+        Self {
+            cast: true,
+            receive: true,
+        }
+    }
+}
+
+/// Per-instance data shown in Entity Info that most code never touches: shadow
+/// toggles and the instance half of the Advanced Attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstanceAttrs {
+    pub shadows: ShadowFlags,
+    /// Advanced Attributes "Status" and "Owner" (stored on the instance; which of the
+    /// six attributes SketchUp keeps on the instance rather than the definition is
+    /// from memory, unverified).
+    pub status: String,
+    pub owner: String,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +188,8 @@ pub struct Instance {
     pub layer: Option<LayerId>,
     /// Paints faces of the definition that have no material of their own.
     pub material: Option<MaterialId>,
+    /// Shadow toggles and Advanced Attributes (Entity Info).
+    pub attrs: InstanceAttrs,
 }
 
 /// A collection of geometry: the model root or a component definition's contents.
@@ -189,6 +223,8 @@ pub struct SectionPlane {
     /// Unit normal.
     pub normal: DVec3,
     pub name: String,
+    /// Entity Info > Symbol: the short label drawn in the section plane's arrows.
+    pub symbol: String,
     pub hidden: bool,
 }
 

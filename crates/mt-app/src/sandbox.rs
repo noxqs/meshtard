@@ -60,6 +60,7 @@ pub fn group_edit(ents: Entities, transform: DMat4) -> ModelEdit {
             locked: false,
             layer: None,
             material: None,
+            attrs: Default::default(),
         });
         vec![Owner::Instance(active.instances.len() - 1)]
     })

@@ -9,6 +9,7 @@ pub mod bvh;
 pub mod clipboard;
 pub mod delaunay;
 pub mod entities;
+pub mod entity_edit;
 pub mod export;
 pub mod follow_me;
 pub mod geom;
@@ -37,8 +38,8 @@ pub use entities::*;
 pub use follow_me::follow_me;
 pub use intersect::intersect_faces;
 pub use model::{
-    Definition, FaceStyle, FogSettings, GlueTo, Layer, Material, Model, Page, ShadowSettings,
-    StyleSettings,
+    Definition, DefinitionAttrs, FaceStyle, FogSettings, GlueTo, Layer, Material, Model, Page,
+    ShadowSettings, StyleSettings,
 };
 pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};

@@ -14,8 +14,9 @@ use egui::{
 
 use crate::theme::Theme32;
 use crate::tray_data::{
-    FaceStyle, OutlinerKind, SelectMode, TrayData, component_edit, date_label, instances_label,
-    outliner_node, outliner_rows, time_label,
+    FaceStyle, OutlinerKind, SelectMode, TextureAction, TrayData, component_edit, date_label,
+    hex_color, hsl_to_rgb, instances_label, outliner_node, outliner_rows, parse_hex_color,
+    rgb_to_hsl, time_label,
 };
 use crate::{Event, Shell};
 
@@ -46,6 +47,34 @@ pub(crate) struct TrayUi {
     component_name: String,
     component_description: String,
     component_fields_of: Option<usize>,
+    /// Entity Info text field being edited: field key and text.
+    pub(crate) info_edit: Option<(String, String)>,
+    /// Entity Info number field being dragged: field key and value.
+    pub(crate) info_drag: Option<(String, i64)>,
+    /// Materials Edit tab: color picker page.
+    color_mode: ColorMode,
+    /// The HSL fields' values and the color they were last set to (keeps the hue of
+    /// grays while editing).
+    material_hsl: Option<([u8; 3], [f64; 3])>,
+    /// HEX field text.
+    material_hex: String,
+    /// Texture width and height fields and the material they were loaded from.
+    texture_w: String,
+    texture_h: String,
+    texture_of: Option<usize>,
+    /// Texture size aspect lock (on by default).
+    texture_unlocked: bool,
+}
+
+/// Color picker pages of the Materials Edit tab (SketchUp: Color Wheel, HLS, HSB,
+/// RGB; here Wheel is egui's saturation/value square with a hue bar).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ColorMode {
+    #[default]
+    Wheel,
+    Rgb,
+    Hsl,
+    Hex,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -392,16 +421,35 @@ impl Shell {
                 };
                 let before = data.materials[i].clone();
                 let m = &mut data.materials[i];
-                ui.label("Color");
-                let mut c = Color32::from_rgb(m.color[0], m.color[1], m.color[2]);
-                ui.spacing_mut().slider_width = (ui.available_width() - 20.0).clamp(80.0, 180.0);
-                if egui::color_picker::color_picker_color32(
-                    ui,
-                    &mut c,
-                    egui::color_picker::Alpha::Opaque,
-                ) {
-                    m.color = [c.r(), c.g(), c.b()];
-                }
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Back to the image's own colors (textured materials only).
+                        if ui
+                            .add_enabled(m.texture.is_some(), egui::Button::new("Reset Color"))
+                            .clicked()
+                        {
+                            self.pending.push(Event::MaterialTexture {
+                                index: i,
+                                action: TextureAction::ResetColor,
+                            });
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (mode, label) in [
+                        (ColorMode::Wheel, "Wheel"),
+                        (ColorMode::Rgb, "RGB"),
+                        (ColorMode::Hsl, "HSL"),
+                        (ColorMode::Hex, "HEX"),
+                    ] {
+                        if tab_button(ui, &t, label, self.tray_ui.color_mode == mode).clicked() {
+                            self.tray_ui.color_mode = mode;
+                        }
+                    }
+                });
+                self.color_editor(ui, &mut m.color);
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("Opacity");
@@ -416,7 +464,214 @@ impl Shell {
                         opacity: m.opacity,
                     });
                 }
+                ui.add_space(4.0);
+                self.texture_editor(ui, i, &*data);
             }
+        }
+    }
+
+    /// The color picker page of the Materials Edit tab. Unverified: SketchUp's pages
+    /// are Color Wheel, HLS, HSB and RGB; HEX is a field on them.
+    fn color_editor(&mut self, ui: &mut egui::Ui, color: &mut [u8; 3]) {
+        let slider_w = (ui.available_width() - 70.0).clamp(60.0, 220.0);
+        match self.tray_ui.color_mode {
+            ColorMode::Wheel => {
+                let mut c = Color32::from_rgb(color[0], color[1], color[2]);
+                ui.spacing_mut().slider_width = (ui.available_width() - 20.0).clamp(80.0, 180.0);
+                if egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut c,
+                    egui::color_picker::Alpha::Opaque,
+                ) {
+                    *color = [c.r(), c.g(), c.b()];
+                }
+            }
+            ColorMode::Rgb => {
+                egui::Grid::new("mt_ui_material_rgb")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().slider_width = slider_w;
+                        for (k, label) in ["R", "G", "B"].iter().enumerate() {
+                            ui.label(*label);
+                            ui.add(egui::Slider::new(&mut color[k], 0..=255));
+                            ui.end_row();
+                        }
+                    });
+            }
+            ColorMode::Hsl => {
+                let mut hsl = match self.tray_ui.material_hsl {
+                    Some((c, hsl)) if c == *color => hsl,
+                    _ => rgb_to_hsl(*color),
+                };
+                // Whole degrees and percent; only a slider the user moved changes the
+                // color (rounding alone must not).
+                let mut changed = false;
+                egui::Grid::new("mt_ui_material_hsl")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().slider_width = slider_w;
+                        for (k, (label, max, suffix)) in
+                            [("H", 360, "°"), ("S", 100, "%"), ("L", 100, "%")]
+                                .into_iter()
+                                .enumerate()
+                        {
+                            ui.label(label);
+                            let mut v = hsl[k].round() as i32;
+                            let r = ui.add(egui::Slider::new(&mut v, 0..=max).suffix(suffix));
+                            if r.changed() && v != hsl[k].round() as i32 {
+                                hsl[k] = f64::from(v);
+                                changed = true;
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if changed {
+                    *color = hsl_to_rgb(hsl);
+                }
+                self.tray_ui.material_hsl = Some((*color, hsl));
+            }
+            ColorMode::Hex => {
+                let id = ui.id().with("mt_ui_material_hex");
+                if !ui.memory(|m| m.has_focus(id)) {
+                    self.tray_ui.material_hex = hex_color(*color);
+                }
+                ui.horizontal(|ui| {
+                    ui.label("HEX");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.tray_ui.material_hex)
+                            .id(id)
+                            .desired_width(80.0),
+                    );
+                    let (rect, _) = ui.allocate_exact_size(vec2(22.0, 18.0), Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        0.0,
+                        Color32::from_rgb(color[0], color[1], color[2]),
+                    );
+                    if r.lost_focus()
+                        && !ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        && let Some(c) = parse_hex_color(&self.tray_ui.material_hex)
+                    {
+                        *color = c;
+                    }
+                });
+            }
+        }
+    }
+
+    /// Texture controls of the Materials Edit tab: "Use texture image", the file with
+    /// Browse and external editing, size with aspect lock, Colorize, and Position
+    /// Texture for the selected face. Unverified: SketchUp's layout and that the size
+    /// fields' lock is a chain icon (a check box here).
+    fn texture_editor(&mut self, ui: &mut egui::Ui, i: usize, data: &TrayData) {
+        let m = &data.materials[i];
+        let mut use_texture = m.texture.is_some();
+        if ui.checkbox(&mut use_texture, "Use texture image").changed() {
+            self.pending.push(Event::MaterialTexture {
+                index: i,
+                action: if use_texture {
+                    TextureAction::Load
+                } else {
+                    TextureAction::Remove
+                },
+            });
+        }
+        let Some(tex) = &m.texture else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            let file = std::path::Path::new(&tex.file)
+                .file_name()
+                .map_or_else(|| tex.file.clone(), |n| n.to_string_lossy().into_owned());
+            ui.add(egui::Label::new(file).truncate())
+                .on_hover_text(&tex.file);
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Browse...")
+                .on_hover_text("Load a different image")
+                .clicked()
+            {
+                self.pending.push(Event::MaterialTexture {
+                    index: i,
+                    action: TextureAction::Load,
+                });
+            }
+            if ui
+                .button("Edit Externally")
+                .on_hover_text("Edit texture image in external editor")
+                .clicked()
+            {
+                self.pending.push(Event::MaterialTexture {
+                    index: i,
+                    action: TextureAction::EditExternally,
+                });
+            }
+        });
+        let w_id = ui.id().with("mt_ui_texture_w");
+        let h_id = ui.id().with("mt_ui_texture_h");
+        let focused = ui.memory(|mem| mem.has_focus(w_id) || mem.has_focus(h_id));
+        if !focused || self.tray_ui.texture_of != Some(i) {
+            self.tray_ui.texture_of = Some(i);
+            self.tray_ui.texture_w.clone_from(&tex.width);
+            self.tray_ui.texture_h.clone_from(&tex.height);
+        }
+        let lock = !self.tray_ui.texture_unlocked;
+        let mut size = None;
+        egui::Grid::new("mt_ui_texture_size")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for (label, id, is_w) in [("Width", w_id, true), ("Height", h_id, false)] {
+                    ui.label(label);
+                    let buf = if is_w {
+                        &mut self.tray_ui.texture_w
+                    } else {
+                        &mut self.tray_ui.texture_h
+                    };
+                    let r = ui.add(egui::TextEdit::singleline(buf).id(id).desired_width(90.0));
+                    let old = if is_w { &tex.width } else { &tex.height };
+                    if r.lost_focus()
+                        && !ui.input(|inp| inp.key_pressed(egui::Key::Escape))
+                        && buf.trim() != old.trim()
+                    {
+                        let text = Some(buf.trim().to_owned());
+                        size = Some(if is_w { (text, None) } else { (None, text) });
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some((width, height)) = size {
+            self.pending.push(Event::MaterialTexture {
+                index: i,
+                action: TextureAction::Size {
+                    width,
+                    height,
+                    lock,
+                },
+            });
+        }
+        let mut locked = lock;
+        if ui.checkbox(&mut locked, "Lock aspect ratio").changed() {
+            self.tray_ui.texture_unlocked = !locked;
+        }
+        let mut colorize = tex.colorize;
+        if ui.checkbox(&mut colorize, "Colorize").changed() {
+            self.pending.push(Event::MaterialTexture {
+                index: i,
+                action: TextureAction::Colorize(colorize),
+            });
+        }
+        if ui
+            .add_enabled(
+                data.can_position_texture,
+                egui::Button::new("Position Texture"),
+            )
+            .on_hover_text("Position the texture on the selected face")
+            .on_disabled_hover_text("Select one face painted with a texture")
+            .clicked()
+        {
+            self.pending
+                .push(Event::Command("tool.texture_position".to_owned()));
         }
     }
 
@@ -1465,6 +1720,71 @@ mod tests {
         }
         let f = changed.expect("a click in the panel changes the settings");
         assert_ne!(f, crate::SoftenSettings::default());
+    }
+
+    /// The Materials Edit tab sends nothing by itself in any color mode (HSL rounding
+    /// must not recolor the material), and clicking down it finds the Colorize box and
+    /// the Position Texture button.
+    #[test]
+    fn material_edit_tab_is_quiet_until_used() {
+        let spec = Spec::builtin().unwrap();
+        let ctx = egui::Context::default();
+        let mut s = Shell::new(&spec);
+        let only_materials = |s: &mut Shell| {
+            for p in &mut s.panels {
+                p.shown = true;
+                p.expanded = p.id == "window.materials";
+            }
+        };
+        s.set_tray_data(TrayData {
+            materials: vec![crate::MaterialRow {
+                name: "Bricks".into(),
+                color: [191, 127, 63],
+                opacity: 100,
+                texture: Some(crate::TextureRow {
+                    file: "bricks.png".into(),
+                    width: "1m".into(),
+                    height: "0.5m".into(),
+                    colorize: false,
+                }),
+            }],
+            current_material: Some(0),
+            can_position_texture: true,
+            ..TrayData::default()
+        });
+        s.tray_ui.material_tab = MaterialTab::Edit;
+        for mode in [
+            ColorMode::Wheel,
+            ColorMode::Rgb,
+            ColorMode::Hsl,
+            ColorMode::Hex,
+        ] {
+            s.tray_ui.color_mode = mode;
+            only_materials(&mut s);
+            for _ in 0..3 {
+                assert_eq!(run(&ctx, &mut s, &spec, vec![]), vec![], "{mode:?}");
+            }
+        }
+        let mut seen = Vec::new();
+        for x in [1320.0, 1380.0] {
+            for y in (300..880).step_by(4) {
+                only_materials(&mut s);
+                s.tray_ui.material_tab = MaterialTab::Edit;
+                s.tray_ui.color_mode = ColorMode::Hex;
+                seen.extend(run(&ctx, &mut s, &spec, click(pos2(x, y as f32))));
+            }
+        }
+        assert!(
+            seen.contains(&Event::MaterialTexture {
+                index: 0,
+                action: TextureAction::Colorize(true)
+            }),
+            "{seen:?}"
+        );
+        assert!(
+            seen.contains(&Event::Command("tool.texture_position".into())),
+            "{seen:?}"
+        );
     }
 
     /// Expands only the Components panel (clicks while scanning may toggle headers).

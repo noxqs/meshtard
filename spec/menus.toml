@@ -193,6 +193,7 @@ items = [
   { id = "tool.eraser", label = "Eraser" },
   { id = "tool.tag", label = "Tag" },
   { id = "tool.paint_bucket", label = "Paint Bucket" },
+  { id = "tool.texture_position", label = "Texture Position" },
   { separator = true },
   { id = "tool.move", label = "Move" },
   { id = "tool.rotate", label = "Rotate" },

@@ -421,7 +421,7 @@ pub(crate) mod tests {
         doc.model.root.instances[0].transform *= glam::DMat4::from_scale(DVec3::new(2.0, 1.0, 1.0));
         let mut info = mt_ui::EntityInfo {
             title: "Group".into(),
-            rows: Vec::new(),
+            ..Default::default()
         };
         let inst = doc.model.root.instances[0].clone();
         describe(&doc, &inst, &mut info);

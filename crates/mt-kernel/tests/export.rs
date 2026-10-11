@@ -205,6 +205,7 @@ fn curves_components_groups_guides_sections() {
         normal: DVec3::Z,
         name: String::new(),
         hidden: false,
+        symbol: String::new(),
     });
 
     let r = round_trip(&m);
@@ -519,6 +520,7 @@ fn section_plane_reopens_around_the_model() {
             normal,
             name: String::new(),
             hidden: false,
+            symbol: String::new(),
         });
     }
     let r = round_trip(&m);
@@ -672,6 +674,7 @@ fn images_round_trip() {
         locked: false,
         layer,
         material: None,
+        attrs: Default::default(),
     };
     m.root.instances.push(place(0.0, Some(1)));
     let mut group = Entities::new();

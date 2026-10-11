@@ -711,6 +711,7 @@ pub(crate) mod tests {
                 locked: false,
                 layer: None,
                 material: Some(0),
+                attrs: Default::default(),
             });
         }
         let tris = triangles(&m);

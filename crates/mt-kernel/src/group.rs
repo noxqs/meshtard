@@ -262,6 +262,7 @@ pub fn make_group_with_frame(
         is_group,
         is_image: false,
         glue: crate::model::GlueTo::None,
+        attributes: Default::default(),
     });
     ents.instances.push(Instance {
         definition,
@@ -271,6 +272,7 @@ pub fn make_group_with_frame(
         locked: false,
         layer: None,
         material: None,
+        attrs: Default::default(),
     });
     Some(ents.instances.len() - 1)
 }
