@@ -330,68 +330,69 @@ impl App {
         if d.depth.is_empty() {
             d.depth = units.format(3.0);
         }
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_text3d_modal")).show(ctx, |ui| {
-            ui.set_width(340.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Place 3D Text");
-            ui.add_space(6.0);
-            ui.add(
-                egui::TextEdit::multiline(&mut d.text)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY),
-            );
-            egui::Grid::new("mt_text3d_grid")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Font:");
-                    let name = d.fonts.get(d.font).map_or("", |f| f.name.as_str());
-                    egui::ComboBox::from_id_salt("mt_text3d_font")
-                        .selected_text(name)
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            for (i, f) in d.fonts.iter().enumerate() {
-                                ui.selectable_value(&mut d.font, i, &f.name);
+        let r = mt_ui::Dialog::new("text3d", "3D Text")
+            .width(340.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                let text = ui.add(
+                    egui::TextEdit::multiline(&mut d.text)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                );
+                if text.has_focus() {
+                    // Enter starts a new line in the text rather than pressing Place.
+                    ui.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                        i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
+                    });
+                }
+                ui.add_space(8.0);
+                egui::Grid::new("mt_text3d_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Font:");
+                        let name = d.fonts.get(d.font).map_or("", |f| f.name.as_str());
+                        egui::ComboBox::from_id_salt("mt_text3d_font")
+                            .selected_text(name)
+                            .width(220.0)
+                            .show_ui(ui, |ui| {
+                                for (i, f) in d.fonts.iter().enumerate() {
+                                    ui.selectable_value(&mut d.font, i, &f.name);
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Align:");
+                        ui.horizontal(|ui| {
+                            for (a, n) in [
+                                (Align::Left, "Left"),
+                                (Align::Center, "Center"),
+                                (Align::Right, "Right"),
+                            ] {
+                                ui.radio_value(&mut d.align, a, n);
                             }
                         });
-                    ui.end_row();
-                    ui.label("Align:");
-                    ui.horizontal(|ui| {
-                        for (a, n) in [
-                            (Align::Left, "Left"),
-                            (Align::Center, "Center"),
-                            (Align::Right, "Right"),
-                        ] {
-                            ui.radio_value(&mut d.align, a, n);
-                        }
+                        ui.end_row();
+                        ui.label("Height:");
+                        ui.text_edit_singleline(&mut d.height);
+                        ui.end_row();
+                        ui.label("Form:");
+                        ui.checkbox(&mut d.filled, "Filled");
+                        ui.end_row();
+                        ui.add_enabled(d.filled, egui::Checkbox::new(&mut d.extruded, "Extruded:"));
+                        ui.add_enabled(
+                            d.filled && d.extruded,
+                            egui::TextEdit::singleline(&mut d.depth),
+                        );
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Height:");
-                    ui.text_edit_singleline(&mut d.height);
-                    ui.end_row();
-                    ui.label("Form:");
-                    ui.checkbox(&mut d.filled, "Filled");
-                    ui.end_row();
-                    ui.add_enabled(d.filled, egui::Checkbox::new(&mut d.extruded, "Extruded:"));
-                    ui.add_enabled(
-                        d.filled && d.extruded,
-                        egui::TextEdit::singleline(&mut d.depth),
-                    );
-                    ui.end_row();
-                });
-            if let Some(e) = &d.error {
-                ui.colored_label(egui::Color32::from_rgb(180, 0, 0), e);
-            }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Place").clicked() {
-                    done = Some(true);
+                if let Some(e) = &d.error {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(180, 0, 0), e);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    done = Some(false);
-                }
+                crate::presentation::ok_cancel(ui, "Place")
             });
-        });
+        let done = crate::presentation::answer(r);
         match done {
             None => ctx.data_mut(|m| {
                 m.insert_temp(dialog_id(), d);

@@ -274,22 +274,23 @@ impl App {
         let Some(mut d) = self.present.report.take() else {
             return;
         };
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_generate_report")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Generate Report");
-            ui.add_space(6.0);
-            ui.label("Groups and components with tag, count, size and solid volume.");
-            ui.radio_value(&mut d.selection_only, false, "Entire model");
-            ui.radio_value(
-                &mut d.selection_only,
-                true,
-                "Selected groups and components",
-            );
-            ui.weak("Format by file type: HTML (.html) or CSV (.csv).");
-            done = crate::presentation::ok_cancel(ui, "Generate...");
-        });
+        let r = mt_ui::Dialog::new("generate_report", "Generate Report")
+            .width(320.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                ui.label("Groups and components with tag, count, size and solid volume.");
+                ui.add_space(8.0);
+                ui.radio_value(&mut d.selection_only, false, "Entire model");
+                ui.radio_value(
+                    &mut d.selection_only,
+                    true,
+                    "Selected groups and components",
+                );
+                ui.add_space(8.0);
+                ui.weak("Format by file type: HTML (.html) or CSV (.csv).");
+                crate::presentation::ok_cancel(ui, "Generate...")
+            });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.present.report = Some(d),
             Some(false) => {}

@@ -315,44 +315,38 @@ impl App {
         let Some(p) = &self.present.print_preview else {
             return;
         };
-        let mut open = true;
-        let mut print = false;
         let (texture, size, note) = (p.texture.id(), p.size, p.note.clone());
-        egui::Window::new("Print Preview")
-            .id(egui::Id::new("mt_print_preview_window"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([520.0, 700.0])
+        // The page at most 480 points wide and as tall as the window allows.
+        let avail = egui::vec2(480.0, (ctx.content_rect().height() - 200.0).max(160.0));
+        let k = (avail.x / size[0] as f32)
+            .min(avail.y / size[1] as f32)
+            .clamp(0.05, 2.0);
+        let page = egui::vec2(size[0] as f32 * k, size[1] as f32 * k);
+        let paper = self.present.print_setup.paper.label();
+        let r = mt_ui::Dialog::new("print_preview", "Print Preview")
+            .width(page.x.max(320.0) + 16.0)
+            .modal(false)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Print...").clicked() {
-                        print = true;
-                    }
-                    if ui.button("Close").clicked() {
-                        self.present.print_preview = None;
-                    }
-                    ui.weak(self.present.print_setup.paper.label());
-                });
+                ui.weak(paper);
                 if !note.is_empty() {
                     ui.weak(&note);
                 }
-                let avail = ui.available_size() - egui::vec2(20.0, 20.0);
-                let k = (avail.x / size[0] as f32)
-                    .min(avail.y / size[1] as f32)
-                    .clamp(0.1, 2.0);
-                egui::Frame::new()
-                    .fill(egui::Color32::from_gray(160))
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        ui.image((texture, egui::vec2(size[0] as f32 * k, size[1] as f32 * k)));
-                    });
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_gray(160))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.image((texture, page));
+                        });
+                });
+                mt_ui::dialog::buttons(ui, &["Print...", "Close"], Some(0))
             });
-        if !open {
+        let print = r.inner == Some(0);
+        if r.closed || r.inner.is_some() {
             self.present.print_preview = None;
         }
         if print {
-            self.present.print_preview = None;
             self.print(ctx, frame);
         }
     }
@@ -362,59 +356,60 @@ impl App {
             return;
         };
         let parallel = !self.camera.perspective;
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_print_setup")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Print Setup");
-            ui.add_space(6.0);
-            egui::Grid::new("mt_print_setup_grid")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Paper:");
-                    egui::ComboBox::from_id_salt("mt_print_paper")
-                        .selected_text(d.paper.label())
-                        .show_ui(ui, |ui| {
-                            for p in [Paper::A4, Paper::Letter] {
-                                ui.selectable_value(&mut d.paper, p, p.label());
-                            }
+        let r = mt_ui::Dialog::new("print_setup", "Print Setup")
+            .width(320.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                egui::Grid::new("mt_print_setup_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Paper:");
+                        egui::ComboBox::from_id_salt("mt_print_paper")
+                            .selected_text(d.paper.label())
+                            .show_ui(ui, |ui| {
+                                for p in [Paper::A4, Paper::Letter] {
+                                    ui.selectable_value(&mut d.paper, p, p.label());
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Orientation:");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut d.landscape, false, "Portrait");
+                            ui.radio_value(&mut d.landscape, true, "Landscape");
                         });
-                    ui.end_row();
-                    ui.label("Orientation:");
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut d.landscape, false, "Portrait");
-                        ui.radio_value(&mut d.landscape, true, "Landscape");
+                        ui.end_row();
+                        ui.label("Quality:");
+                        egui::ComboBox::from_id_salt("mt_print_dpi")
+                            .selected_text(format!("{} dpi", d.dpi))
+                            .show_ui(ui, |ui| {
+                                for dpi in [72, 150, 300] {
+                                    ui.selectable_value(&mut d.dpi, dpi, format!("{dpi} dpi"));
+                                }
+                            });
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Quality:");
-                    egui::ComboBox::from_id_salt("mt_print_dpi")
-                        .selected_text(format!("{} dpi", d.dpi))
-                        .show_ui(ui, |ui| {
-                            for dpi in [72, 150, 300] {
-                                ui.selectable_value(&mut d.dpi, dpi, format!("{dpi} dpi"));
-                            }
-                        });
-                    ui.end_row();
+                ui.add_space(10.0);
+                ui.strong("Print Size");
+                ui.add_space(4.0);
+                ui.checkbox(&mut d.fit, "Fit to page");
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!d.fit, |ui| {
+                        ui.label("Scale 1 :");
+                        ui.add(
+                            egui::DragValue::new(&mut d.scale)
+                                .range(0.001..=1e6)
+                                .speed(1.0),
+                        );
+                    });
                 });
-            ui.add_space(6.0);
-            ui.label("Print Size");
-            ui.checkbox(&mut d.fit, "Fit to page");
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(!d.fit, |ui| {
-                    ui.label("Scale 1 :");
-                    ui.add(
-                        egui::DragValue::new(&mut d.scale)
-                            .range(0.001..=1e6)
-                            .speed(1.0),
-                    );
-                });
+                if !d.fit && !parallel {
+                    ui.add_space(4.0);
+                    ui.weak("Scaled printing needs Camera > Parallel Projection.");
+                }
+                crate::presentation::ok_cancel(ui, "OK")
             });
-            if !d.fit && !parallel {
-                ui.weak("Scaled printing needs Camera > Parallel Projection.");
-            }
-            done = crate::presentation::ok_cancel(ui, "OK");
-        });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.present.print_setup_dialog = Some(d),
             Some(true) => self.present.print_setup = d,

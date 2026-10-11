@@ -140,39 +140,39 @@ impl App {
         let delay = self.animation.delay_secs;
         let cameras = self.scene_cameras();
         let count = timeline(&cameras, secs, delay, d.fps, d.loop_to_start).len();
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_export_animation")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Export Animation Options");
-            ui.add_space(6.0);
-            egui::Grid::new("mt_anim_grid")
-                .num_columns(3)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Width:");
-                    ui.add(egui::DragValue::new(&mut d.width).range(16..=8192));
-                    ui.label("pixels");
-                    ui.end_row();
-                    ui.label("Height:");
-                    ui.add(egui::DragValue::new(&mut d.height).range(16..=8192));
-                    ui.label("pixels");
-                    ui.end_row();
-                    ui.label("Frame Rate:");
-                    ui.add(egui::DragValue::new(&mut d.fps).range(1..=120));
-                    ui.label("frames/s");
-                    ui.end_row();
-                });
-            ui.checkbox(&mut d.loop_to_start, "Loop to starting scene");
-            ui.checkbox(&mut d.antialias, "Anti-alias rendering");
-            ui.add_space(4.0);
-            ui.weak(format!(
-                "{count} frames ({:.1} s): transitions {secs:.1} s, delay {delay:.1} s \
+        let r = mt_ui::Dialog::new("export_animation", "Export Animation")
+            .width(320.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                egui::Grid::new("mt_anim_grid")
+                    .num_columns(3)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Width:");
+                        ui.add(egui::DragValue::new(&mut d.width).range(16..=8192));
+                        ui.label("pixels");
+                        ui.end_row();
+                        ui.label("Height:");
+                        ui.add(egui::DragValue::new(&mut d.height).range(16..=8192));
+                        ui.label("pixels");
+                        ui.end_row();
+                        ui.label("Frame Rate:");
+                        ui.add(egui::DragValue::new(&mut d.fps).range(1..=120));
+                        ui.label("frames/s");
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.checkbox(&mut d.loop_to_start, "Loop to starting scene");
+                ui.checkbox(&mut d.antialias, "Anti-alias rendering");
+                ui.add_space(8.0);
+                ui.weak(format!(
+                    "{count} frames ({:.1} s): transitions {secs:.1} s, delay {delay:.1} s \
                  (View > Animation > Settings). Saved as numbered PNG or JPEG images.",
-                count as f64 / f64::from(d.fps.max(1))
-            ));
-            done = crate::presentation::ok_cancel(ui, "Export...");
-        });
+                    count as f64 / f64::from(d.fps.max(1))
+                ));
+                crate::presentation::ok_cancel(ui, "Export...")
+            });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.present.anim = Some(d),
             Some(false) => self.present.last_anim = d,
@@ -300,22 +300,20 @@ impl App {
             job.next += 1;
         }
         if job.next < total && job.error.is_none() {
-            egui::Modal::new(egui::Id::new("mt_anim_progress")).show(ctx, |ui| {
-                ui.set_width(320.0);
-                crate::export::dialog_visuals(ui);
-                ui.strong("Exporting Animation");
-                ui.add_space(6.0);
-                ui.label(format!("Frame {} of {total}", job.next + 1));
-                ui.add(
-                    egui::ProgressBar::new(job.next as f32 / total.max(1) as f32)
-                        .show_percentage()
-                        .desired_width(300.0),
-                );
-                ui.add_space(6.0);
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    cancel = true;
-                }
-            });
+            let r = mt_ui::Dialog::new("anim_progress", "Exporting Animation")
+                .width(320.0)
+                .show(ctx, |ui| {
+                    crate::export::dialog_visuals(ui);
+                    ui.label(format!("Frame {} of {total}", job.next + 1));
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::ProgressBar::new(job.next as f32 / total.max(1) as f32)
+                            .show_percentage()
+                            .desired_width(320.0),
+                    );
+                    mt_ui::dialog::buttons(ui, &["Cancel"], None)
+                });
+            cancel = r.closed || r.inner.is_some();
             if !cancel {
                 ctx.request_repaint();
                 self.present.anim_job = Some(job);

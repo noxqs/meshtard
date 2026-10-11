@@ -155,45 +155,38 @@ impl App {
         let Some((mut on, mut secs, mut delay)) = self.animation.dialog else {
             return;
         };
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_animation_settings")).show(ctx, |ui| {
-            ui.set_width(300.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Animation");
-            ui.add_space(6.0);
-            ui.label("Scene Transitions");
-            ui.checkbox(&mut on, "Enable scene transitions");
-            ui.horizontal(|ui| {
-                ui.add_enabled(
-                    on,
-                    egui::DragValue::new(&mut secs)
-                        .range(0.0..=60.0)
-                        .speed(0.1)
-                        .max_decimals(1),
-                );
-                ui.label("seconds");
+        let r = mt_ui::Dialog::new("animation_settings", "Animation Settings")
+            .width(300.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                ui.strong("Scene Transitions");
+                ui.add_space(4.0);
+                ui.checkbox(&mut on, "Enable scene transitions");
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        on,
+                        egui::DragValue::new(&mut secs)
+                            .range(0.0..=60.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.label("seconds");
+                });
+                ui.add_space(10.0);
+                ui.strong("Scene Delay");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut delay)
+                            .range(0.0..=60.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.label("seconds");
+                });
+                crate::presentation::ok_cancel(ui, "OK")
             });
-            ui.add_space(6.0);
-            ui.label("Scene Delay");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::DragValue::new(&mut delay)
-                        .range(0.0..=60.0)
-                        .speed(0.1)
-                        .max_decimals(1),
-                );
-                ui.label("seconds");
-            });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    done = Some(true);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    done = Some(false);
-                }
-            });
-        });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.animation.dialog = Some((on, secs, delay)),
             Some(ok) => {

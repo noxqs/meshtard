@@ -207,20 +207,6 @@ pub(crate) fn export_3d(
     }
 }
 
-fn buttons(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
-    let mut done = None;
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        if ui.button(ok).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            done = Some(true);
-        }
-        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            done = Some(false);
-        }
-    });
-    done
-}
-
 impl App {
     /// File > Export > 2D Graphic / 3D Model: opens the options dialog.
     pub(crate) fn export_command(&mut self, id: &str) {
@@ -250,50 +236,52 @@ impl App {
             self.viewport_px.y.max(1.0) as u32,
         ];
         let aspect = f64::from(view[0]) / f64::from(view[1]);
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_export_2d")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            dialog_visuals(ui);
-            ui.strong("Export 2D Graphic Options");
-            ui.add_space(6.0);
-            ui.label("Image Size");
-            ui.checkbox(&mut d.use_view_size, "Use view size");
-            if d.use_view_size {
-                d.width = view[0];
-                d.height = view[1];
-            }
-            egui::Grid::new("mt_export_2d_grid")
-                .num_columns(3)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    // Width and height keep the view's aspect.
-                    ui.label("Width:");
-                    let w = ui.add_enabled(
-                        !d.use_view_size,
-                        egui::DragValue::new(&mut d.width).range(16..=8192),
-                    );
-                    ui.label("pixels");
-                    ui.end_row();
-                    if w.changed() {
-                        d.height = ((f64::from(d.width) / aspect).round() as u32).max(1);
-                    }
-                    ui.label("Height:");
-                    let h = ui.add_enabled(
-                        !d.use_view_size,
-                        egui::DragValue::new(&mut d.height).range(16..=8192),
-                    );
-                    ui.label("pixels");
-                    ui.end_row();
-                    if h.changed() {
-                        d.width = ((f64::from(d.height) * aspect).round() as u32).max(1);
-                    }
-                });
-            ui.add_space(6.0);
-            ui.label("Rendering");
-            ui.checkbox(&mut d.antialias, "Anti-alias");
-            ui.checkbox(&mut d.transparent, "Transparent background (PNG)");
-            done = buttons(ui, "Export...");
-        });
+        let r = mt_ui::Dialog::new("export_2d", "Export 2D Graphic")
+            .width(320.0)
+            .show(ctx, |ui| {
+                dialog_visuals(ui);
+                ui.strong("Image Size");
+                ui.add_space(4.0);
+                ui.checkbox(&mut d.use_view_size, "Use view size");
+                if d.use_view_size {
+                    d.width = view[0];
+                    d.height = view[1];
+                }
+                ui.add_space(4.0);
+                egui::Grid::new("mt_export_2d_grid")
+                    .num_columns(3)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        // Width and height keep the view's aspect.
+                        ui.label("Width:");
+                        let w = ui.add_enabled(
+                            !d.use_view_size,
+                            egui::DragValue::new(&mut d.width).range(16..=8192),
+                        );
+                        ui.label("pixels");
+                        ui.end_row();
+                        if w.changed() {
+                            d.height = ((f64::from(d.width) / aspect).round() as u32).max(1);
+                        }
+                        ui.label("Height:");
+                        let h = ui.add_enabled(
+                            !d.use_view_size,
+                            egui::DragValue::new(&mut d.height).range(16..=8192),
+                        );
+                        ui.label("pixels");
+                        ui.end_row();
+                        if h.changed() {
+                            d.width = ((f64::from(d.height) * aspect).round() as u32).max(1);
+                        }
+                    });
+                ui.add_space(10.0);
+                ui.strong("Rendering");
+                ui.add_space(4.0);
+                ui.checkbox(&mut d.antialias, "Anti-alias");
+                ui.checkbox(&mut d.transparent, "Transparent background (PNG)");
+                crate::presentation::ok_cancel(ui, "Export...")
+            });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.exports.d2 = Some(d),
             Some(false) => self.exports.last2d = d,
@@ -384,54 +372,54 @@ impl App {
             .document
             .as_ref()
             .map_or(Units::Inches, |doc| kernel_units(doc.units));
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_export_3d")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            dialog_visuals(ui);
-            ui.strong("Export 3D Model");
-            ui.add_space(6.0);
-            egui::Grid::new("mt_export_3d_grid")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Format:");
-                    egui::ComboBox::from_id_salt("mt_export_format")
-                        .selected_text(d.format.label())
-                        .show_ui(ui, |ui| {
-                            for f in Format3d::ALL {
-                                if ui.selectable_value(&mut d.format, f, f.label()).changed() {
-                                    d.two_sided = f == Format3d::Dae;
-                                }
-                            }
-                        });
-                    ui.end_row();
-                    if d.format != Format3d::Dae {
-                        ui.label("Units:");
-                        let label = |u: Option<Units>| match u {
-                            None => format!("Model Units ({})", model_units.name()),
-                            Some(u) => u.name().to_owned(),
-                        };
-                        egui::ComboBox::from_id_salt("mt_export_units")
-                            .selected_text(label(d.units))
+        let r = mt_ui::Dialog::new("export_3d", "Export 3D Model")
+            .width(320.0)
+            .show(ctx, |ui| {
+                dialog_visuals(ui);
+                egui::Grid::new("mt_export_3d_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Format:");
+                        egui::ComboBox::from_id_salt("mt_export_format")
+                            .selected_text(d.format.label())
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut d.units, None, label(None));
-                                for u in Units::ALL {
-                                    ui.selectable_value(&mut d.units, Some(u), label(Some(u)));
+                                for f in Format3d::ALL {
+                                    if ui.selectable_value(&mut d.format, f, f.label()).changed() {
+                                        d.two_sided = f == Format3d::Dae;
+                                    }
                                 }
                             });
                         ui.end_row();
-                    }
-                });
-            if d.format != Format3d::Stl {
-                ui.checkbox(&mut d.two_sided, "Export two-sided faces");
-            }
-            if d.format == Format3d::Obj {
-                ui.checkbox(&mut d.y_up, "Swap YZ coordinates (Y is up)");
-            }
-            ui.add_space(4.0);
-            ui.weak("Hidden geometry is not exported; groups and components are flattened.");
-            done = buttons(ui, "Export...");
-        });
+                        if d.format != Format3d::Dae {
+                            ui.label("Units:");
+                            let label = |u: Option<Units>| match u {
+                                None => format!("Model Units ({})", model_units.name()),
+                                Some(u) => u.name().to_owned(),
+                            };
+                            egui::ComboBox::from_id_salt("mt_export_units")
+                                .selected_text(label(d.units))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut d.units, None, label(None));
+                                    for u in Units::ALL {
+                                        ui.selectable_value(&mut d.units, Some(u), label(Some(u)));
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                if d.format != Format3d::Stl {
+                    ui.checkbox(&mut d.two_sided, "Export two-sided faces");
+                }
+                if d.format == Format3d::Obj {
+                    ui.checkbox(&mut d.y_up, "Swap YZ coordinates (Y is up)");
+                }
+                ui.add_space(8.0);
+                ui.weak("Hidden geometry is not exported; groups and components are flattened.");
+                crate::presentation::ok_cancel(ui, "Export...")
+            });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.exports.d3 = Some(d),
             Some(false) => self.exports.last3d = d,

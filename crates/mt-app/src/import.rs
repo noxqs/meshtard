@@ -139,43 +139,41 @@ impl App {
         let Some(mut d) = self.mesh_import.take() else {
             return;
         };
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_import_mesh")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong(if d.stl {
-                "STL Import Options"
-            } else {
-                "OBJ Import Options"
-            });
-            ui.add_space(6.0);
-            ui.label(
-                d.path
-                    .file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-            );
-            ui.horizontal(|ui| {
-                ui.label("Units:");
-                egui::ComboBox::from_id_salt("mt_import_units")
-                    .selected_text(d.units.name())
-                    .show_ui(ui, |ui| {
-                        for u in Units::ALL {
-                            ui.selectable_value(&mut d.units, u, u.name());
-                        }
+        let title = if d.stl {
+            "STL Import Options"
+        } else {
+            "OBJ Import Options"
+        };
+        let r = mt_ui::Dialog::new("import_mesh", title)
+            .width(320.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                ui.label(
+                    d.path
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                );
+                ui.add_space(8.0);
+                egui::Grid::new("mt_import_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Units:");
+                        egui::ComboBox::from_id_salt("mt_import_units")
+                            .selected_text(d.units.name())
+                            .show_ui(ui, |ui| {
+                                for u in Units::ALL {
+                                    ui.selectable_value(&mut d.units, u, u.name());
+                                }
+                            });
+                        ui.end_row();
                     });
+                ui.add_space(6.0);
+                ui.checkbox(&mut d.y_up, "File is Y up (swap YZ)");
+                ui.checkbox(&mut d.merge, "Merge coplanar faces");
+                crate::presentation::ok_cancel(ui, "Import")
             });
-            ui.checkbox(&mut d.y_up, "File is Y up (swap YZ)");
-            ui.checkbox(&mut d.merge, "Merge coplanar faces");
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Import").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    done = Some(true);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    done = Some(false);
-                }
-            });
-        });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.mesh_import = Some(d),
             Some(false) => {}

@@ -330,17 +330,18 @@ impl App {
         let Some(mut d) = self.prefs.dialog.take() else {
             return;
         };
-        let mut open = true;
         let mut general = self.prefs.general.clone();
         let mut keymap_changed = false;
-        egui::Window::new("Preferences")
-            .id(egui::Id::new("mt_preferences"))
-            .open(&mut open)
-            .collapsible(false)
-            .default_size([560.0, 420.0])
+        let capturing = d.capturing;
+        let r = mt_ui::Dialog::new("preferences", "Preferences")
+            .width(560.0)
+            .modal(false)
             .show(ctx, |ui| {
                 crate::export::dialog_visuals(ui);
-                ui.horizontal_top(|ui| {
+                // A fixed-height body: the page list on the left, the page on the right.
+                let size = egui::vec2(ui.available_width(), 360.0);
+                let layout = egui::Layout::left_to_right(egui::Align::Min);
+                ui.allocate_ui_with_layout(size, layout, |ui| {
                     ui.vertical(|ui| {
                         ui.set_width(100.0);
                         for (p, label) in [
@@ -358,6 +359,7 @@ impl App {
                     ui.vertical(|ui| match d.page {
                         Page::Drawing => {
                             ui.strong("Click Style");
+                            ui.add_space(4.0);
                             ui.add_enabled_ui(false, |ui| {
                                 for (label, on) in [
                                     ("Click-drag-click", false),
@@ -368,6 +370,7 @@ impl App {
                                     let _ = ui.radio(on, label);
                                 }
                             });
+                            ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(
                                     "The drawing tools take click, move, click; other styles \
@@ -379,6 +382,7 @@ impl App {
                         }
                         Page::General => {
                             ui.strong("Saving");
+                            ui.add_space(4.0);
                             ui.checkbox(&mut general.backup, "Create backup");
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut general.autosave, "Auto-save every");
@@ -396,6 +400,8 @@ impl App {
                     });
                 });
             });
+        // Escape while recording a shortcut cancels the recording, not the dialog.
+        let open = !r.closed || (capturing && ctx.input(|i| i.key_pressed(egui::Key::Escape)));
         if general != self.prefs.general {
             write_config("preferences.toml", &general_text(&general));
             self.prefs.general = general;

@@ -115,6 +115,7 @@
 //! [`Shell::show`] applies `spec/ui_theme.toml` to the context on its first call
 //! (see [`apply_theme`]); call it yourself earlier if other windows should use it.
 
+pub mod dialog;
 pub mod dock;
 pub mod icons;
 mod menu;
@@ -130,6 +131,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use mt_spec::Spec;
 
+pub use dialog::{Dialog, DialogResponse};
 pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use theme::apply as apply_theme;
 pub use tray_data::{

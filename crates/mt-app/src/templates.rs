@@ -167,25 +167,31 @@ impl App {
         let Some(mut d) = self.present.save_template.take() else {
             return;
         };
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_save_template")).show(ctx, |ui| {
-            ui.set_width(340.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Save As Template");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                ui.text_edit_singleline(&mut d.name);
+        let r = mt_ui::Dialog::new("save_template", "Save As Template")
+            .width(340.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                egui::Grid::new("mt_save_template_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(260.0));
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+                ui.checkbox(&mut d.make_default, "Set as default template");
+                if let Some(dir) = templates_dir() {
+                    ui.add_space(6.0);
+                    ui.weak(format!("Saved in {}", dir.display()));
+                }
+                if let Some(n) = &d.note {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(180, 30, 30), n);
+                }
+                crate::presentation::ok_cancel(ui, "Save")
             });
-            ui.checkbox(&mut d.make_default, "Set as default template");
-            if let Some(dir) = templates_dir() {
-                ui.weak(format!("Saved in {}", dir.display()));
-            }
-            if let Some(n) = &d.note {
-                ui.colored_label(egui::Color32::from_rgb(180, 30, 30), n);
-            }
-            done = crate::presentation::ok_cancel(ui, "Save");
-        });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.present.save_template = Some(d),
             Some(false) => {}
@@ -221,51 +227,51 @@ impl App {
         };
         let default = load_default();
         let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_new_template")).show(ctx, |ui| {
-            ui.set_width(340.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("New from Template");
-            ui.add_space(6.0);
-            let mark = |n: &str| {
-                if default.as_deref() == Some(n) {
-                    format!("{n}  (default)")
-                } else {
-                    n.to_owned()
-                }
-            };
-            egui::ScrollArea::vertical()
-                .max_height(240.0)
-                .show(ui, |ui| {
-                    let builtin = if default.is_none() {
-                        format!("{BUILT_IN}  (default)")
+        let r = mt_ui::Dialog::new("new_template", "New from Template")
+            .width(340.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                let mark = |n: &str| {
+                    if default.as_deref() == Some(n) {
+                        format!("{n}  (default)")
                     } else {
-                        BUILT_IN.to_owned()
-                    };
-                    let r = ui.selectable_label(d.chosen.is_none(), builtin);
-                    if r.clicked() {
-                        d.chosen = None;
+                        n.to_owned()
                     }
-                    if r.double_clicked() {
-                        done = Some(true);
-                    }
-                    for (i, (name, _)) in d.list.iter().enumerate() {
-                        let r = ui.selectable_label(d.chosen == Some(i), mark(name));
+                };
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        let builtin = if default.is_none() {
+                            format!("{BUILT_IN}  (default)")
+                        } else {
+                            BUILT_IN.to_owned()
+                        };
+                        let r = ui.selectable_label(d.chosen.is_none(), builtin);
                         if r.clicked() {
-                            d.chosen = Some(i);
+                            d.chosen = None;
                         }
                         if r.double_clicked() {
                             done = Some(true);
                         }
-                    }
-                });
-            if d.list.is_empty() {
-                ui.weak("No saved templates yet: use File > Save As Template.");
-            }
-            ui.checkbox(&mut d.make_default, "Set as default template");
-            if let Some(r) = crate::presentation::ok_cancel(ui, "Create") {
-                done = done.or(Some(r));
-            }
-        });
+                        for (i, (name, _)) in d.list.iter().enumerate() {
+                            let r = ui.selectable_label(d.chosen == Some(i), mark(name));
+                            if r.clicked() {
+                                d.chosen = Some(i);
+                            }
+                            if r.double_clicked() {
+                                done = Some(true);
+                            }
+                        }
+                    });
+                if d.list.is_empty() {
+                    ui.add_space(4.0);
+                    ui.weak("No saved templates yet: use File > Save As Template.");
+                }
+                ui.add_space(6.0);
+                ui.checkbox(&mut d.make_default, "Set as default template");
+                crate::presentation::ok_cancel(ui, "Create")
+            });
+        let done = done.or(crate::presentation::answer(r));
         match done {
             None => self.present.new_template = Some(d),
             Some(false) => {}

@@ -76,49 +76,32 @@ impl App {
             .as_ref()
             .and_then(|d| d.path.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "Untitled".into());
-        let mut answer = None;
-        if matches!(action, Pending::Revert) {
-            egui::Modal::new(egui::Id::new("mt_revert")).show(ctx, |ui| {
-                ui.set_width(320.0);
-                ui.label("meshtard");
-                ui.add_space(6.0);
-                ui.label(format!(
-                    "Revert \"{name}\" to the last saved version? Unsaved changes will be lost."
-                ));
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Revert").clicked() {
-                        answer = Some(Answer::No);
-                    }
-                    if ui.button("Cancel").clicked()
-                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
-                    {
-                        answer = Some(Answer::Cancel);
-                    }
-                });
+        let answer = if matches!(action, Pending::Revert) {
+            let r = mt_ui::Dialog::new("revert", "Meshtard").show(ctx, |ui| {
+                mt_ui::dialog::message(
+                    ui,
+                    &format!("Revert \"{name}\" to the last saved version?"),
+                    Some("Unsaved changes will be lost."),
+                );
+                mt_ui::dialog::buttons(ui, &["Revert", "Cancel"], Some(0))
             });
+            match (r.inner, r.closed) {
+                (_, true) | (Some(1), _) => Some(Answer::Cancel),
+                (Some(_), _) => Some(Answer::No),
+                (None, _) => None,
+            }
         } else {
-            egui::Modal::new(egui::Id::new("mt_save_changes")).show(ctx, |ui| {
-                ui.set_width(320.0);
-                ui.label("meshtard");
-                ui.add_space(6.0);
-                ui.label(format!("Save changes to \"{name}\"?"));
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Yes").clicked() {
-                        answer = Some(Answer::Yes);
-                    }
-                    if ui.button("No").clicked() {
-                        answer = Some(Answer::No);
-                    }
-                    if ui.button("Cancel").clicked()
-                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
-                    {
-                        answer = Some(Answer::Cancel);
-                    }
-                });
+            let r = mt_ui::Dialog::new("save_changes", "Meshtard").show(ctx, |ui| {
+                mt_ui::dialog::message(ui, &format!("Save changes to \"{name}\"?"), None);
+                mt_ui::dialog::buttons(ui, &["Yes", "No", "Cancel"], Some(0))
             });
-        }
+            match (r.inner, r.closed) {
+                (_, true) | (Some(2), _) => Some(Answer::Cancel),
+                (Some(0), _) => Some(Answer::Yes),
+                (Some(_), _) => Some(Answer::No),
+                (None, _) => None,
+            }
+        };
         match answer {
             Some(Answer::Yes) => {
                 self.pending = None;

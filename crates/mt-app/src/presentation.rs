@@ -25,19 +25,15 @@ pub(crate) struct Presentation {
     pub about: Option<crate::about::About>,
 }
 
-/// OK / Cancel buttons (Enter and Escape) at the bottom of a dialog.
+/// The `ok` and Cancel buttons at the bottom of a dialog; Enter presses `ok`.
+/// `Some(true)` for `ok`, `Some(false)` for Cancel.
 pub(crate) fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
-    let mut done = None;
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        if ui.button(ok).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            done = Some(true);
-        }
-        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            done = Some(false);
-        }
-    });
-    done
+    mt_ui::dialog::buttons(ui, &[ok, "Cancel"], Some(0)).map(|i| i == 0)
+}
+
+/// A dialog's answer from [`ok_cancel`]: its close button and Escape count as Cancel.
+pub(crate) fn answer(r: mt_ui::DialogResponse<Option<bool>>) -> Option<bool> {
+    if r.closed { Some(false) } else { r.inner }
 }
 
 /// Opens `target` (a file or URL) with the system's default application: `open` on

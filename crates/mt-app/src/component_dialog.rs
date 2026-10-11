@@ -52,52 +52,38 @@ impl App {
         let Some(mut d) = self.make_component.take() else {
             return;
         };
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_make_component")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            // The shell theme draws flat widgets; dialog fields need visible borders.
-            let border = egui::Stroke::new(1.0, egui::Color32::from_gray(150));
-            let w = &mut ui.visuals_mut().widgets;
-            w.inactive.bg_stroke = border;
-            w.inactive.bg_fill = egui::Color32::WHITE;
-            w.inactive.weak_bg_fill = egui::Color32::from_gray(235);
-            w.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 215));
-            ui.visuals_mut().extreme_bg_color = egui::Color32::WHITE;
-            ui.strong("Create Component");
-            ui.add_space(6.0);
-            egui::Grid::new("mt_make_component_grid")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Definition:");
-                    ui.text_edit_singleline(&mut d.name);
-                    ui.end_row();
-                    ui.label("Description:");
-                    ui.text_edit_multiline(&mut d.description);
-                    ui.end_row();
-                    ui.label("Glue to:");
-                    egui::ComboBox::from_id_salt("mt_glue")
-                        .selected_text(GLUE.iter().find(|g| g.0 == d.glue).map_or("None", |g| g.1))
-                        .show_ui(ui, |ui| {
-                            for (g, label) in GLUE {
-                                ui.selectable_value(&mut d.glue, g, label);
-                            }
-                        });
-                    ui.end_row();
-                    ui.label("");
-                    ui.checkbox(&mut d.set_axes, "Set Component Axes");
-                    ui.end_row();
-                });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Create").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    done = Some(true);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    done = Some(false);
-                }
+        let r = mt_ui::Dialog::new("make_component", "Create Component")
+            .width(360.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                egui::Grid::new("mt_make_component_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Definition:");
+                        ui.text_edit_singleline(&mut d.name);
+                        ui.end_row();
+                        ui.label("Description:");
+                        ui.text_edit_multiline(&mut d.description);
+                        ui.end_row();
+                        ui.label("Glue to:");
+                        egui::ComboBox::from_id_salt("mt_glue")
+                            .selected_text(
+                                GLUE.iter().find(|g| g.0 == d.glue).map_or("None", |g| g.1),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (g, label) in GLUE {
+                                    ui.selectable_value(&mut d.glue, g, label);
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("");
+                        ui.checkbox(&mut d.set_axes, "Set Component Axes");
+                        ui.end_row();
+                    });
+                crate::presentation::ok_cancel(ui, "Create")
             });
-        });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.make_component = Some(d),
             Some(false) => {}

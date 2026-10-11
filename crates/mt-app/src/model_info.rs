@@ -117,17 +117,18 @@ impl App {
         let Some(mut info) = self.model_info.take() else {
             return;
         };
-        let mut open = true;
         let mut rebuild = false;
-        egui::Window::new("Model Info")
-            .id(egui::Id::new("mt_model_info"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([520.0, 380.0])
+        // A fixed-height body: the page list on the left, the page (scrolling when
+        // long) on the right.
+        let height = (ctx.content_rect().height() - 160.0).clamp(200.0, 380.0);
+        let r = mt_ui::Dialog::new("model_info", "Model Info")
+            .width(520.0)
+            .modal(false)
             .show(ctx, |ui| {
                 crate::export::dialog_visuals(ui);
-                ui.horizontal_top(|ui| {
+                let size = egui::vec2(ui.available_width(), height);
+                let layout = egui::Layout::left_to_right(egui::Align::Min);
+                ui.allocate_ui_with_layout(size, layout, |ui| {
                     ui.vertical(|ui| {
                         ui.set_width(110.0);
                         for page in Page::ALL {
@@ -142,8 +143,12 @@ impl App {
                     });
                     ui.separator();
                     ui.vertical(|ui| {
-                        ui.set_min_width(360.0);
-                        rebuild |= self.model_info_page(ui, &mut info);
+                        egui::ScrollArea::vertical()
+                            .id_salt("mt_mi_page")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                rebuild |= self.model_info_page(ui, &mut info);
+                            });
                     });
                 });
             });
@@ -151,7 +156,7 @@ impl App {
             let device = rs.device.clone();
             self.rebuild(&device);
         }
-        if open {
+        if !r.closed {
             self.model_info = Some(info);
         }
     }

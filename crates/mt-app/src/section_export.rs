@@ -233,53 +233,54 @@ impl App {
             .document
             .as_ref()
             .map_or(Units::Inches, |doc| crate::export::kernel_units(doc.units));
-        let mut done = None;
-        egui::Modal::new(egui::Id::new("mt_export_section")).show(ctx, |ui| {
-            ui.set_width(320.0);
-            crate::export::dialog_visuals(ui);
-            ui.strong("Export Section Slice Options");
-            ui.add_space(6.0);
-            ui.label("Drawing Scale & Size");
-            ui.checkbox(&mut d.full_scale, "Full Scale (1:1)");
-            egui::Grid::new("mt_section_grid")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("In Drawing:");
-                    ui.add_enabled(
-                        !d.full_scale,
-                        egui::DragValue::new(&mut d.in_drawing)
-                            .range(0.001..=1e6)
-                            .speed(0.1),
-                    );
-                    ui.end_row();
-                    ui.label("In Model:");
-                    ui.add_enabled(
-                        !d.full_scale,
-                        egui::DragValue::new(&mut d.in_model)
-                            .range(0.001..=1e6)
-                            .speed(1.0),
-                    );
-                    ui.end_row();
-                    ui.label("Units:");
-                    let label = |u: Option<Units>| match u {
-                        None => format!("Model Units ({})", model_units.name()),
-                        Some(u) => u.name().to_owned(),
-                    };
-                    egui::ComboBox::from_id_salt("mt_section_units")
-                        .selected_text(label(d.units))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut d.units, None, label(None));
-                            for u in Units::ALL {
-                                ui.selectable_value(&mut d.units, Some(u), label(Some(u)));
-                            }
-                        });
-                    ui.end_row();
-                });
-            ui.add_space(4.0);
-            ui.weak("AutoCAD R12 DXF, LINE entities in the section plane.");
-            done = crate::presentation::ok_cancel(ui, "Export...");
-        });
+        let r = mt_ui::Dialog::new("export_section", "Export Section Slice")
+            .width(320.0)
+            .show(ctx, |ui| {
+                crate::export::dialog_visuals(ui);
+                ui.strong("Drawing Scale & Size");
+                ui.add_space(4.0);
+                ui.checkbox(&mut d.full_scale, "Full Scale (1:1)");
+                ui.add_space(4.0);
+                egui::Grid::new("mt_section_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("In Drawing:");
+                        ui.add_enabled(
+                            !d.full_scale,
+                            egui::DragValue::new(&mut d.in_drawing)
+                                .range(0.001..=1e6)
+                                .speed(0.1),
+                        );
+                        ui.end_row();
+                        ui.label("In Model:");
+                        ui.add_enabled(
+                            !d.full_scale,
+                            egui::DragValue::new(&mut d.in_model)
+                                .range(0.001..=1e6)
+                                .speed(1.0),
+                        );
+                        ui.end_row();
+                        ui.label("Units:");
+                        let label = |u: Option<Units>| match u {
+                            None => format!("Model Units ({})", model_units.name()),
+                            Some(u) => u.name().to_owned(),
+                        };
+                        egui::ComboBox::from_id_salt("mt_section_units")
+                            .selected_text(label(d.units))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut d.units, None, label(None));
+                                for u in Units::ALL {
+                                    ui.selectable_value(&mut d.units, Some(u), label(Some(u)));
+                                }
+                            });
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.weak("AutoCAD R12 DXF, LINE entities in the section plane.");
+                crate::presentation::ok_cancel(ui, "Export...")
+            });
+        let done = crate::presentation::answer(r);
         match done {
             None => self.present.section = Some(d),
             Some(false) => self.present.last_section = d,
