@@ -49,3 +49,32 @@ pub fn save_toolbar_layout(layout: &mt_ui::ToolbarLayout) {
         );
     }
 }
+
+fn trays_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("trays.toml"))
+}
+
+/// The saved trays (Window > Manage Trays), if there is a readable file.
+pub fn load_tray_layout() -> Option<mt_ui::TrayLayout> {
+    let text = std::fs::read_to_string(trays_path()?).ok()?;
+    match toml::from_str(&text) {
+        Ok(layout) => Some(layout),
+        Err(e) => {
+            log::warn!("ignoring saved trays: {e}");
+            None
+        }
+    }
+}
+
+pub fn save_tray_layout(layout: &mt_ui::TrayLayout) {
+    let Some(path) = trays_path() else { return };
+    let result = toml::to_string(layout)
+        .map_err(std::io::Error::other)
+        .and_then(|text| {
+            std::fs::create_dir_all(path.parent().expect("has a parent"))?;
+            std::fs::write(&path, text)
+        });
+    if let Err(e) = result {
+        log::warn!("could not save the trays to {}: {e}", path.display());
+    }
+}

@@ -17,6 +17,8 @@ pub enum Pending {
     Exit,
     /// File > Revert: asks "Revert?" instead of "Save changes?" (wording unverified).
     Revert,
+    /// File > New from Template: this template (`None`: the built-in one).
+    NewFrom(Option<PathBuf>),
 }
 
 impl App {
@@ -48,6 +50,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Pending::Revert => self.revert(ctx, frame),
+            Pending::NewFrom(template) => self.new_from_template(ctx, frame, template),
         }
     }
 

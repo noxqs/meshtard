@@ -19,13 +19,39 @@ impl Shell {
             bar.bottom() - 0.5,
             Stroke::new(1.0, t.border),
         );
-        ui.painter().text(
-            pos2(bar.left() + 8.0, bar.center().y),
-            Align2::LEFT_CENTER,
-            &frame.spec.tray.name,
-            FontId::proportional(t.sizes.font),
-            t.text,
-        );
+        if self.trays.trays.len() > 1 {
+            // Several trays: the title switches between them.
+            let names: Vec<String> = self.trays.trays.iter().map(|t| t.name.clone()).collect();
+            let active = self.trays.active;
+            let area = Rect::from_min_max(
+                pos2(bar.left() + 4.0, bar.top() + 1.0),
+                pos2(bar.right() - 44.0, bar.bottom() - 1.0),
+            );
+            let mut pick = None;
+            // A child ui over the bar, not taking layout space.
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+            egui::ComboBox::from_id_salt("mt_ui_tray_switch")
+                .selected_text(&names[active])
+                .width(area.width() - 8.0)
+                .show_ui(&mut child, |ui| {
+                    for (i, n) in names.iter().enumerate() {
+                        if ui.selectable_label(i == active, n).clicked() {
+                            pick = Some(i);
+                        }
+                    }
+                });
+            if let Some(i) = pick {
+                self.switch_tray(i);
+            }
+        } else {
+            ui.painter().text(
+                pos2(bar.left() + 8.0, bar.center().y),
+                Align2::LEFT_CENTER,
+                self.active_tray_name(),
+                FontId::proportional(t.sizes.font),
+                t.text,
+            );
+        }
         let close =
             Rect::from_center_size(pos2(bar.right() - 12.0, bar.center().y), vec2(16.0, 16.0));
         if close_button(ui, close, "mt_ui_tray_close", &t).clicked() {
@@ -97,7 +123,8 @@ impl Shell {
         );
         let closed = close_button(ui, close, ("mt_ui_panel_close", &id), &t).clicked();
         if closed {
-            self.panels[i].shown = false;
+            // Closing a panel takes it out of the tray (Window menu puts it back).
+            self.set_panel_in_tray(&id, false);
             return;
         }
         if response.clicked() {

@@ -51,6 +51,11 @@ impl Animation {
     pub(crate) fn is_playing(&self) -> bool {
         self.playing.is_some()
     }
+
+    /// Stops playing (File > Export > Animation takes over the camera).
+    pub(crate) fn stop(&mut self) {
+        self.playing = None;
+    }
 }
 
 /// The scene after (`step` 1) or before (`step` -1) `current` among `count`, wrapping;
