@@ -134,6 +134,14 @@ impl App {
             .interactable(true)
             .show(ctx, |ui| {
                 let (rect, _) = ui.allocate_exact_size(img.size(), egui::Sense::click_and_drag());
+                // Soft shadow under the splash, like the dialogs.
+                let shadow = egui::Shadow {
+                    offset: [0, 6],
+                    blur: 24,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha((f32::from(a) * 70.0 / 255.0) as u8),
+                };
+                ui.painter().add(shadow.as_shape(rect, 0));
                 ui.painter().image(
                     id,
                     rect,
@@ -146,6 +154,13 @@ impl App {
                     status,
                     egui::FontId::proportional(13.0),
                     egui::Color32::from_rgba_unmultiplied(40, 40, 40, a),
+                );
+                let border = egui::Color32::from_gray(110);
+                ui.painter().rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0, border.gamma_multiply(f32::from(a) / 255.0)),
+                    egui::StrokeKind::Inside,
                 );
             });
         ctx.request_repaint();
