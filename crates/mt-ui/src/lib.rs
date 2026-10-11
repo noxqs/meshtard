@@ -134,6 +134,7 @@ use mt_spec::Spec;
 
 pub use dialog::{Dialog, DialogResponse};
 pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
+pub use menu::menu_list;
 pub use theme::apply as apply_theme;
 pub use tray_data::{
     ComponentRow, FaceStyle, FogSettings, MaterialRow, OutlinerKind, OutlinerNode, OutlinerRow,

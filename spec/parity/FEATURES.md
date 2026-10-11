@@ -133,14 +133,14 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 Source: help.sketchup.com pages and the 2024.0-2026.2 release notes; the per-item sources and details are in `HELP_COMPARISON.md`. Every item still gets checked in the trial. Ranked; S/M/L effort.
 
 ### M16: everyday gaps (High)
-44. [ ] **Viewport right-click menus** M: framework plus per-entity items (Entity Info, Erase, Hide, Make Group/Component, Zoom Selection; empty space: Select All, Make Group). The items below hang off it.
-45. [ ] **Select submenu** S: Connected Faces, Bounding Edges, All Connected, All with Same Tag / Material, Deselect Edges / Faces, Invert.
-46. [ ] **Reverse Faces / Orient Faces** S.
-47. [ ] **Flip Along > Red / Green / Blue; Reset Scale, Reset Skew, Scale Definition** S (instances).
+44. [x] **Viewport right-click menus** M: framework plus per-entity items (Entity Info, Erase, Hide, Make Group/Component, Zoom Selection; empty space: Select All, Make Group). The items below hang off it. Done in `context_menu.rs` (menu drawn with the menu bar's look via `mt_ui::menu_list`; right click without drag picks; items per selection type, greyed when they cannot apply; `camera.zoom_selection`; Make Group on empty space makes an empty group and opens it).
+45. [x] **Select submenu** S: Connected Faces, Bounding Edges, All Connected, All with Same Tag / Material, Deselect Edges / Faces, Invert. Connected by Snaps: no (needs item 59).
+46. [x] **Reverse Faces / Orient Faces** S. `mt_kernel::orient`.
+47. [x] **Flip Along > Red / Green / Blue; Reset Scale, Reset Skew, Scale Definition** S (instances). `mt_kernel::instance_ops`.
 48. [ ] **Flip tool** M: three draggable planes, arrow keys pick the plane, Ctrl = flipped copy, Alt = object/parent axes, custom plane on a face, arrays `3x` / `3/`.
 49. [ ] **Inference inside an open group or component** M (STATUS `missing`): magenta markers, "in group" tooltip; also On Section, Perpendicular to Face, Extend Edge.
 50. [ ] **Paint Bucket modes** S: Alt sample, Shift all matching, Ctrl all connected, Ctrl+Shift same object; Default material.
-51. [ ] **Divide; Weld Edges / Explode Curve** S-M: live division points, typed segment count or length.
+51. [x] **Divide; Weld Edges / Explode Curve** S-M: live division points, typed segment count or length. `mt_kernel::curves`; typed segment length and Divide on free-form curves not done.
 52. [ ] **Entity Info fields** M: visibility / lock / shadow toggles, instance name vs definition, advanced attributes, editable length / radius / segments, soft/smooth on edges, section plane name and symbol, text and dimension options.
 53. [ ] **Materials Edit tab** M: color wheel / RGB / HSL / HEX, texture load/replace, size with aspect lock, external editor.
 54. [ ] **Texture Position** L: pins (move, scale/rotate, shear, distort), flip/rotate/reset, free pins.

@@ -220,6 +220,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Splash at the image's size; "Meshtard" in UI text.
 
 ### M16: everyday gaps from the help comparison (FEATURES.md 44-54)
+- [x] Items 44, 45, 46, 47, 51: viewport right-click menu with the Select submenu, Reverse / Orient Faces, Flip Along, Reset Scale / Skew, Scale Definition, Divide, Weld Edges, Explode Curve, Zoom Selection (`context_menu.rs`, kernel `orient`, `instance_ops`, `curves`).
 ### M17: regular gaps (FEATURES.md 55-64)
 ### M18: occasional gaps (FEATURES.md 65-67)
 

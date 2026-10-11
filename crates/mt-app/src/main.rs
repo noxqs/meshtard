@@ -9,6 +9,7 @@ mod camera_tools;
 mod commands;
 mod component_dialog;
 mod confirm;
+mod context_menu;
 mod cursor;
 mod document;
 mod export;
@@ -102,6 +103,26 @@ const IMPLEMENTED: &[&str] = &[
     "edit.close_group",
     "edit.explode",
     "edit.make_unique",
+    // Context menu commands (context_menu.rs).
+    "camera.zoom_selection",
+    "edit.select_connected_faces",
+    "edit.select_bounding_edges",
+    "edit.select_all_connected",
+    "edit.select_same_tag",
+    "edit.select_same_material",
+    "edit.deselect_edges",
+    "edit.deselect_faces",
+    "edit.reverse_faces",
+    "edit.orient_faces",
+    "edit.flip_red",
+    "edit.flip_green",
+    "edit.flip_blue",
+    "edit.reset_scale",
+    "edit.reset_skew",
+    "edit.scale_definition",
+    "edit.divide",
+    "edit.weld_edges",
+    "edit.explode_curve",
     "view.shadows",
     "view.section_planes",
     "view.section_cuts",
@@ -358,6 +379,8 @@ struct App {
     prefs: preferences::Prefs,
     /// File > Export Section Slice and Animation, Print, templates, report, About.
     present: presentation::Presentation,
+    /// The viewport's right-click menu.
+    ctx_menu: context_menu::ContextMenu,
 }
 
 impl App {
@@ -451,6 +474,7 @@ impl App {
             model_info: None,
             prefs,
             present: Default::default(),
+            ctx_menu: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -958,6 +982,7 @@ impl App {
             let device = rs.device.clone();
             self.rebuild(&device);
         } else if self.camera_command(id)
+            || self.context_command(frame, id)
             || self.extra_command(ctx, frame, id)
             || self.m13_command(ctx, frame, id)
             || self.presentation_command(ctx, frame, id)
@@ -1466,6 +1491,7 @@ impl App {
             }
             _ => self.inference = None,
         }
+        self.context_menu(ui, &response, rect, viewport_px, &render_state.device);
         self.tool_cursor(ui, &response, rect, viewport_px);
         self.update_live(&render_state.device);
 
@@ -2451,6 +2477,7 @@ impl eframe::App for App {
             self.run_command(ui.ctx(), frame, &id);
         }
         self.shell = Some(shell);
+        self.context_menu_command(ui.ctx(), frame);
         self.poll_loading(ui.ctx(), frame);
         self.splash_ui(ui.ctx());
         self.confirm_ui(ui.ctx(), frame);

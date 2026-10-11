@@ -95,6 +95,17 @@ impl App {
                 }
                 c
             }
+            // Fits the selection like Zoom Extents fits the model (context menu).
+            "camera.zoom_selection" => {
+                let items = self.selection.items();
+                let Some((min, max)) = crate::context_menu::selection_bounds(&self.scene, items)
+                else {
+                    return true;
+                };
+                let mut c = current.clone();
+                c.fit(min, max, aspect);
+                c
+            }
             "camera.parallel" => Camera {
                 perspective: false,
                 two_point: false,

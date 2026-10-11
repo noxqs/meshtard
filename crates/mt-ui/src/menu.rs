@@ -14,7 +14,7 @@ impl Shell {
             for menu in &frame.spec.menus.menu {
                 ui.menu_button(&menu.label, |ui| {
                     ui.set_min_width(220.0);
-                    menu_items(ui, &menu.items, frame, &mut clicked);
+                    menu_items(ui, &menu.items, &Items::of(frame), &mut clicked);
                 });
             }
         });
@@ -24,7 +24,49 @@ impl Shell {
     }
 }
 
-fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], frame: &Frame, clicked: &mut Option<String>) {
+/// What menu items need to know: shortcut text, enabled and checked state.
+struct Items<'a> {
+    spec: &'a Spec,
+    is_enabled: &'a dyn Fn(&str) -> bool,
+    is_checked: &'a dyn Fn(&str) -> bool,
+}
+
+impl<'a> Items<'a> {
+    fn of(frame: &'a Frame) -> Self {
+        Self {
+            spec: frame.spec,
+            is_enabled: frame.is_enabled,
+            is_checked: frame.is_checked,
+        }
+    }
+}
+
+/// Draws `items` into an open menu (e.g. the viewport's right-click menu from
+/// `egui::Response::context_menu`) with the menu bar's look: check gutter, shortcut
+/// text, greyed disabled items, submenus. Returns the command clicked; the menu is
+/// closed then.
+pub fn menu_list(
+    ui: &mut egui::Ui,
+    items: &[MenuItem],
+    spec: &Spec,
+    is_enabled: &dyn Fn(&str) -> bool,
+    is_checked: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let mut clicked = None;
+    menu_items(
+        ui,
+        items,
+        &Items {
+            spec,
+            is_enabled,
+            is_checked,
+        },
+        &mut clicked,
+    );
+    clicked
+}
+
+fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], frame: &Items, clicked: &mut Option<String>) {
     for item in items {
         match item {
             MenuItem::Separator { .. } => {
