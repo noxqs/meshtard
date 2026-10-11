@@ -176,6 +176,18 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
     - (3) Extension Warehouse: an index (e.g. a GitHub-hosted catalog of Meshtard extensions) browsed from the app, with signature/checksum checks before install.
     - (4) Later and optional: a compatibility layer for a subset of SketchUp's Ruby API.
 
+## Inference locking (requested 2026-10-11)
+
+70. [ ] **Modifier-key inference locks as in SketchUp** M. Source: help.sketchup.com/en/sketchup/introducing-drawing-basics-and-concepts ([doc]). Meshtard has arrow-key axis locks and the Down parallel lock and Shift direction lock in drawing tools, and hover acquisition.
+    - Shift through-point lock [doc]: after the first click, hover a second point (endpoint, midpoint, guide point...) and hold Shift: the direction locks from the start through that point (today Shift only locks axis/parallel/perpendicular directions).
+    - Shift plane lock [doc]: hovering a face and holding Shift locks the drawing plane for plane tools (Rectangle, Circle, Polygon, Arc, Rotate, Protractor).
+    - Shift+Alt [doc]: locks the drawing plane and the tool to the inferenced face's plane.
+    - Alt in the Line tool after the first click cycles [doc]: All Inferences On / All Inferences Off (no linear inferences; point inferences stay) / Parallel and Perpendicular Only; shown in the status bar.
+    - Alt in Rotate and Protractor [doc]: frees the center point while keeping the locked plane.
+    - The same locks in the modify tools: Move, Rotate, Scale, Offset, Push/Pull, Follow Me, Tape Measure, Dimensions (today they have arrow keys only: add Shift and Down).
+    - Missing inference kinds [doc]: Component Origin Point, Arc Midpoint, Extend Edge, Perpendicular to Face, On Section, Intersection with Hidden Section, Quarter / Three-Quarter Circle, Arc Side and Center, Circle/Polygon Center (some overlap with item 49).
+    - Release rules (arrow key again, Escape, tool click) are not stated in the help: check in the trial (TRIAL_CHECKLIST.md 1e).
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)

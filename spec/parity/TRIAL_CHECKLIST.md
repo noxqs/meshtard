@@ -102,3 +102,7 @@ The `.skp` files saved in sections 1 and 2 become automated round-trip tests. Th
 
 - [ ] With a new default model, screenshot the whole 3D view and zoom into each corner: is there an axes indicator or other widget? Repeat with View > Toolbars > Solar North (or the Shadows / Location settings) on, and with a model geo-located.
 - [ ] For each widget found: what happens on hover, click, double-click and drag; does it follow orbiting; is it in View menu toggles or Preferences; record it in `spec/raw/ui/widgets/`.
+
+## 1e. Inference locks (FEATURES.md item 70)
+
+- [ ] For Line, Rectangle, Move, Rotate, Push/Pull: record how each lock is set and released: arrow keys (pressing the same key again? another key? Escape?), Shift held vs tapped, Shift over a point (through point), Shift over a face (plane), Shift+Alt, Alt cycling in Line (status bar text), Alt in Rotate/Protractor. Screen recording `spec/raw/inference/locks.mp4`.
