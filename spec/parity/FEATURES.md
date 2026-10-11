@@ -164,6 +164,18 @@ Source: help.sketchup.com pages and the 2024.0-2026.2 release notes; the per-ite
 
 Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC, Overlays, Ruby and extensions, collaboration and comments, AI features, Analysis Hub, Scan Essentials, Revit Importer, Trimble Connect, 3D Warehouse, Add Location imagery, photoreal (PBR) materials until the renderer supports them.
 
+## Online libraries (requested 2026-10-11)
+
+68. [ ] **Model library browser (Window > 3D Warehouse equivalent)** L. A tray panel / window to search, preview and import models straight into the open model (placed with Place Component).
+    - Sources are pluggable. First check whether Trimble's 3D Warehouse has a usable public API and terms that allow a third-party client (believed not: it needs a Trimble ID; unverified). If not, start with open libraries that have public APIs and permissive licenses, e.g. Poly Haven (CC0, glTF), plus a local folder library (any folder of .skp / .obj / .stl / .glb), and optionally Sketchfab (needs the user's own account/token, downloadable models only).
+    - Needs a glTF/GLB importer (item 15 lists glTF export; add import), thumbnails, a download cache in the user data folder, license shown per model.
+    - Steps: (1) local folder library + search UI, (2) Poly Haven source + GLB import, (3) further sources.
+69. [ ] **Extension system and Extension Warehouse** L. SketchUp extensions are Ruby scripts against SketchUp's Ruby API; running them would mean re-implementing that API (large, later). Meshtard first needs its own extension system:
+    - (1) Extension API design: commands, menus/toolbars, tools, model access, observers; scripting language choice (e.g. Rhai or Lua embedded, or WASM plugins for sandboxing); permissions.
+    - (2) Extension Manager (Window > Extension Manager, currently grey): install from a file, enable/disable, uninstall, updates.
+    - (3) Extension Warehouse: an index (e.g. a GitHub-hosted catalog of Meshtard extensions) browsed from the app, with signature/checksum checks before install.
+    - (4) Later and optional: a compatibility layer for a subset of SketchUp's Ruby API.
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)

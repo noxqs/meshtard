@@ -223,6 +223,9 @@ Reading first means real SketchUp models are available for testing everything el
 ### M17: regular gaps (FEATURES.md 55-64)
 ### M18: occasional gaps (FEATURES.md 65-67)
 
+### M19: Libraries and extensions (FEATURES.md 68-69)
+- [ ] Model library browser with pluggable sources (local folders, Poly Haven, others); extension system, Extension Manager, Meshtard Extension Warehouse.
+
 ## Risks
 
 1. **Kernel robustness.** Floating-point tolerance bugs are where most effort goes. Invariant checker and property tests from day one.
