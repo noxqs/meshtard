@@ -2,15 +2,20 @@
 //! entity under the cursor or the selection, and take typed values like SketchUp
 //! (distance, angle, factor, `5x` / `/5` arrays after a copy).
 //!
-//! Behaviors are drafts from memory of SketchUp (`spec/parity/STATUS.md`). Scale is
-//! simplified: three points (fixed, reference, new) instead of SketchUp's grips.
+//! Behaviors are drafts from memory of SketchUp (`spec/parity/STATUS.md`). Scale uses
+//! SketchUp's grip box (corner, edge and face grips).
+//!
+//! While Move, Rotate or Scale runs, the app draws the targets live at the transformed
+//! position ([`ModifyTool::live`]) and hides them at the original one (SketchUp moves
+//! the real geometry; here connected geometry does not stretch until the click).
 
-use glam::{DMat4, DQuat, DVec3};
+use glam::{DMat3, DMat4, DQuat, DVec2, DVec3};
 use mt_infer::Inference;
 use mt_infer::units::{LengthUnit, parse_length};
 use mt_kernel::{EdgeId, Entities, FaceId};
 
 use crate::document::Owner;
+use crate::selection::OrientedBox;
 
 /// What a modify tool can see and change.
 pub struct Ctx<'a> {
@@ -22,6 +27,25 @@ pub struct Ctx<'a> {
     pub ctrl: bool,
     /// Camera position in the context's space (which side of a face is clicked).
     pub eye: DVec3,
+}
+
+/// What a modify tool sees of the cursor before any click (Scale's grip hover).
+pub struct Hover<'a> {
+    pub ents: &'a Entities,
+    pub selection: &'a [Owner],
+    /// Definition-space bounds of a top-level instance of the context.
+    pub instance_bounds: &'a dyn Fn(usize) -> Option<(DVec3, DVec3)>,
+    /// Context space to viewport pixels.
+    pub project: &'a dyn Fn(DVec3) -> Option<DVec2>,
+    /// Viewport pixels.
+    pub cursor: Option<DVec2>,
+}
+
+/// A point drawn over the view (Scale's grips); `hot` under the cursor or grabbed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Marker {
+    pub point: DVec3,
+    pub hot: bool,
 }
 
 pub trait ModifyTool {
@@ -47,12 +71,32 @@ pub trait ModifyTool {
     fn cancel(&mut self);
     /// The material picked in the Materials panel (Paint Bucket).
     fn set_material(&mut self, _material: Option<usize>) {}
+    /// Set Component Axes: the dialog and the picked axes once complete.
+    fn take_axes(&mut self) -> Option<(crate::component_dialog::MakeComponent, DMat4)> {
+        None
+    }
     /// Ctrl pressed and released: toggles copy (Move, Rotate) or new faces
     /// (Push/Pull) for the rest of the tool's use (SketchUp keeps the toggle while the
     /// tool is active; unverified).
     fn toggle_ctrl(&mut self) {}
     /// A double click (after the click it also is). Returns whether the model changed.
     fn double_click(&mut self, _ctx: &mut Ctx, _inf: &Inference) -> bool {
+        false
+    }
+    /// Called every frame before a click with what is under the cursor.
+    fn hover(&mut self, _h: &Hover) {}
+    /// Points to draw over the view (context space) for the cursor at `cur`.
+    fn markers(&self, _cur: &Inference) -> Vec<Marker> {
+        Vec::new()
+    }
+    /// The targets being transformed and the transform at the cursor (context space),
+    /// to draw them live; `copy`: the originals stay where they are.
+    fn live(&self, _cur: &Inference) -> Option<(&[Owner], DMat4, bool)> {
+        None
+    }
+    /// After a change, the selection still names the changed entities (SketchUp keeps
+    /// the selection after Move, Rotate and Scale).
+    fn keeps_selection(&self) -> bool {
         false
     }
 }
@@ -62,7 +106,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.push_pull" => Box::new(PushPull::default()),
         "tool.move" => Box::new(Transform::new(Kind::Move)),
         "tool.rotate" => Box::new(Transform::new(Kind::Rotate)),
-        "tool.scale" => Box::new(Transform::new(Kind::Scale)),
+        "tool.scale" => Box::new(Scale::default()),
         "tool.offset" => Box::new(Offset::default()),
         "tool.follow_me" => Box::new(FollowMe),
         "tool.paint_bucket" => Box::new(PaintBucket::default()),
@@ -155,31 +199,6 @@ fn parse_array(text: &str) -> Option<(usize, bool)> {
         .and_then(|n| n.trim().parse().ok())
         .filter(|n| *n >= 2)
         .map(|n| (n, true))
-}
-
-/// Points along the targets' edges, for previews.
-fn outline(ents: &Entities, targets: &[Owner]) -> Vec<Vec<DVec3>> {
-    let (edges, faces, _) = split(targets);
-    let mut out: Vec<Vec<DVec3>> = edges
-        .iter()
-        .filter_map(|e| ents.edges.get(*e))
-        .map(|e| vec![ents.pos(e.start), ents.pos(e.end)])
-        .collect();
-    for f in faces.iter().filter(|f| ents.faces.contains_key(**f)) {
-        for l in ents.faces[*f].loops() {
-            let mut pts = ents.loop_points(l);
-            pts.push(pts[0]);
-            out.push(pts);
-        }
-    }
-    out
-}
-
-fn transform_lines(lines: Vec<Vec<DVec3>>, xf: DMat4) -> Vec<Vec<DVec3>> {
-    lines
-        .into_iter()
-        .map(|l| l.into_iter().map(|p| xf.transform_point3(p)).collect())
-        .collect()
 }
 
 // ------------------------------------------------------------------ Push/Pull
@@ -311,17 +330,15 @@ impl ModifyTool for PushPull {
     }
 }
 
-// ------------------------------------------------------------------ Move, Rotate, Scale
+// ------------------------------------------------------------------ Move, Rotate
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Move,
     Rotate,
-    Scale,
 }
 
 /// Move: base point, destination. Rotate: center, start direction, end direction.
-/// Scale: fixed point, reference point, new point (uniform factor).
 #[derive(Debug)]
 pub struct Transform {
     kind: Kind,
@@ -347,7 +364,7 @@ impl Transform {
     fn needed(&self) -> usize {
         match self.kind {
             Kind::Move => 2,
-            Kind::Rotate | Kind::Scale => 3,
+            Kind::Rotate => 3,
         }
     }
 
@@ -369,11 +386,6 @@ impl Transform {
                 let angle = u.dot(w).clamp(-1.0, 1.0).acos();
                 Some(rotation_about(*c, axis, angle))
             }
-            (Kind::Scale, [f, r]) => {
-                let (dr, dp) = ((*r - *f).length(), (p - *f).length());
-                (dr > mt_kernel::TOL && dp > mt_kernel::TOL)
-                    .then(|| scale_about(*f, DVec3::splat(dp / dr)))
-            }
             _ => None,
         }
     }
@@ -384,7 +396,7 @@ impl Transform {
         if targets.is_empty() {
             return false;
         }
-        let copy = (self.copy || ctx.ctrl) && self.kind != Kind::Scale;
+        let copy = self.copy || ctx.ctrl;
         apply(ctx.ents, &targets, xf, copy);
         self.last_copy = copy.then_some((targets, xf));
         true
@@ -397,8 +409,11 @@ fn rotation_about(c: DVec3, axis: DVec3, angle: f64) -> DMat4 {
         * DMat4::from_translation(-c)
 }
 
-fn scale_about(c: DVec3, s: DVec3) -> DMat4 {
-    DMat4::from_translation(c) * DMat4::from_scale(s) * DMat4::from_translation(-c)
+/// Scales by `s` along the unit directions `dirs` (columns of a basis) about `c`.
+fn scale_in_axes(c: DVec3, dirs: [DVec3; 3], s: DVec3) -> DMat4 {
+    let b = DMat3::from_cols(dirs[0], dirs[1], dirs[2]);
+    let m = b * DMat3::from_diagonal(s) * b.inverse();
+    DMat4::from_translation(c) * DMat4::from_mat3(m) * DMat4::from_translation(-c)
 }
 
 impl ModifyTool for Transform {
@@ -411,12 +426,9 @@ impl ModifyTool for Transform {
             (Kind::Rotate, 0) => "Select center of rotation. Ctrl = toggle copy.",
             (Kind::Rotate, 1) => "Select start point of the angle.",
             (Kind::Rotate, _) => "Select end point or enter angle.",
-            (Kind::Scale, 0) => "Select fixed point.",
-            (Kind::Scale, 1) => "Select reference point.",
-            (Kind::Scale, _) => "Select new point or enter scale factor.",
         }
         .into();
-        if self.copy && self.kind != Kind::Scale {
+        if self.copy {
             format!("{text} (Copy)")
         } else {
             text
@@ -434,20 +446,8 @@ impl ModifyTool for Transform {
                     format!("{:.1}", u.dot(w).clamp(-1.0, 1.0).acos().to_degrees()),
                 )
             }
-            (Kind::Scale, [f, r], Some(p)) => {
-                let dr = (*r - *f).length();
-                (
-                    "Scale",
-                    if dr > 0.0 {
-                        format!("{:.3}", (p - *f).length() / dr)
-                    } else {
-                        String::new()
-                    },
-                )
-            }
             (Kind::Move, ..) => ("Distance", String::new()),
             (Kind::Rotate, ..) => ("Angle", String::new()),
-            (Kind::Scale, ..) => ("Scale", String::new()),
         }
     }
 
@@ -541,7 +541,6 @@ impl ModifyTool for Transform {
                 };
                 Some(rotation_about(*c, axis, deg.to_radians()))
             }
-            (Kind::Scale, [f, _]) => parse_factors(text).map(|s| scale_about(*f, s)),
             _ => None,
         };
         match xf {
@@ -550,30 +549,36 @@ impl ModifyTool for Transform {
         }
     }
 
-    fn preview(&self, ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
-        let mut out = match self.xf(cur.point) {
-            Some(xf) if self.points.len() + 1 == self.needed() => {
-                transform_lines(outline(ents, &self.targets), xf)
-            }
-            _ => Vec::new(),
-        };
+    /// The rubber band; the targets themselves are drawn live (see [`Self::live`]).
+    fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
         let mut guide = self.points.clone();
         guide.push(cur.point);
         if guide.len() > 1 {
-            out.push(guide);
+            vec![guide]
+        } else {
+            Vec::new()
         }
-        out
     }
 
     fn toggle_ctrl(&mut self) {
-        if self.kind != Kind::Scale {
-            self.copy = !self.copy;
-        }
+        self.copy = !self.copy;
     }
 
     fn cancel(&mut self) {
         self.points.clear();
         self.targets.clear();
+    }
+
+    fn live(&self, cur: &Inference) -> Option<(&[Owner], DMat4, bool)> {
+        if self.targets.is_empty() || self.points.len() + 1 != self.needed() {
+            return None;
+        }
+        Some((&self.targets, self.xf(cur.point)?, self.copy))
+    }
+
+    /// Moved entities stay selected; copies are new entities, so the selection goes.
+    fn keeps_selection(&self) -> bool {
+        self.last_copy.is_none()
     }
 }
 
@@ -614,6 +619,408 @@ fn parse_factors(text: &str) -> Option<DVec3> {
         _ => return None,
     };
     (v.abs().min_element() > 1e-9).then_some(v)
+}
+
+// ------------------------------------------------------------------ Scale
+
+/// Grip pick radius in viewport pixels (SketchUp's is unmeasured; draft).
+pub const GRIP_RADIUS_PX: f64 = 8.0;
+
+/// Box coordinates of a grip: -1, 0 or 1 per box axis. Corners have three non-zero
+/// coordinates, edge midpoints two and face centers one.
+pub type Grip = [i8; 3];
+
+fn grip_vec(g: Grip) -> DVec3 {
+    DVec3::new(g[0].into(), g[1].into(), g[2].into())
+}
+
+/// The grips of `b`: corners, edge midpoints and face centers. Grips that would scale a
+/// flat dimension are left out (a face shows eight grips in its plane, as in SketchUp).
+pub fn grips(b: &OrientedBox) -> Vec<Grip> {
+    let flat = |i: usize| b.half[i] <= mt_kernel::TOL;
+    let mut out = Vec::new();
+    for x in -1i8..=1 {
+        for y in -1i8..=1 {
+            for z in -1i8..=1 {
+                let g = [x, y, z];
+                if g == [0, 0, 0] || (0..3).any(|i| g[i] != 0 && flat(i)) {
+                    continue;
+                }
+                out.push(g);
+            }
+        }
+    }
+    out
+}
+
+/// The grip of `b` nearest to `cursor` on screen within `radius` pixels.
+pub fn pick_grip(
+    b: &OrientedBox,
+    project: &dyn Fn(DVec3) -> Option<DVec2>,
+    cursor: DVec2,
+    radius: f64,
+) -> Option<Grip> {
+    grips(b)
+        .into_iter()
+        .filter_map(|g| Some((g, project(b.at(grip_vec(g)))?.distance(cursor))))
+        .filter(|(_, d)| *d <= radius)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(g, _)| g)
+}
+
+/// The box the Scale tool shows around `targets`: a single component or group's box in
+/// its own axes, the box along the context's axes otherwise.
+pub fn grip_box(
+    ents: &Entities,
+    targets: &[Owner],
+    instance_bounds: &dyn Fn(usize) -> Option<(DVec3, DVec3)>,
+) -> Option<OrientedBox> {
+    let instance_box = |i: usize| {
+        let inst = ents.instances.get(i)?;
+        let (min, max) = instance_bounds(i)?;
+        Some(OrientedBox::from_aabb(min, max).transformed(inst.transform))
+    };
+    if let [Owner::Instance(i)] = targets {
+        return instance_box(*i);
+    }
+    let mut pts = Vec::new();
+    for t in targets {
+        match *t {
+            Owner::Edge(e) => {
+                if let Some(e) = ents.edges.get(e) {
+                    pts.extend([ents.pos(e.start), ents.pos(e.end)]);
+                }
+            }
+            Owner::Face(f) => {
+                if let Some(f) = ents.faces.get(f) {
+                    pts.extend(f.loops().flat_map(|l| ents.loop_points(l)));
+                }
+            }
+            Owner::Instance(i) => pts.extend(instance_box(i).iter().flat_map(|b| b.corners())),
+            Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
+        }
+    }
+    OrientedBox::around(pts)
+}
+
+/// A grabbed grip of a box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Grab {
+    pub grip: Grip,
+    pub bbox: OrientedBox,
+}
+
+/// A typed scale value: a factor, or a length (the size wanted).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScaleValue {
+    Factor(f64),
+    Length(f64),
+}
+
+/// `2`, `2,1,1`, `200mm` or `200mm,1m,1` (plain numbers are factors).
+fn parse_scale_values(text: &str, units: LengthUnit) -> Option<Vec<ScaleValue>> {
+    if let Some(v) = parse_factors(text) {
+        let mut out = vec![ScaleValue::Factor(v.x)];
+        if text.contains([',', ';']) {
+            out = v.to_array().map(ScaleValue::Factor).to_vec();
+        }
+        return Some(out);
+    }
+    text.split([',', ';'])
+        .map(|p| match p.trim().parse::<f64>() {
+            Ok(f) => Some(ScaleValue::Factor(f)),
+            Err(_) => parse_length(p.trim(), units).map(ScaleValue::Length),
+        })
+        .collect()
+}
+
+impl Grab {
+    /// Box axes the grip scales.
+    fn axes(&self) -> Vec<usize> {
+        (0..3).filter(|&i| self.grip[i] != 0).collect()
+    }
+
+    /// Corner grips (all of the box's non-flat axes) scale uniformly; edge and face
+    /// grips scale their axes independently.
+    pub fn uniform(&self) -> bool {
+        let solid = (0..3)
+            .filter(|&i| self.bbox.half[i] > mt_kernel::TOL)
+            .count();
+        let n = self.axes().len();
+        n >= 2 && n == solid
+    }
+
+    /// The grip's position.
+    pub fn handle(&self) -> DVec3 {
+        self.bbox.at(grip_vec(self.grip))
+    }
+
+    /// The point that stays: the opposite grip, or the center.
+    pub fn fixed(&self, about_center: bool) -> DVec3 {
+        if about_center {
+            self.bbox.center
+        } else {
+            self.bbox.at(-grip_vec(self.grip))
+        }
+    }
+
+    pub fn xf(&self, s: DVec3, about_center: bool) -> DMat4 {
+        scale_in_axes(self.fixed(about_center), self.bbox.dirs, s)
+    }
+
+    /// Factors (per box axis) that take the grip to `p`.
+    pub fn factors_at(&self, p: DVec3, about_center: bool) -> Option<DVec3> {
+        let f = self.fixed(about_center);
+        let (r, d) = (self.handle() - f, p - f);
+        if self.uniform() {
+            let rr = r.length_squared();
+            return (rr > mt_kernel::TOL * mt_kernel::TOL).then(|| DVec3::splat(d.dot(r) / rr));
+        }
+        let mut s = DVec3::ONE;
+        for i in self.axes() {
+            let a = self.bbox.dirs[i];
+            let ra = r.dot(a);
+            if ra.abs() <= mt_kernel::TOL {
+                return None;
+            }
+            s[i] = d.dot(a) / ra;
+        }
+        Some(s)
+    }
+
+    /// Factors for typed values: one value for the grip's axes (uniform for a corner),
+    /// one per scaled axis, or three (red, green, blue box axes). A length is the size
+    /// wanted along the axis (along the box diagonal for a uniform value; unverified).
+    fn factors_typed(&self, vals: &[ScaleValue]) -> Option<DVec3> {
+        let size = |i: usize| 2.0 * self.bbox.half[i];
+        let factor = |v: ScaleValue, size: f64| match v {
+            ScaleValue::Factor(f) => Some(f),
+            ScaleValue::Length(l) => (size > mt_kernel::TOL).then(|| l / size),
+        };
+        let axes = self.axes();
+        let mut s = DVec3::ONE;
+        match vals {
+            [v] if self.uniform() => {
+                let diag = axes.iter().map(|&i| size(i).powi(2)).sum::<f64>().sqrt();
+                s = DVec3::splat(factor(*v, diag)?);
+            }
+            [v] => {
+                for &i in &axes {
+                    s[i] = factor(*v, size(i))?;
+                }
+            }
+            _ if vals.len() == axes.len() && !self.uniform() => {
+                for (&i, v) in axes.iter().zip(vals) {
+                    s[i] = factor(*v, size(i))?;
+                }
+            }
+            [x, y, z] => {
+                for (i, v) in [x, y, z].into_iter().enumerate() {
+                    s[i] = factor(*v, size(i))?;
+                }
+            }
+            _ => return None,
+        }
+        (s.abs().min_element() > 1e-9).then_some(s)
+    }
+}
+
+/// SketchUp's Scale tool: the selection (or the clicked entity) gets a box with grips;
+/// dragging a grip (or click, move, click) scales about the opposite grip, or about the
+/// center after Ctrl. Corner grips scale uniformly, edge grips two axes, face grips one.
+/// Typed: `2`, `2,1,1` or sizes like `200mm` (also right after a scale, to change it).
+/// Differences from SketchUp: Ctrl toggles instead of being held, Shift (uniform /
+/// non-uniform swap) is not implemented, and the box is not drawn with SketchUp's yellow.
+#[derive(Debug, Default)]
+pub struct Scale {
+    /// Targets clicked while nothing is selected.
+    own: Vec<Owner>,
+    /// The targets the box is around.
+    targets: Vec<Owner>,
+    bbox: Option<OrientedBox>,
+    /// Grip under the cursor.
+    hot: Option<Grip>,
+    grab: Option<Grab>,
+    about_center: bool,
+    /// The last scale (targets, grip, transform): a typed value replaces it.
+    last: Option<(Vec<Owner>, Grab, DMat4)>,
+}
+
+impl Scale {
+    fn finish(&mut self, ctx: &mut Ctx, grab: Grab, s: DVec3) -> bool {
+        self.grab = None;
+        if self.targets.is_empty() {
+            return false;
+        }
+        let xf = grab.xf(s, self.about_center);
+        apply(ctx.ents, &self.targets, xf, false);
+        self.last = Some((self.targets.clone(), grab, xf));
+        true
+    }
+}
+
+impl ModifyTool for Scale {
+    fn status(&self) -> String {
+        let text = match (&self.grab, &self.bbox) {
+            (Some(_), _) => "Select second point or enter scale value (2, 2,1,1 or 200mm).",
+            (None, Some(_)) => "Select a grip to scale. Ctrl = toggle scale about center.",
+            (None, None) => "Select an entity to scale.",
+        };
+        if self.about_center {
+            format!("{text} (About center)")
+        } else {
+            text.into()
+        }
+    }
+
+    fn measurement(&self, cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
+        let (Some(g), Some(c)) = (&self.grab, cur) else {
+            return ("Scale", String::new());
+        };
+        let Some(s) = g.factors_at(c.point, self.about_center) else {
+            return ("Scale", String::new());
+        };
+        let text = if g.uniform() {
+            format!("{:.2}", s.x)
+        } else {
+            g.axes()
+                .iter()
+                .map(|&i| format!("{:.2}", s[i]))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        ("Scale", text)
+    }
+
+    fn anchor(&self) -> Option<DVec3> {
+        self.grab.map(|g| g.handle())
+    }
+
+    fn hover(&mut self, h: &Hover) {
+        if self.grab.is_some() {
+            return;
+        }
+        if !h.selection.is_empty() {
+            self.own.clear();
+        }
+        self.targets = if h.selection.is_empty() {
+            self.own
+                .iter()
+                .copied()
+                .filter(|o| crate::selection::exists(h.ents, o))
+                .collect()
+        } else {
+            h.selection.to_vec()
+        };
+        self.bbox = grip_box(h.ents, &self.targets, h.instance_bounds);
+        self.hot = match (self.bbox, h.cursor) {
+            (Some(b), Some(c)) => pick_grip(&b, h.project, c, GRIP_RADIUS_PX),
+            _ => None,
+        };
+    }
+
+    /// The grips, on the scaled box while one is held.
+    fn markers(&self, cur: &Inference) -> Vec<Marker> {
+        let Some(b) = self.bbox else {
+            return Vec::new();
+        };
+        let b = match self.live(cur) {
+            Some((_, xf, _)) => b.transformed(xf),
+            None => b,
+        };
+        let hot = self.grab.map(|g| g.grip).or(self.hot);
+        grips(&b)
+            .into_iter()
+            .map(|g| Marker {
+                point: b.at(grip_vec(g)),
+                hot: Some(g) == hot,
+            })
+            .collect()
+    }
+
+    fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        if let Some(g) = self.grab {
+            return match g.factors_at(inf.point, self.about_center) {
+                Some(s) if s.abs().min_element() > 1e-9 => self.finish(ctx, g, s),
+                _ => false,
+            };
+        }
+        if let (Some(grip), Some(bbox)) = (self.hot, self.bbox) {
+            self.grab = Some(Grab { grip, bbox });
+            self.last = None;
+            return false;
+        }
+        if ctx.selection.is_empty() {
+            self.own = ctx.picked.into_iter().collect();
+        }
+        false
+    }
+
+    fn typed(
+        &mut self,
+        ctx: &mut Ctx,
+        _cur: Option<&Inference>,
+        text: &str,
+        units: LengthUnit,
+    ) -> bool {
+        let Some(vals) = parse_scale_values(text, units) else {
+            return false;
+        };
+        if let Some(g) = self.grab {
+            return match g.factors_typed(&vals) {
+                Some(s) => self.finish(ctx, g, s),
+                None => false,
+            };
+        }
+        // Right after a scale: the value replaces it.
+        if let Some((targets, g, prev)) = &mut self.last
+            && let Some(s) = g.factors_typed(&vals)
+        {
+            let xf = g.xf(s, self.about_center);
+            apply(ctx.ents, targets, xf * prev.inverse(), false);
+            *prev = xf;
+            return true;
+        }
+        false
+    }
+
+    /// The box (scaled with the targets while a grip is held).
+    fn preview(&self, _ents: &Entities, cur: &Inference) -> Vec<Vec<DVec3>> {
+        let Some(b) = self.bbox else {
+            return Vec::new();
+        };
+        let b = match self.live(cur) {
+            Some((_, xf, _)) => b.transformed(xf),
+            None => b,
+        };
+        b.edges()
+            .into_iter()
+            .filter(|[p, q]| p.distance(*q) > mt_kernel::TOL)
+            .map(|e| e.to_vec())
+            .collect()
+    }
+
+    fn cancel(&mut self) {
+        if self.grab.take().is_none() {
+            self.own.clear();
+        }
+    }
+
+    fn toggle_ctrl(&mut self) {
+        self.about_center = !self.about_center;
+    }
+
+    fn live(&self, cur: &Inference) -> Option<(&[Owner], DMat4, bool)> {
+        let g = self.grab?;
+        let s = g
+            .factors_at(cur.point, self.about_center)
+            .filter(|s| s.abs().min_element() > 1e-9)?;
+        Some((&self.targets, g.xf(s, self.about_center), false))
+    }
+
+    fn keeps_selection(&self) -> bool {
+        true
+    }
 }
 
 // ------------------------------------------------------------------ Offset
@@ -868,6 +1275,8 @@ impl ModifyTool for PaintBucket {
 #[derive(Debug)]
 pub struct PlaceComponent {
     pub definition: mt_kernel::DefinitionId,
+    /// The definition's "Glue to": on an accepting face the instance lies in its plane.
+    pub glue: mt_kernel::GlueTo,
 }
 
 impl ModifyTool for PlaceComponent {
@@ -884,9 +1293,13 @@ impl ModifyTool for PlaceComponent {
     }
 
     fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
+        let transform = match inf.normal {
+            Some(n) if self.glue.accepts(n) => crate::component_dialog::glued_frame(inf.point, n),
+            _ => DMat4::from_translation(inf.point),
+        };
         ctx.ents.instances.push(mt_kernel::Instance {
             definition: self.definition,
-            transform: DMat4::from_translation(inf.point),
+            transform,
             name: String::new(),
             hidden: false,
             layer: None,
@@ -1126,6 +1539,181 @@ mod tests {
             .map(|v| v.pos.x)
             .fold(f64::MAX, f64::min);
         assert!((min_x + 10.0).abs() < 1e-9);
+    }
+
+    fn unit_box() -> OrientedBox {
+        OrientedBox::from_aabb(DVec3::ZERO, DVec3::new(10.0, 20.0, 30.0))
+    }
+
+    #[test]
+    fn grips_of_solid_and_flat_boxes() {
+        assert_eq!(grips(&unit_box()).len(), 26, "8 corners, 12 edges, 6 faces");
+        let flat = OrientedBox::from_aabb(DVec3::ZERO, DVec3::new(10.0, 10.0, 0.0));
+        let g = grips(&flat);
+        assert_eq!(g.len(), 8, "a face: 4 corners and 4 edge midpoints");
+        assert!(g.iter().all(|g| g[2] == 0));
+    }
+
+    #[test]
+    fn grip_picking_takes_the_nearest_within_the_radius() {
+        let b = unit_box();
+        // Top view: x, y to pixels; z ignored (grips stacked along z overlap).
+        let project = |p: DVec3| Some(DVec2::new(p.x * 10.0, p.y * 10.0));
+        let g = pick_grip(&b, &project, DVec2::new(101.0, 198.0), 8.0).unwrap();
+        assert_eq!([g[0], g[1]], [1, 1]);
+        let g = pick_grip(&b, &project, DVec2::new(52.0, 3.0), 8.0).unwrap();
+        assert_eq!([g[0], g[1]], [0, -1]);
+        assert!(pick_grip(&b, &project, DVec2::new(30.0, 30.0), 8.0).is_none());
+    }
+
+    #[test]
+    fn scale_about_the_opposite_grip_or_center() {
+        let bbox = unit_box();
+        // Corner (+,+,+): uniform about (0,0,0).
+        let corner = Grab {
+            grip: [1, 1, 1],
+            bbox,
+        };
+        assert!(corner.uniform());
+        let s = corner
+            .factors_at(DVec3::new(20.0, 40.0, 60.0), false)
+            .unwrap();
+        assert!((s - DVec3::splat(2.0)).length() < 1e-9);
+        let xf = corner.xf(s, false);
+        assert!(
+            xf.transform_point3(DVec3::ZERO).length() < 1e-9,
+            "opposite corner stays"
+        );
+        // Face grip (+x): one axis, about the -x face.
+        let face = Grab {
+            grip: [1, 0, 0],
+            bbox,
+        };
+        assert!(!face.uniform());
+        let s = face.factors_at(DVec3::new(15.0, 3.0, 99.0), false).unwrap();
+        assert!((s - DVec3::new(1.5, 1.0, 1.0)).length() < 1e-9);
+        // About the center: the grip moves 5 for each 5 from the center.
+        let s = face.factors_at(DVec3::new(15.0, 0.0, 0.0), true).unwrap();
+        assert!((s.x - 2.0).abs() < 1e-9);
+        let c = face.xf(s, true).transform_point3(bbox.center);
+        assert!(c.distance(bbox.center) < 1e-9);
+        // Edge grip (+x, -y): two axes, independently.
+        let edge = Grab {
+            grip: [1, -1, 0],
+            bbox,
+        };
+        let s = edge
+            .factors_at(DVec3::new(20.0, -20.0, 0.0), false)
+            .unwrap();
+        assert!((s - DVec3::new(2.0, 2.0, 1.0)).length() < 1e-9);
+        let s = edge.factors_at(DVec3::new(5.0, 0.0, 0.0), false).unwrap();
+        assert!((s - DVec3::new(0.5, 1.0, 1.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn scale_in_component_axes() {
+        // A box turned 90 degrees about blue: its red axis is the world's green.
+        let bbox = unit_box().transformed(DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2));
+        let g = Grab {
+            grip: [1, 0, 0],
+            bbox,
+        };
+        let h = g.handle();
+        assert!((h - DVec3::new(-10.0, 10.0, 15.0)).length() < 1e-9, "{h}");
+        let s = g.factors_at(h + DVec3::Y * 10.0, false).unwrap();
+        assert!((s - DVec3::new(2.0, 1.0, 1.0)).length() < 1e-9);
+        let xf = g.xf(s, false);
+        let far = xf.transform_point3(h);
+        assert!(
+            (far - DVec3::new(-10.0, 20.0, 15.0)).length() < 1e-9,
+            "{far}"
+        );
+    }
+
+    #[test]
+    fn typed_scale_values() {
+        let u = LengthUnit::Millimeter;
+        let bbox = unit_box();
+        let corner = Grab {
+            grip: [1, 1, 1],
+            bbox,
+        };
+        let face = Grab {
+            grip: [0, 1, 0],
+            bbox,
+        };
+        let v = |t: &str| parse_scale_values(t, u).unwrap();
+        assert_eq!(corner.factors_typed(&v("2")), Some(DVec3::splat(2.0)));
+        assert_eq!(
+            corner.factors_typed(&v("2,1,0.5")),
+            Some(DVec3::new(2.0, 1.0, 0.5))
+        );
+        assert_eq!(face.factors_typed(&v("3")), Some(DVec3::new(1.0, 3.0, 1.0)));
+        // 20 inches deep: 1016 mm makes it 2.0.
+        let s = face.factors_typed(&v("1016mm")).unwrap();
+        assert!((s.y - 2.0).abs() < 1e-9 && s.x == 1.0);
+        assert!(face.factors_typed(&v("0")).is_none());
+        assert!(parse_scale_values("abc", u).is_none());
+    }
+
+    #[test]
+    fn scale_tool_drags_a_grip() {
+        let mut ents = Entities::default();
+        let f = square(&mut ents);
+        let sel = [Owner::Face(f)];
+        let mut sc = Scale::default();
+        let project = |p: DVec3| Some(DVec2::new(p.x * 10.0, p.y * 10.0));
+        let no_bounds = |_: usize| None;
+        let hover = |sc: &mut Scale, ents: &Entities, cursor: DVec2| {
+            sc.hover(&Hover {
+                ents,
+                selection: &sel,
+                instance_bounds: &no_bounds,
+                project: &project,
+                cursor: Some(cursor),
+            })
+        };
+        hover(&mut sc, &ents, DVec2::new(100.0, 100.0));
+        assert_eq!(sc.markers(&inf(DVec3::ZERO)).len(), 8);
+        assert!(sc.markers(&inf(DVec3::ZERO)).iter().any(|m| m.hot));
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: None,
+            selection: &sel,
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
+        assert!(!sc.click(&mut ctx, &inf(DVec3::new(10.0, 10.0, 0.0))));
+        let (targets, xf, copy) = sc.live(&inf(DVec3::new(20.0, 20.0, 0.0))).unwrap();
+        assert_eq!(targets, &sel);
+        assert!(!copy);
+        assert!(
+            (xf.transform_point3(DVec3::new(10.0, 10.0, 0.0)) - DVec3::new(20.0, 20.0, 0.0))
+                .length()
+                < 1e-9
+        );
+        assert!(sc.click(&mut ctx, &inf(DVec3::new(20.0, 20.0, 0.0))));
+        let max = ents
+            .vertices
+            .values()
+            .map(|v| v.pos.x)
+            .fold(f64::MIN, f64::max);
+        assert!((max - 20.0).abs() < 1e-9);
+        // Retyped right after: the value replaces the scale (factor of the original).
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: None,
+            selection: &sel,
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
+        assert!(sc.typed(&mut ctx, None, "3", LengthUnit::Inch));
+        let max = ents
+            .vertices
+            .values()
+            .map(|v| v.pos.x)
+            .fold(f64::MIN, f64::max);
+        assert!((max - 30.0).abs() < 1e-9, "{max}");
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod model;
 pub mod offset;
 pub mod ops;
 pub mod push_pull;
+pub mod spatial;
 pub mod tessellate;
 pub mod texture;
 pub mod transform;
@@ -27,7 +28,7 @@ pub use entities::*;
 pub use follow_me::follow_me;
 pub use intersect::intersect_faces;
 pub use model::{
-    Definition, FaceStyle, Layer, Material, Model, Page, ShadowSettings, StyleSettings,
+    Definition, FaceStyle, GlueTo, Layer, Material, Model, Page, ShadowSettings, StyleSettings,
 };
 pub use offset::offset_face;
 pub use ops::{add_curve, add_line, erase_curve, erase_edge};

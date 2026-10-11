@@ -16,7 +16,17 @@
 //!
 //! Known cases where the Python oracle is ahead of the C++ source, accepted until ported:
 //! - Legacy face layers: Python reads them, C++ leaves them unset.
-//! - Legacy model-level dimensions: Python decodes their endpoints, C++ does not.
+//!
+//! Known cases where this reader is ahead of the Python oracle:
+//! - Legacy dimensions in entity lists (`root.dimensions`, `definitions.*.dimensions`):
+//!   Python's `Definition.dimensions` keeps only text and hidden; the endpoints are
+//!   compared on the model-level `dimensions` list instead.
+//! - Legacy texts anchored to an entity (not a free point): we report the label
+//!   point, Python only does for free anchors.
+//! - Legacy styles: Python returns none.
+//!
+//! Keys only this reader emits (`offset_direction`, `screen_position`, ...) are not
+//! compared: the loop below only visits keys present on both sides.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -126,7 +136,29 @@ fn compare(path: &str, ours: &Value, theirs: &Value, r: &mut Report) {
         {
             r.known += 1
         }
-        (Value::Array(a), Value::Array(_)) if path == ".dimensions" && a.is_empty() => r.known += 1,
+        // Legacy dimensions and texts inside entity lists: OpenSKP decodes the
+        // endpoints and offset but `Definition.dimensions` keeps only text/hidden
+        // (they are compared on the model-level list instead), and it reports a
+        // text's label point only when the anchor is a free point.
+        (Value::Array(_), Value::Null)
+            if path.contains(".dimensions.") && (path.ends_with(".a") || path.ends_with(".b")) =>
+        {
+            r.known += 1
+        }
+        (Value::Number(_), Value::Number(b))
+            if path.contains(".dimensions.")
+                && path.ends_with(".offset")
+                && b.as_f64() == Some(0.0) =>
+        {
+            r.known += 1
+        }
+        (Value::Array(_), Value::Null)
+            if path.contains(".texts.") && path.ends_with(".label_point") =>
+        {
+            r.known += 1
+        }
+        // Legacy styles (`CSkpStyle` records): OpenSKP does not read them.
+        (Value::Array(_), Value::Array(b)) if path == ".styles" && b.is_empty() => r.known += 1,
         (a, b) => {
             let short = |v: &Value| {
                 let s = v.to_string();

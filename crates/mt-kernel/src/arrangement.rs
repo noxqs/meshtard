@@ -26,10 +26,12 @@ pub struct Cell {
 
 /// Edges lying in `plane`.
 pub fn edges_in_plane(ents: &Entities, plane: &Plane) -> Vec<EdgeId> {
-    ents.edges
-        .iter()
-        .filter(|(_, e)| plane.contains(ents.pos(e.start)) && plane.contains(ents.pos(e.end)))
-        .map(|(id, _)| id)
+    ents.edges_near_plane(plane, crate::ops::PLANE_SLACK)
+        .into_iter()
+        .filter(|&id| {
+            let e = &ents.edges[id];
+            plane.contains(ents.pos(e.start)) && plane.contains(ents.pos(e.end))
+        })
         .collect()
 }
 

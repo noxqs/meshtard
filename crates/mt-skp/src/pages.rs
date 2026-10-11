@@ -221,6 +221,7 @@ pub fn parse_dimensions(
             plane_x: vec3_of(find_item(&body, 0x5bcf)),
             normal: vec3_of(find_item(&body, 0x5bd0)),
             text: String::new(),
+            ..Default::default()
         });
     }
     dims

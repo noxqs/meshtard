@@ -230,6 +230,9 @@ pub struct StyleSettings {
     pub profile_width: u8,
     /// Modeling Settings > Section Cut Width, pixels.
     pub section_cut_width: u8,
+    /// Modeling Settings > Section Fill and its color (sRGB).
+    pub section_fill: bool,
+    pub section_fill_color: [u8; 3],
     pub face_style: FaceStyle,
     /// Face Settings > X-ray toggle; combines with `face_style`.
     pub x_ray: bool,
@@ -242,6 +245,8 @@ impl Default for StyleSettings {
             profiles: true,
             profile_width: 3,
             section_cut_width: 3,
+            section_fill: true,
+            section_fill_color: [64, 64, 64],
             face_style: FaceStyle::default(),
             x_ray: false,
         }

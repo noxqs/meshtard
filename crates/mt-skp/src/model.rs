@@ -203,6 +203,16 @@ impl Default for SectionPlane {
 pub struct TextEntity {
     pub text: String,
     pub hidden: bool,
+    /// The point the leader points at, in the owning definition's frame (world for
+    /// the root). `None` for screen texts and for texts anchored to an entity other
+    /// than a vertex (e.g. a face). Legacy files only.
+    pub point: Option<Vec3>,
+    /// Where the label floats (the leader joins it to `point`). `None` for screen
+    /// texts. Legacy files only.
+    pub label_point: Option<Vec3>,
+    /// Screen texts: the label's position as fractions of the view's width and
+    /// height (origin unverified, assumed top left). Legacy files only.
+    pub screen_position: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -215,6 +225,10 @@ pub struct Dimension {
     pub offset: f64,
     pub plane_x: Option<Vec3>,
     pub normal: Option<Vec3>,
+    /// Unit direction in which a positive `offset` moves the dimension line, when
+    /// the reader derives it (legacy files: plane normal x (b - a)). VFF files give
+    /// `plane_x` and `normal` instead.
+    pub offset_direction: Option<Vec3>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -311,7 +325,8 @@ pub struct Model {
     pub pages: Vec<Page>,
     /// The view the model was saved with (VFF only).
     pub camera: Option<ViewCamera>,
-    /// Model-level dimensions with world-space endpoints (VFF only).
+    /// Model-level dimensions with world-space endpoints (VFF), or the root's
+    /// dimensions whose endpoints are known (legacy).
     pub dimensions: Vec<Dimension>,
     pub materials: Vec<Material>,
     pub styles: Vec<Style>,
@@ -493,12 +508,13 @@ pub(crate) fn build_model(mut p: RawParsed) -> Model {
         .iter()
         .map(|d| Dimension {
             text: d.text.clone(),
-            hidden: false,
+            hidden: d.hidden,
             a: Some(d.a),
             b: Some(d.b),
             offset: d.offset,
             plane_x: d.plane_x,
             normal: d.normal,
+            offset_direction: d.offset_direction,
         })
         .collect();
 

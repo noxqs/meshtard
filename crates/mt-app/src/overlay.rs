@@ -117,3 +117,27 @@ pub fn paint(
         painter.galley(pos + egui::vec2(4.0, 2.0), galley, egui::Color32::BLACK);
     }
 }
+
+/// Scale grips: small green squares, red under the cursor or while held (SketchUp's
+/// colors from memory; unverified).
+pub fn markers(
+    painter: &egui::Painter,
+    to_screen: impl Fn(DVec3) -> Option<egui::Pos2>,
+    markers: &[(DVec3, bool)],
+) {
+    for (p, hot) in markers {
+        let Some(q) = to_screen(*p) else { continue };
+        let (size, fill) = if *hot {
+            (9.0, egui::Color32::from_rgb(230, 30, 30))
+        } else {
+            (7.0, egui::Color32::from_rgb(40, 180, 40))
+        };
+        painter.rect(
+            egui::Rect::from_center_size(q, egui::vec2(size, size)),
+            0.0,
+            fill,
+            egui::Stroke::new(1.0, egui::Color32::BLACK),
+            egui::StrokeKind::Middle,
+        );
+    }
+}

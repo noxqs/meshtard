@@ -8,9 +8,9 @@
 //!   (entities touching the box).
 //! - Edges win over faces when the cursor is within a few pixels of one.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use glam::{DVec2, DVec3};
+use glam::{DMat4, DVec2, DVec3};
 use mt_kernel::Entities;
 use mt_kernel::bvh::RayIndex;
 use mt_render::Camera;
@@ -86,6 +86,138 @@ impl Selection {
     pub fn items(&self) -> &[Owner] {
         &self.items
     }
+
+    /// Keeps the items for which `keep` is true (e.g. those that still exist).
+    pub fn retain(&mut self, mut keep: impl FnMut(&Owner) -> bool) {
+        self.items.retain(|o| keep(o));
+        self.set.retain(|o| keep(o));
+    }
+}
+
+/// Whether `o` still exists in `ents` (annotations and section planes are not checked).
+pub fn exists(ents: &Entities, o: &Owner) -> bool {
+    match *o {
+        Owner::Edge(e) => ents.edges.contains_key(e),
+        Owner::Face(f) => ents.faces.contains_key(f),
+        Owner::Instance(i) => i < ents.instances.len(),
+        Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => true,
+    }
+}
+
+/// A box with axes of its own: SketchUp's selection box of a component or group
+/// (aligned with the component's axes) and the Scale tool's grip box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrientedBox {
+    pub center: DVec3,
+    /// Unit axis directions.
+    pub dirs: [DVec3; 3],
+    /// Half the size along each of `dirs` (0 for a flat box).
+    pub half: DVec3,
+}
+
+impl OrientedBox {
+    /// The box from `min` to `max` along the coordinate axes.
+    pub fn from_aabb(min: DVec3, max: DVec3) -> Self {
+        Self {
+            center: (min + max) * 0.5,
+            dirs: [DVec3::X, DVec3::Y, DVec3::Z],
+            half: (max - min).abs() * 0.5,
+        }
+    }
+
+    /// The axis-aligned box around `points`; `None` without points.
+    pub fn around(points: impl IntoIterator<Item = DVec3>) -> Option<Self> {
+        let mut it = points.into_iter();
+        let first = it.next()?;
+        let (min, max) = it.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        Some(Self::from_aabb(min, max))
+    }
+
+    /// The box carried by `m` (an affine transform without shear keeps it a box).
+    pub fn transformed(&self, m: DMat4) -> Self {
+        let mut out = Self {
+            center: m.transform_point3(self.center),
+            ..*self
+        };
+        for i in 0..3 {
+            let v = m.transform_vector3(self.dirs[i]);
+            let l = v.length();
+            if l > 1e-12 {
+                out.dirs[i] = v / l;
+                out.half[i] = self.half[i] * l;
+            } else {
+                out.half[i] = 0.0;
+            }
+        }
+        out
+    }
+
+    /// The point at box coordinates `g` (-1 to 1 along each axis; 0 is the center).
+    pub fn at(&self, g: DVec3) -> DVec3 {
+        self.center
+            + self.dirs[0] * (self.half.x * g.x)
+            + self.dirs[1] * (self.half.y * g.y)
+            + self.dirs[2] * (self.half.z * g.z)
+    }
+
+    pub fn corners(&self) -> [DVec3; 8] {
+        std::array::from_fn(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            self.at(DVec3::new(s(1), s(2), s(4)))
+        })
+    }
+
+    /// The twelve edges (repeated points when the box is flat).
+    pub fn edges(&self) -> [[DVec3; 2]; 12] {
+        let c = self.corners();
+        // Corner k has bit 1 for +x, 2 for +y, 4 for +z: edges join corners one bit apart.
+        let mut out = [[DVec3::ZERO; 2]; 12];
+        let mut n = 0;
+        for k in 0..8usize {
+            for b in [1usize, 2, 4] {
+                if k & b == 0 {
+                    out[n] = [c[k], c[k | b]];
+                    n += 1;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Bounds of each top-level instance of the scene in its definition's space, from the
+/// drawn triangles and edges (nested geometry included, hidden geometry not).
+/// `to_world(i)` is instance `i`'s definition-to-world transform.
+pub fn instance_bounds(
+    scene: &Scene,
+    to_world: impl Fn(usize) -> Option<DMat4>,
+) -> HashMap<usize, (DVec3, DVec3)> {
+    let mut inverse: HashMap<usize, Option<DMat4>> = HashMap::new();
+    let mut out: HashMap<usize, (DVec3, DVec3)> = HashMap::new();
+    let mut add = |i: usize, p: DVec3| {
+        let inv = *inverse.entry(i).or_insert_with(|| {
+            to_world(i)
+                .filter(|m| m.determinant().abs() > 1e-18)
+                .map(|m| m.inverse())
+        });
+        let Some(inv) = inv else { return };
+        let q = inv.transform_point3(p);
+        let b = out.entry(i).or_insert((q, q));
+        b.0 = b.0.min(q);
+        b.1 = b.1.max(q);
+    };
+    for (tri, owner) in scene.triangles.iter().zip(&scene.tri_owner) {
+        if let Some(Owner::Instance(i)) = owner {
+            tri.iter().for_each(|p| add(*i, *p));
+        }
+    }
+    for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
+        if let Some(Owner::Instance(i)) = owner {
+            add(*i, v3(seg.a));
+            add(*i, v3(seg.b));
+        }
+    }
+    out
 }
 
 /// What a click with `clicks` presses on `hit` selects.
@@ -418,6 +550,37 @@ mod tests {
             DVec2::new(0.0, 100.0),
         ];
         assert!(r.touches_triangle(big), "rect inside a triangle touches it");
+    }
+
+    #[test]
+    fn aligned_box_follows_the_instance_axes() {
+        // A 10 x 2 x 4 definition box, rotated 90 degrees about blue and moved.
+        let b = OrientedBox::from_aabb(DVec3::ZERO, DVec3::new(10.0, 2.0, 4.0));
+        let xf = DMat4::from_translation(DVec3::new(100.0, 0.0, 0.0))
+            * DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2)
+            * DMat4::from_scale(DVec3::new(2.0, 1.0, 1.0));
+        let t = b.transformed(xf);
+        assert!((t.half - DVec3::new(10.0, 1.0, 2.0)).length() < 1e-9);
+        assert!(
+            (t.dirs[0] - DVec3::Y).length() < 1e-9,
+            "red axis now points along green"
+        );
+        let mut corners = t.corners().to_vec();
+        corners.sort_by(|a, b| a.to_array().partial_cmp(&b.to_array()).unwrap());
+        let near = |p: DVec3| corners.iter().any(|c| c.distance(p) < 1e-9);
+        assert!(near(DVec3::new(100.0, 0.0, 0.0)));
+        assert!(near(DVec3::new(98.0, 20.0, 4.0)));
+        assert!(
+            !near(DVec3::new(120.0, 2.0, 0.0)),
+            "not the world-aligned box"
+        );
+        for [a, c] in t.edges() {
+            assert!(
+                (a.distance(c) - 20.0).abs() < 1e-9
+                    || (a.distance(c) - 2.0).abs() < 1e-9
+                    || (a.distance(c) - 4.0).abs() < 1e-9
+            );
+        }
     }
 }
 

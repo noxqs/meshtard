@@ -7,9 +7,9 @@ pub mod sun;
 pub mod texture;
 pub mod viewport;
 
-pub use camera::{Camera, Ray};
+pub use camera::{Camera, Ray, ease_in_out};
 pub use mesh::FaceVertex;
-pub use section::{SectionCut, section_lines};
+pub use section::{SectionCut, section_fill, section_lines};
 pub use sun::sun_direction;
 pub use texture::{TextureImage, TextureSource};
 pub use viewport::{

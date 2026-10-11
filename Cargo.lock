@@ -1539,6 +1539,7 @@ name = "mt-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "earcutr",
  "egui-wgpu",
  "glam",
  "image",

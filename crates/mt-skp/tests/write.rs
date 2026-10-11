@@ -693,6 +693,8 @@ fn round_trip_details_ours() {
     assert!(car.always_faces_camera && car.shadows_face_sun);
     assert_eq!(car.instances.len(), 4);
     assert_eq!(car.texts.len(), 1);
+    assert_eq!(car.texts[0].point, Some([0.0; 3]));
+    assert_eq!(car.texts[0].label_point, Some(DEFAULT_LEADER));
     assert_eq!(car.construction_points.len(), 1);
     assert_eq!(m.root.texts.len(), 1);
 
@@ -705,7 +707,28 @@ fn round_trip_details_ours() {
     let m = parse(annotations);
     assert_eq!(m.root.texts.len(), 2);
     assert_eq!(m.root.texts[1].text, "\u{dc}n\u{ef}code \u{2713}");
-    assert_eq!(m.root.dimensions.len() + m.dimensions.len(), 2);
+    let t = &m.root.texts[0];
+    assert_eq!(t.point, Some([0.0; 3]));
+    assert_eq!(t.label_point, Some(DEFAULT_LEADER));
+    assert_eq!(t.screen_position, None);
+    let t = &m.root.texts[1];
+    assert_eq!(t.point, Some([100.0, 50.0, 0.0]));
+    assert_eq!(t.label_point, Some([105.0, 45.0, 10.0]));
+    // Legacy files list root dimensions in the root and, with endpoints, at model level.
+    assert_eq!(m.root.dimensions, m.dimensions);
+    let d: Vec<_> = m
+        .dimensions
+        .iter()
+        .map(|d| (d.a.unwrap(), d.b.unwrap(), d.offset, d.offset_direction.unwrap()))
+        .collect();
+    // The writer's plane normal is +Z, so the offset goes along Z x (b - a).
+    assert_eq!(
+        d,
+        [
+            ([0.0; 3], [100.0, 0.0, 0.0], -12.5, [0.0, 1.0, 0.0]),
+            ([0.0; 3], [0.0, 50.0, 0.0], 10.0, [-1.0, 0.0, 0.0]),
+        ]
+    );
 
     let m = parse(textures);
     let brick = m.materials.iter().find(|x| x.name == "Brick").unwrap();

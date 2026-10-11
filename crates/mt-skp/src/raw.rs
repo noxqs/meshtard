@@ -191,6 +191,8 @@ pub struct RawDimension {
     pub offset: f64,
     pub plane_x: Option<Vec3>,
     pub normal: Option<Vec3>,
+    pub offset_direction: Option<Vec3>,
+    pub hidden: bool,
     pub text: String,
 }
 

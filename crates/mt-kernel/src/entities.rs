@@ -175,6 +175,8 @@ pub struct Entities {
     pub dimensions: Vec<crate::annotation::Dimension>,
     /// Leader and screen texts (Text tool).
     pub texts: Vec<crate::annotation::Text>,
+    /// Lookup acceleration, not model data: not cloned, see `spatial`.
+    pub(crate) index: crate::spatial::SpatialIndex,
 }
 
 /// A section plane: cuts away the geometry on the side `normal` points to (which side
@@ -267,11 +269,18 @@ impl Entities {
             .collect()
     }
 
+    /// The first vertex (in key order) within TOL of `p`.
     pub fn find_vertex(&self, p: DVec3) -> Option<VertexId> {
-        self.vertices
-            .iter()
-            .find(|(_, v)| v.pos.distance(p) <= TOL)
-            .map(|(id, _)| id)
+        if self.grid().is_none() {
+            return self
+                .vertices
+                .iter()
+                .find(|(_, v)| v.pos.distance(p) <= TOL)
+                .map(|(id, _)| id);
+        }
+        self.vertices_near(p, TOL)
+            .into_iter()
+            .find(|&v| self.vertices[v].pos.distance(p) <= TOL)
     }
 
     pub fn edge_between(&self, a: VertexId, b: VertexId) -> Option<EdgeId> {
@@ -283,10 +292,14 @@ impl Entities {
     }
 
     pub fn add_vertex(&mut self, pos: DVec3) -> VertexId {
-        self.vertices.insert(Vertex {
+        let v = self.vertices.insert(Vertex {
             pos,
             edges: Vec::new(),
-        })
+        });
+        if let Some(g) = &mut self.index.grid {
+            g.insert_vertex(v, pos);
+        }
+        v
     }
 
     /// Adds an edge with no checks for duplicates or intersections.
@@ -299,6 +312,9 @@ impl Entities {
         });
         self.vertices[start].edges.push(id);
         self.vertices[end].edges.push(id);
+        if let Some(g) = &mut self.index.grid {
+            g.insert_edge(id, self.vertices[start].pos, self.vertices[end].pos);
+        }
         id
     }
 
@@ -326,11 +342,20 @@ impl Entities {
                 faces.push(id);
             }
         }
+        if self.index.grid.is_some() {
+            let b = self.face_bounds(id);
+            if let Some(g) = &mut self.index.grid {
+                g.insert_face(id, b);
+            }
+        }
         id
     }
 
     pub fn remove_face(&mut self, f: FaceId) -> Option<Face> {
         let face = self.faces.remove(f)?;
+        if let Some(g) = &mut self.index.grid {
+            g.remove_face(f);
+        }
         for l in face.loops() {
             for c in &l.coedges {
                 if let Some(e) = self.edges.get_mut(c.edge) {
@@ -348,16 +373,32 @@ impl Entities {
             .into_iter()
             .filter_map(|f| self.remove_face(f))
             .collect();
-        let edge = self.edges.remove(e).expect("edge exists");
-        for v in [edge.start, edge.end] {
-            self.vertices[v].edges.retain(|&x| x != e);
-        }
+        self.unlink_edge(e);
         removed
+    }
+
+    /// Removes an edge from the slot map and its vertices' lists, leaving faces alone
+    /// (callers make sure no face uses it any more).
+    pub fn unlink_edge(&mut self, e: EdgeId) {
+        let Some(edge) = self.edges.remove(e) else {
+            return;
+        };
+        for v in [edge.start, edge.end] {
+            if let Some(x) = self.vertices.get_mut(v) {
+                x.edges.retain(|&y| y != e);
+            }
+        }
+        if let Some(g) = &mut self.index.grid {
+            g.remove_edge(e);
+        }
     }
 
     pub fn remove_vertex_if_unused(&mut self, v: VertexId) {
         if self.vertices.get(v).is_some_and(|x| x.edges.is_empty()) {
             self.vertices.remove(v);
+            if let Some(g) = &mut self.index.grid {
+                g.remove_vertex(v);
+            }
         }
     }
 
@@ -399,10 +440,7 @@ impl Entities {
             self.edges[b].faces.push(f);
         }
         self.edges[e].faces.clear();
-        self.edges.remove(e);
-        for v in [edge.start, edge.end] {
-            self.vertices[v].edges.retain(|&x| x != e);
-        }
+        self.unlink_edge(e);
         (a, b)
     }
 }

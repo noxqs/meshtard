@@ -852,6 +852,10 @@ impl Shell {
                     ui.label("Section Cut Width");
                     ui.add(egui::DragValue::new(&mut s.section_cut_width).range(1..=99));
                 });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut s.section_fill, "Section Fill");
+                    ui.color_edit_button_srgb(&mut s.section_fill_color);
+                });
             }
         }
         if data.style != before {

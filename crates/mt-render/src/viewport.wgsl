@@ -206,6 +206,12 @@ fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     return vec4<f32>(color.rgb * shade, color.a);
 }
 
+// Section fill: the color as given, unlit and not clipped.
+@fragment
+fn fill_fs(in: FaceOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.front.rgb, 1.0);
+}
+
 // SketchUp marks selected faces with a grid of blue dots.
 @fragment
 fn select_fs(in: FaceOut) -> @location(0) vec4<f32> {

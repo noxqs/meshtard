@@ -622,6 +622,58 @@ fn section_plane_clips_faces_edges_and_selection() {
     assert!(px[0] > 100 && px[2] < 100, "uncut top, got {px:?}");
 }
 
+#[test]
+fn section_fill_caps_a_cut_cube() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut viewport = Viewport::new(&device, face_style());
+    let quads = cube_quads();
+    let (vertices, indices) = quads_mesh(&quads, RED, BLUE);
+    viewport.set_faces(&device, &vertices, &indices);
+    let tris: Vec<[DVec3; 3]> = quads
+        .iter()
+        .flat_map(|(_, c)| [[c[0], c[1], c[2]], [c[0], c[2], c[3]]])
+        .collect();
+    // Cut at x = 0 removing +X, seen from the +X side: the cut face shows the fill.
+    let (point, normal) = (DVec3::ZERO, DVec3::X);
+    viewport.set_section(Some(SectionCut {
+        point: [0.0; 3],
+        normal: [1.0, 0.0, 0.0],
+    }));
+    let fill: Vec<[[f32; 3]; 3]> = mt_render::section_fill(&tris, point, normal)
+        .iter()
+        .map(|t| t.map(|p| p.as_vec3().to_array()))
+        .collect();
+    assert!(!fill.is_empty());
+    let grey = [0.25, 0.25, 0.25];
+    viewport.set_section_fill(&device, &fill, grey);
+    let camera = Camera {
+        eye: DVec3::new(400.0, -150.0, 120.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+    };
+    let img = render(&device, &queue, &mut viewport, &camera, "section_fill");
+    for p in [
+        DVec3::new(0.0, 0.0, 0.0),
+        DVec3::new(0.0, 40.0, 40.0),
+        DVec3::new(0.0, -40.0, -40.0),
+    ] {
+        let px = pixel_at(&img, &camera, p);
+        assert!(close(&px, grey, 3), "fill at {p}, got {px:?}");
+    }
+    // The kept side face is still drawn next to the fill.
+    let side = pixel_at(&img, &camera, DVec3::new(-25.0, -50.0, 0.0));
+    assert!(side[0] > 100 && side[2] < 100, "front side, got {side:?}");
+
+    viewport.set_section_fill(&device, &[], grey);
+    let img = render(&device, &queue, &mut viewport, &camera, "section_fill_off");
+    let px = pixel_at(&img, &camera, DVec3::ZERO);
+    assert!(!close(&px, grey, 10), "no fill, got {px:?}");
+}
+
 // ---------------------------------------------------------------- shadows
 
 /// A slab over a lower ledge, seen from straight above, lit from +X 30 degrees off

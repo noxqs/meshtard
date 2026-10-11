@@ -180,11 +180,28 @@ pub fn make_group(
     name: String,
     is_group: bool,
 ) -> Option<usize> {
+    make_group_with_frame(defs, ents, sel, name, is_group, None)
+}
+
+/// [`make_group`] with the definition's axes given: `frame` maps definition space to
+/// the parent (origin and red/green/blue axes, SketchUp's "Set Component Axes");
+/// `None` puts the origin at the selection's bounding-box corner.
+pub fn make_group_with_frame(
+    defs: &mut SlotMap<DefinitionId, Definition>,
+    ents: &mut Entities,
+    sel: &Selection,
+    name: String,
+    is_group: bool,
+    frame: Option<DMat4>,
+) -> Option<usize> {
     if sel.is_empty() {
         return None;
     }
     let (min, _) = bounds(ents, sel, defs)?;
-    let to_local = DMat4::from_translation(-min);
+    let frame = frame
+        .filter(|f| f.determinant().abs() > 1e-12)
+        .unwrap_or(DMat4::from_translation(min));
+    let to_local = frame.inverse();
     let mut inner = Entities::new();
     copy_raw(&mut inner, ents, &sel.edges, &sel.faces, to_local);
     let mut instances: Vec<usize> = sel
@@ -232,10 +249,11 @@ pub fn make_group(
         guid: new_guid(defs.len()),
         entities: inner,
         is_group,
+        glue: crate::model::GlueTo::None,
     });
     ents.instances.push(Instance {
         definition,
-        transform: DMat4::from_translation(min),
+        transform: frame,
         name: String::new(),
         hidden: false,
         layer: None,
@@ -435,5 +453,37 @@ mod tests {
         assert_eq!(validate(&model.root, Checks::ALL), Vec::<String>::new());
         assert_eq!(model.unique_definition_name("Box"), "Box#2");
         assert_eq!(model.unique_definition_name("Box#2"), "Box#2");
+    }
+
+    #[test]
+    fn custom_axes_keep_world_positions() {
+        let mut model = Model::default();
+        square(&mut model.root, DVec3::new(5.0, 5.0, 0.0));
+        let before: Vec<DVec3> = model.root.vertices.values().map(|v| v.pos).collect();
+        let sel = Selection {
+            edges: model.root.edges.keys().collect(),
+            faces: model.root.faces.keys().collect(),
+            instances: vec![],
+        };
+        let frame = DMat4::from_rotation_translation(
+            glam::DQuat::from_rotation_z(0.7),
+            DVec3::new(5.0, 5.0, 0.0),
+        );
+        let i = make_group_with_frame(
+            &mut model.definitions,
+            &mut model.root,
+            &sel,
+            "C".into(),
+            false,
+            Some(frame),
+        )
+        .unwrap();
+        let inst = &model.root.instances[i];
+        assert_eq!(inst.transform, frame);
+        let ents = &model.definitions[inst.definition].entities;
+        for v in ents.vertices.values() {
+            let w = inst.transform.transform_point3(v.pos);
+            assert!(before.iter().any(|b| (*b - w).length() < 1e-9), "{w}");
+        }
     }
 }

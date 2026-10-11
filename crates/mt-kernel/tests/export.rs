@@ -427,3 +427,21 @@ fn textures_round_trip() {
     let diff: Vec<_> = a.symmetric_difference(&b).take(4).collect();
     assert!(diff.is_empty(), "{} vs {}: {diff:?}", a.len(), b.len());
 }
+
+/// Leader texts and dimensions keep their placement through save and reopen.
+#[test]
+fn annotations_round_trip() {
+    use mt_kernel::annotation::{Dimension, Text};
+    let mut m = Model::default();
+    add_line(&mut m.root, DVec3::ZERO, DVec3::X * 10.0);
+    let dim = Dimension::linear(DVec3::ZERO, DVec3::X * 10.0, DVec3::Y * 3.0);
+    let text = Text::leader(DVec3::X * 5.0, DVec3::splat(10.0), "Edge".into());
+    m.root.dimensions.push(dim.clone());
+    m.root.texts.push(text.clone());
+    let r = round_trip(&m);
+    assert_eq!(r.root.texts, [text]);
+    assert_eq!(r.root.dimensions.len(), 1);
+    let d = &r.root.dimensions[0];
+    assert_eq!((d.a, d.b), (dim.a, dim.b));
+    assert!((d.offset - dim.offset).length() < 1e-12, "{:?}", d.offset);
+}

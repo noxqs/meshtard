@@ -235,7 +235,8 @@ mod tests {
         m.root.texts.push(Text::screen(0.1, 0.1, "Title".into()));
         let bytes = crate::export::to_skp(&m).unwrap();
         let back = skp::parse(&bytes).unwrap();
-        assert_eq!(back.root.dimensions.len() + back.dimensions.len(), 1);
+        // Legacy files list root dimensions both in the root and at model level.
+        assert_eq!(back.dimensions.len(), 1);
         let texts: Vec<_> = back.root.texts.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, ["Edge"], "screen texts are not written");
     }

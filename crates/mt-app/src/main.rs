@@ -1,6 +1,7 @@
 //! meshtard desktop application.
 
 mod annot;
+mod component_dialog;
 mod confirm;
 mod document;
 #[cfg(target_os = "macos")]
@@ -76,6 +77,7 @@ const IMPLEMENTED: &[&str] = &[
     "view.shadows",
     "view.section_planes",
     "view.section_cuts",
+    "view.section_fill",
     "view.wireframe",
     "view.hidden_line",
     "view.shaded",
@@ -166,6 +168,8 @@ struct App {
     native_menu: macos_menu::NativeMenu,
     /// Ctrl held in the previous frame (modify tools toggle on press).
     ctrl_was_down: bool,
+    /// The Make Component dialog while open.
+    make_component: Option<component_dialog::MakeComponent>,
     /// An action waiting for the "Save changes?" answer.
     pending: Option<confirm::Pending>,
     /// The window may close (the question was answered or not needed).
@@ -178,10 +182,17 @@ struct App {
     current_component: Option<usize>,
     active_scene: Option<usize>,
     scene_tabs: bool,
+    /// Camera move to an activated scene, in progress.
+    transition: Option<tray::Transition>,
     /// Open group or component space to world space (identity at the root).
     ctx_xf: glam::DMat4,
     /// The active modify tool, when `tool` is `Tool::Modify`.
     modify: Option<Box<dyn modify::ModifyTool>>,
+    /// Definition-space bounds of the open context's top-level instances.
+    inst_bounds: std::collections::HashMap<usize, (DVec3, DVec3)>,
+    /// Targets drawn live by Move, Rotate or Scale: targets, transform (context
+    /// space), copy.
+    live: Option<(Vec<Owner>, glam::DMat4, bool)>,
     /// Edges picked during an Eraser drag, erased on release.
     erase_drag: Vec<Owner>,
     /// The direction lock comes from holding Shift (released with it).
@@ -243,10 +254,13 @@ impl App {
             inference: None,
             draw: None,
             modify: None,
+            inst_bounds: Default::default(),
+            live: None,
             ctx_xf: glam::DMat4::IDENTITY,
             active_tag: 0,
             last_title: String::new(),
             pending: None,
+            make_component: None,
             ctrl_was_down: false,
             closing: false,
             #[cfg(target_os = "macos")]
@@ -256,6 +270,7 @@ impl App {
             current_component: None,
             active_scene: None,
             scene_tabs: true,
+            transition: None,
             erase_drag: Vec::new(),
             shift_lock: false,
             message: None,
@@ -353,6 +368,23 @@ impl App {
                 .collect();
         }
         self.viewport.set_section(cut);
+        // Section fill (View > Section Fill), capping the cut where it closes.
+        let mut fill: Vec<[[f32; 3]; 3]> = Vec::new();
+        let mut fill_color = [0.25; 3];
+        if let (Some((p, n)), Some(doc)) = (self.scene.section, &self.document)
+            && doc.model.style.section_fill
+        {
+            fill_color = doc
+                .model
+                .style
+                .section_fill_color
+                .map(|x| f32::from(x) / 255.0);
+            fill = mt_render::section_fill(&self.scene.triangles, p, n)
+                .iter()
+                .map(|t| t.map(|q| q.as_vec3().to_array()))
+                .collect();
+        }
+        self.viewport.set_section_fill(device, &fill, fill_color);
         if let Some(doc) = &self.document {
             let st = &doc.model.style;
             let face_style = match st.face_style {
@@ -376,6 +408,18 @@ impl App {
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
         self.viewport.set_textures(&self.scene.textures);
+        self.inst_bounds = match &self.document {
+            Some(doc) => {
+                let ents = doc.active();
+                let xf = self.ctx_xf;
+                selection::instance_bounds(&self.scene, |i| {
+                    ents.instances.get(i).map(|inst| xf * inst.transform)
+                })
+            }
+            None => Default::default(),
+        };
+        self.live = None;
+        self.viewport.set_preview_faces(device, &[], &[]);
         self.update_highlight(device);
     }
 
@@ -409,82 +453,154 @@ impl App {
         self.viewport.set_shadows(shadows);
     }
 
-    /// Colors selected edges, dots selected faces and boxes selected components.
+    /// Colors selected edges, dots selected faces and boxes selected components (in
+    /// the component's axes, as SketchUp does). Targets drawn live by a modify tool
+    /// (`self.live`) are drawn at their transformed position.
     fn update_highlight(&mut self, device: &wgpu::Device) {
-        let mut edges = self.scene.edges.clone();
-        let guides = self.scene.guides.clone();
-        for (seg, owner) in edges.iter_mut().zip(&self.scene.edge_owner) {
-            if owner.is_some_and(|o| self.selection.contains(&o)) {
-                seg.color = SELECTED;
-            }
-        }
-        let mut boxes: std::collections::HashMap<usize, (glam::DVec3, glam::DVec3)> =
-            Default::default();
-        let mut grow = |i: usize, p: glam::DVec3| {
-            let b = boxes.entry(i).or_insert((p, p));
-            b.0 = b.0.min(p);
-            b.1 = b.1.max(p);
+        // Live targets: owner set, world-space transform, copy.
+        let live = self.live.as_ref().map(|(t, xf, copy)| {
+            let set: std::collections::HashSet<Owner> = t.iter().copied().collect();
+            (set, self.ctx_xf * *xf * self.ctx_xf.inverse(), *copy)
+        });
+        let moved = |o: &Option<Owner>| match (&live, o) {
+            (Some((set, xf, copy)), Some(o)) if set.contains(o) => Some((*xf, *copy)),
+            _ => None,
         };
-        let mut vertices: Vec<FaceVertex> = Vec::new();
-        for (t, owner) in self.scene.tri_owner.iter().enumerate() {
-            let Some(owner) = owner.filter(|o| self.selection.contains(o)) else {
-                continue;
-            };
-            match owner {
-                Owner::Face(_) => {
-                    for k in 0..3 {
-                        let i = self.scene.indices[3 * t + k] as usize;
-                        vertices.push(self.scene.vertices[i]);
+        let tp = |xf: glam::DMat4, p: [f32; 3]| -> [f32; 3] {
+            xf.transform_point3(glam::Vec3::from(p).as_dvec3())
+                .as_vec3()
+                .into()
+        };
+        let mut edges = Vec::with_capacity(self.scene.edges.len());
+        let mut copies = Vec::new();
+        for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
+            let mut seg = *seg;
+            let selected = owner.is_some_and(|o| self.selection.contains(&o));
+            match moved(owner) {
+                Some((xf, copy)) => {
+                    let mut c = seg;
+                    (c.a, c.b) = (tp(xf, c.a), tp(xf, c.b));
+                    if selected {
+                        c.color = SELECTED;
+                    }
+                    if copy {
+                        copies.push(c);
+                    } else {
+                        seg = c;
                     }
                 }
-                Owner::Instance(i) => self.scene.triangles[t].iter().for_each(|p| grow(i, *p)),
-                Owner::Edge(_) | Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
+                None if selected => seg.color = SELECTED,
+                None => {}
             }
+            edges.push(seg);
         }
-        for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
-            if let Some(owner @ Owner::Instance(i)) = owner
-                && self.selection.contains(owner)
-            {
-                for p in [seg.a, seg.b] {
-                    grow(*i, glam::Vec3::from(p).as_dvec3());
-                }
-            }
-        }
-        // Selected components and groups show their bounding box (world-aligned for now;
-        // SketchUp aligns it with the component's axes).
-        for (min, max) in boxes.values() {
-            let c = |x: bool, y: bool, z: bool| {
-                let p = glam::DVec3::new(
-                    if x { max.x } else { min.x },
-                    if y { max.y } else { min.y },
-                    if z { max.z } else { min.z },
-                );
-                p.as_vec3().into()
+        edges.extend(copies);
+        let mut vertices: Vec<FaceVertex> = Vec::new();
+        for (t, owner) in self.scene.tri_owner.iter().enumerate() {
+            let Some(owner @ Owner::Face(_)) = owner.filter(|o| self.selection.contains(o)) else {
+                continue;
             };
-            for (a, b) in [
-                ((0, 0, 0), (1, 0, 0)),
-                ((0, 1, 0), (1, 1, 0)),
-                ((0, 0, 1), (1, 0, 1)),
-                ((0, 1, 1), (1, 1, 1)),
-                ((0, 0, 0), (0, 1, 0)),
-                ((1, 0, 0), (1, 1, 0)),
-                ((0, 0, 1), (0, 1, 1)),
-                ((1, 0, 1), (1, 1, 1)),
-                ((0, 0, 0), (0, 0, 1)),
-                ((1, 0, 0), (1, 0, 1)),
-                ((0, 1, 0), (0, 1, 1)),
-                ((1, 1, 0), (1, 1, 1)),
-            ] {
-                let p = |(x, y, z): (i32, i32, i32)| c(x == 1, y == 1, z == 1);
-                edges.push(Segment::line(p(a), p(b), SELECTED, [1.0, 0.0]));
+            let xf = moved(&Some(owner)).map(|(xf, _)| xf);
+            for k in 0..3 {
+                let mut v = self.scene.vertices[self.scene.indices[3 * t + k] as usize];
+                if let Some(xf) = xf {
+                    v.position = tp(xf, v.position);
+                }
+                vertices.push(v);
+            }
+        }
+        // Selected components and groups show their bounding box in their own axes.
+        if let Some(doc) = &self.document {
+            let ents = doc.active();
+            for o in self.selection.items() {
+                let Owner::Instance(i) = *o else { continue };
+                let (Some(inst), Some((min, max))) =
+                    (ents.instances.get(i), self.inst_bounds.get(&i))
+                else {
+                    continue;
+                };
+                let mut xf = self.ctx_xf * inst.transform;
+                if let Some((m, false)) = moved(&Some(*o)) {
+                    xf = m * xf;
+                }
+                let b = selection::OrientedBox::from_aabb(*min, *max).transformed(xf);
+                for [a, c] in b.edges() {
+                    let f = |p: DVec3| p.as_vec3().to_array();
+                    edges.push(Segment::line(f(a), f(c), SELECTED, [1.0, 0.0]));
+                }
             }
         }
         let indices: Vec<u32> = (0..vertices.len() as u32).collect();
         self.viewport
             .set_selected_faces(device, &vertices, &indices);
-        edges.extend(guides);
+        edges.extend(self.scene.guides.iter().copied());
         edges.extend(self.cut_lines.iter().copied());
         self.viewport.set_edges(device, &edges);
+    }
+
+    /// Draws the targets of Move, Rotate or Scale at the transformed position while
+    /// the tool runs and hides them at the original one (copies keep them). Only the
+    /// targets are transformed per change; the rest of the model is re-sent once when
+    /// the operation starts and ends (no rebuild).
+    fn update_live(&mut self, device: &wgpu::Device) {
+        let want = match (&self.modify, &self.inference, self.tool) {
+            (Some(m), Some(inf), Tool::Modify(_)) => m
+                .live(&to_local(inf, self.ctx_xf))
+                .map(|(t, xf, copy)| (t.to_vec(), xf, copy)),
+            _ => None,
+        };
+        if want == self.live {
+            return;
+        }
+        let hidden = |l: &Option<(Vec<Owner>, glam::DMat4, bool)>| {
+            l.as_ref().filter(|l| !l.2).map(|l| l.0.clone())
+        };
+        let hide = hidden(&want);
+        if hidden(&self.live) != hide {
+            match &hide {
+                Some(targets) => {
+                    let set: std::collections::HashSet<Owner> = targets.iter().copied().collect();
+                    let indices: Vec<u32> = self
+                        .scene
+                        .indices
+                        .chunks(3)
+                        .zip(&self.scene.tri_owner)
+                        .filter(|(_, o)| !o.is_some_and(|o| set.contains(&o)))
+                        .flat_map(|(t, _)| t.iter().copied())
+                        .collect();
+                    self.viewport
+                        .set_faces(device, &self.scene.vertices, &indices);
+                }
+                None => self
+                    .viewport
+                    .set_faces(device, &self.scene.vertices, &self.scene.indices),
+            }
+        }
+        match &want {
+            Some((targets, xf, _)) => {
+                let set: std::collections::HashSet<Owner> = targets.iter().copied().collect();
+                let w = self.ctx_xf * *xf * self.ctx_xf.inverse();
+                let n = glam::DMat3::from_mat4(w).inverse().transpose();
+                let f = |p: [f32; 3]| glam::Vec3::from(p).as_dvec3();
+                let mut vertices = Vec::new();
+                for (t, owner) in self.scene.tri_owner.iter().enumerate() {
+                    if !owner.is_some_and(|o| set.contains(&o)) {
+                        continue;
+                    }
+                    for k in 0..3 {
+                        let mut v = self.scene.vertices[self.scene.indices[3 * t + k] as usize];
+                        v.position = w.transform_point3(f(v.position)).as_vec3().into();
+                        v.normal = (n * f(v.normal)).normalize_or_zero().as_vec3().into();
+                        vertices.push(v);
+                    }
+                }
+                let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+                self.viewport.set_preview_faces(device, &vertices, &indices);
+            }
+            None => self.viewport.set_preview_faces(device, &[], &[]),
+        }
+        self.live = want;
+        self.update_highlight(device);
     }
 
     fn select(&mut self, device: &wgpu::Device, mode: Mode, items: Vec<Owner>) {
@@ -513,6 +629,7 @@ impl App {
                 {
                     self.camera = camera;
                 }
+                self.transition = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 self.document = Some(doc);
                 self.selection.clear();
@@ -592,7 +709,11 @@ impl App {
                         self.rebuild(&device);
                     }
                 }
-                "edit.create_group" | "edit.make_component" => {
+                "edit.make_component" => {
+                    let sel = kernel_selection(self.selection.items());
+                    self.open_make_component(sel);
+                }
+                "edit.create_group" => {
                     let sel = kernel_selection(self.selection.items());
                     let group = id == "edit.create_group";
                     if let Some(doc) = &mut self.document {
@@ -738,6 +859,7 @@ impl App {
                 self.document = Some(doc);
                 self.selection.clear();
                 self.camera = Camera::from_spec(&self.spec.default_model.camera);
+                self.transition = None;
                 self.rebuild(&device);
             }
         }
@@ -855,7 +977,10 @@ impl App {
                 0.0
             },
         };
+        self.animate_camera(ui.ctx());
+        let before = self.camera.clone();
         nav::apply(self.tool, &mut self.camera, &input, viewport_px);
+        self.cancel_transition_if_moved(&before);
         match self.tool {
             Tool::Select => {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
@@ -869,6 +994,7 @@ impl App {
             }
             _ => self.inference = None,
         }
+        self.update_live(&render_state.device);
 
         self.viewport.render(
             &render_state.device,
@@ -940,6 +1066,14 @@ impl App {
                 &previews,
                 inf,
             );
+            if let Some(m) = &self.modify {
+                let markers: Vec<_> = m
+                    .markers(&local)
+                    .into_iter()
+                    .map(|k| (xf.transform_point3(k.point), k.hot))
+                    .collect();
+                overlay::markers(&ui.painter().with_clip_rect(rect), to_screen, &markers);
+            }
         }
     }
 
@@ -1125,8 +1259,13 @@ impl App {
                 mt_infer::Kind::Perpendicular,
             );
         }
-        let cursor = response
-            .hover_pos()
+        // A drag starts where the button went down (a grip under the press).
+        let press = response
+            .drag_started_by(egui::PointerButton::Primary)
+            .then(|| ui.input(|i| i.pointer.press_origin()))
+            .flatten();
+        let cursor = press
+            .or(response.hover_pos())
             .or(response.interact_pointer_pos())
             .map(|p| {
                 DVec2::new(
@@ -1144,12 +1283,27 @@ impl App {
             self.engine
                 .infer_at(&self.geometry, self.bvh.as_ref(), view, c, anchor, now)
         });
+        if let Some(doc) = &self.document {
+            let (camera, xf, bounds) = (&self.camera, self.ctx_xf, &self.inst_bounds);
+            tool.hover(&modify::Hover {
+                ents: doc.active(),
+                selection: self.selection.items(),
+                instance_bounds: &|i| bounds.get(&i).copied(),
+                project: &|p| camera.project(xf.transform_point3(p), viewport_px),
+                cursor,
+            });
+        }
         let (Some(inf), Some(c), Some(doc)) = (self.inference, cursor, self.document.as_mut())
         else {
             return;
         };
         let inf = to_local(&inf, self.ctx_xf);
-        if !response.clicked_by(egui::PointerButton::Primary) {
+        // A drag works like two clicks: press, then release (SketchUp's click-drag).
+        let primary = egui::PointerButton::Primary;
+        if !(response.clicked_by(primary)
+            || response.drag_started_by(primary)
+            || (response.drag_stopped_by(primary) && tool.anchor().is_some()))
+        {
             return;
         }
         let double = response.double_clicked();
@@ -1168,12 +1322,25 @@ impl App {
             let clicked = tool.click(&mut ctx, &inf);
             clicked | (double && tool.double_click(&mut ctx, &inf))
         });
+        // Set Component Axes finished: make the component with the picked axes.
+        if let Some((d, axes)) = tool.take_axes() {
+            self.modify = None;
+            self.tool = Tool::Select;
+            self.engine.unlock();
+            self.create_component(d, Some(axes), device);
+            return;
+        }
         if tool.constraint().is_none() && tool.anchor().is_none() {
             self.engine.unlock();
         }
         if changed {
             self.engine.unlock();
-            self.selection.clear();
+            if tool.keeps_selection() {
+                let ents = doc.active();
+                self.selection.retain(|o| selection::exists(ents, o));
+            } else {
+                self.selection.clear();
+            }
             self.rebuild(device);
         }
     }
@@ -1208,14 +1375,60 @@ impl App {
         };
         let primary = egui::PointerButton::Primary;
         let pos = response.interact_pointer_pos();
+        let mods = ui.input(|i| i.modifiers);
+        // Erasing one edge of a curve erases the whole curve, so the drag highlights all
+        // of it (hiding and softening work per edge).
+        let whole_curve = |app: &Self, o: Owner| -> Vec<Owner> {
+            let curve = match (o, &app.document) {
+                (Owner::Edge(e), Some(doc)) if !mods.shift && !mods.command => {
+                    doc.active().edges.get(e).and_then(|x| x.attrs.curve)
+                }
+                _ => None,
+            };
+            let Some(c) = curve else {
+                return vec![o];
+            };
+            let ents = app.document.as_ref().map(Document::active);
+            let mut out = vec![o];
+            for owner in app.scene.edge_owner.iter().flatten() {
+                if let Owner::Edge(e) = *owner
+                    && !out.contains(owner)
+                    && ents
+                        .and_then(|x| x.edges.get(e))
+                        .and_then(|x| x.attrs.curve)
+                        == Some(c)
+                {
+                    out.push(*owner);
+                }
+            }
+            out
+        };
         let mut done: Vec<Owner> = Vec::new();
         if response.clicked_by(primary) {
             done.extend(pos.and_then(|p| pick(self, p)));
         } else if response.dragged_by(primary) || response.drag_started_by(primary) {
-            if let Some(o) = pos.and_then(|p| pick(self, p))
-                && !self.erase_drag.contains(&o)
-            {
-                self.erase_drag.push(o);
+            // Picks along the pointer's path since the last frame, so a fast drag does
+            // not skip edges.
+            let mut added = false;
+            if let Some(p) = pos {
+                let delta = response.drag_delta();
+                let steps = (delta.length() / 3.0).ceil().max(1.0) as usize;
+                for k in 0..steps {
+                    let q = p - delta * (k as f32 / steps as f32);
+                    if let Some(o) = pick(self, q)
+                        && !self.erase_drag.contains(&o)
+                    {
+                        for o in whole_curve(self, o) {
+                            if !self.erase_drag.contains(&o) {
+                                self.erase_drag.push(o);
+                            }
+                        }
+                        added = true;
+                    }
+                }
+            }
+            if added {
+                // Highlighted in the selection color until the button is released.
                 self.select(device, Mode::Replace, self.erase_drag.clone());
             }
         } else if response.drag_stopped_by(primary) {
@@ -1225,7 +1438,6 @@ impl App {
         if done.is_empty() {
             return;
         }
-        let mods = ui.input(|i| i.modifiers);
         if let Some(doc) = &mut self.document {
             doc.erase(&done, mods.shift, mods.command);
         }
@@ -1407,6 +1619,7 @@ fn view_toggle(s: &mut mt_kernel::StyleSettings, id: &str) -> bool {
     match id {
         "view.section_planes" => s.section_planes = !s.section_planes,
         "view.section_cuts" => s.section_cuts = !s.section_cuts,
+        "view.section_fill" => s.section_fill = !s.section_fill,
         "view.xray" => s.xray = !s.xray,
         "view.wireframe" => s.face_style = F::Wireframe,
         "view.hidden_line" => s.face_style = F::HiddenLine,
@@ -1423,6 +1636,7 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
     match id {
         "view.section_planes" => s.section_planes,
         "view.section_cuts" => s.section_cuts,
+        "view.section_fill" => s.section_fill,
         "view.xray" => s.xray,
         "view.wireframe" => s.face_style == F::Wireframe,
         "view.hidden_line" => s.face_style == F::HiddenLine,
@@ -1439,6 +1653,7 @@ const VIEW_TOGGLES: &[&str] = &[
     "view.shadows",
     "view.section_planes",
     "view.section_cuts",
+    "view.section_fill",
     "view.xray",
     "view.wireframe",
     "view.hidden_line",
@@ -1665,6 +1880,7 @@ impl eframe::App for App {
         }
         self.shell = Some(shell);
         self.confirm_ui(ui.ctx(), frame);
+        self.make_component_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),

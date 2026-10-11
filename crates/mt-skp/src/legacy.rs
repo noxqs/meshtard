@@ -14,14 +14,15 @@ use std::rc::Rc;
 use regex::Regex;
 
 use crate::Error;
-use crate::bytes::{f64_at, i32_at, u16_at, u32_at};
+use crate::bytes::{f64_at, i32_at, u16_at, u32_at, vec3_at};
 use crate::model::{
     AttrDicts, AttrValue, ConstructionLine, ConstructionPoint, Dimension, EntityId, SectionPlane,
-    TextEntity, Vec3, stringify_attr_dict,
+    StyleItem, TextEntity, Vec3, stringify_attr_dict,
 };
 use crate::raw::{
-    CoEdge, GeometryBuilder, RawDefinition, RawFace, RawInstance, RawMaterial, RawPage, RawParsed,
-    RawTexture,
+    CoEdge, GeometryBuilder, RawDefinition, RawDimension, RawFace, RawInstance, RawMaterial,
+    RawStyle,
+    RawPage, RawParsed, RawTexture,
 };
 
 // The trailing GUID looked plausible as a class-schema gate at first
@@ -285,6 +286,26 @@ struct V {
     loops: Vec<Rc<V>>,
     uses: Vec<Rc<V>>,
     ents: Vec<Obj>,
+    /// Texts and dimensions only.
+    annot: Option<Box<Annot>>,
+}
+
+/// The placement of a `CText` or `CDimensionLinear`.
+#[derive(Debug, Clone, Default)]
+struct Annot {
+    /// Free connection points stored inline (connection type 1). A text has `a` only.
+    a: Option<Vec3>,
+    b: Option<Vec3>,
+    /// Connection refs (raw file slots) of points anchored to geometry.
+    connect: [Option<u64>; 2],
+    /// Dimension: signed offset of the dimension line. Text: unused.
+    offset: f64,
+    /// Dimension: the plane normal stored in the placement block.
+    normal: Option<Vec3>,
+    /// Text: where the label floats.
+    label: Option<Vec3>,
+    /// Text: screen position as fractions of the view, for a text without anchor.
+    screen: Option<[f64; 2]>,
 }
 
 impl Default for V {
@@ -337,6 +358,7 @@ impl Default for V {
             loops: Vec::new(),
             uses: Vec::new(),
             ents: Vec::new(),
+            annot: None,
         }
     }
 }
@@ -596,6 +618,41 @@ impl<'a> Archive<'a> {
             return Err(bad("entity ref is a new object"));
         }
         Ok(Some(u64::from(tag)))
+    }
+
+    // What follows a dimension connection ref: [entity ref][u32 n1][n1 refs]
+    // [u32 n2][n2 refs], the instance paths of the anchored entity.
+    fn connection_paths(&mut self) -> Result<(), Error> {
+        self.entity_ref()?;
+        for _ in 0..2 {
+            let n = self.r.u32()?;
+            if n > 1000 {
+                return Err(bad("implausible dimension path length"));
+            }
+            for _ in 0..n {
+                self.path_ref()?;
+            }
+        }
+        Ok(())
+    }
+
+    // One instance of a dimension's path. Usually a reference, but MFC writes
+    // an object in full the first time anything points at it: a dimension
+    // serialized before the group it is anchored in carries that whole group
+    // here (the entity list later holds a back-reference).
+    fn path_ref(&mut self) -> Result<(), Error> {
+        let tag = self.r.peek_u16()?;
+        let new = if tag == 0x7fff {
+            u32_at(self.d(), self.r.p + 2)? & 0x8000_0000 != 0
+        } else {
+            tag == 0xffff || tag & 0x8000 != 0
+        };
+        if new {
+            self.object(None)?;
+        } else {
+            self.entity_ref()?;
+        }
+        Ok(())
     }
 
     // True when the u16 at `at` starts an object read in one of the
@@ -1209,15 +1266,36 @@ impl<'a> Archive<'a> {
                 self.draw(&mut v)?;
                 v.text = self.r.utf16()?;
                 self.object(Some("CSkFont"))?;
-                // The tail is NOT a fixed 165-byte blob: it embeds two object
-                // references (the connection points). Each is a normal MFC
-                // tag - 2 bytes in small files, 6 once the 0x7fff big-tag
-                // escape kicks in.
-                self.r.raw(37)?;
-                self.entity_ref()?; // connection point 1 (may be null)
-                self.r.raw(42)?;
-                self.entity_ref()?; // connection point 2 (may be null)
-                self.r.raw(82)?;
+                // The tail is NOT a fixed 165-byte blob: it embeds object
+                // references (2 bytes in small files, 6 once the 0x7fff big-tag
+                // escape kicks in). Each connection point is followed by its
+                // instance paths (the groups/components the anchored entity
+                // lives in): [ref][u32 n1][n1 refs][u32 n2][n2 refs]. Loose
+                // geometry has a null ref and two empty lists.
+                let b37 = self.r.raw(37)?;
+                let c1 = self.entity_ref()?;
+                self.connection_paths()?;
+                let b32 = self.r.raw(32)?;
+                let c2 = self.entity_ref()?;
+                self.connection_paths()?;
+                let b72 = self.r.raw(72)?;
+                // Connection blocks: [.. u32 TYPE ..][u32 4][point3d]. Type 1 is a
+                // free point stored inline; other types anchor to the referenced
+                // entity and zero the point. The placement block starts with the
+                // plane normal and has the signed offset at byte 52.
+                let normal = vec3_at(b72, 0)?;
+                v.annot = Some(Box::new(Annot {
+                    a: (u32_at(b37, 5)? == 1)
+                        .then(|| vec3_at(b37, 13))
+                        .transpose()?,
+                    b: (u32_at(b32, 0)? == 1)
+                        .then(|| vec3_at(b32, 8))
+                        .transpose()?,
+                    connect: [c1, c2],
+                    offset: f64_at(b72, 52)?,
+                    normal: (normal != [0.0; 3]).then_some(normal),
+                    ..Default::default()
+                }));
             }
             "CText" => {
                 self.preamble()?;
@@ -1250,6 +1328,12 @@ impl<'a> Archive<'a> {
                 let Some(found) = found else {
                     return Err(bad("text delimiter not found"));
                 };
+                // The middle up to the 11-byte delimiter (`found - 11`):
+                // [f64 screen x][f64 screen y][u32 connection type][u32 4]
+                // [point3d][connection ref + instance paths][point3d label]
+                // [vector3d][u32 leader type]. The refs vary in size, so the
+                // tail is read from the end.
+                v.annot = Some(Box::new(text_placement(&d[self.r.p..found - 11])));
                 self.r.raw(found - self.r.p)?;
                 v.text = self.r.utf16()?;
                 self.r.raw(5)?;
@@ -1737,6 +1821,72 @@ fn walk_model(
     })
 }
 
+/// Decodes the middle of a `CText` record (see `Archive::read`). Layout seen in
+/// SketchUp 7, 2014 and 2017 files and in the writer's output; anything else
+/// (shorter middles) yields no placement.
+fn text_placement(mid: &[u8]) -> Annot {
+    let mut out = Annot::default();
+    let n = mid.len();
+    if n < 100 || u32_at(mid, 20).ok() != Some(4) {
+        return out;
+    }
+    let (Ok(sx), Ok(sy), Ok(ctype), Ok(point), Ok(label)) = (
+        f64_at(mid, 0),
+        f64_at(mid, 8),
+        u32_at(mid, 16),
+        vec3_at(mid, 24),
+        vec3_at(mid, n - 52),
+    ) else {
+        return out;
+    };
+    match ctype {
+        // No anchor: a screen text, placed by its view fractions.
+        0 => out.screen = Some([sx, sy]),
+        // A free point.
+        1 => out.a = Some(point),
+        // Anchored to an entity (2 seen on vertices, 7 on faces with a
+        // face-local point): the ref right after the point.
+        _ => {
+            let tag = u16_at(mid, 48).unwrap_or(0);
+            out.connect[0] = match tag {
+                0 => None,
+                0x7fff => u32_at(mid, 50)
+                    .ok()
+                    .filter(|t| t & 0x8000_0000 == 0)
+                    .map(u64::from),
+                t if t & 0x8000 == 0 => Some(u64::from(t)),
+                _ => None,
+            };
+        }
+    }
+    if label.iter().any(|c| c.abs() > 1e-12) {
+        out.label = Some(label);
+    }
+    out
+}
+
+/// The direction a positive dimension offset moves the dimension line: the stored
+/// plane normal crossed with the measured direction, as the VFF reading does
+/// (`normal x plane_x` there, where `normal` is `a - b` and `plane_x` the plane
+/// normal). Not verified against SketchUp: on a real 2017 file (26 dimensions)
+/// most, not all, dimension lines land outside the drawing with it.
+fn offset_direction(n: Vec3, a: Vec3, b: Vec3) -> Option<Vec3> {
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let c = [
+        n[1] * d[2] - n[2] * d[1],
+        n[2] * d[0] - n[0] * d[2],
+        n[0] * d[1] - n[1] * d[0],
+    ];
+    let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+    (len > 1e-12).then(|| c.map(|x| x / len))
+}
+
+/// The position of the vertex at `slot`, if that slot holds one.
+fn vertex_at(slots: &Slots, slot: Option<u64>) -> Option<Vec3> {
+    let v = slots.get(&slot?)?.v.as_ref()?;
+    (v.k == "vertex").then_some(v.xyz)
+}
+
 fn add_edge(b: &mut GeometryBuilder, s: u64, e: &V, slots: &Slots) {
     let id = s as EntityId;
     if b.edges.contains_key(&id) {
@@ -1895,15 +2045,39 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                 sp.hidden = v.hidden != 0;
                 b.section_planes.push(sp);
             }
-            "text" => b.texts.push(TextEntity {
-                text: v.text.clone(),
-                hidden: v.hidden != 0,
-            }),
-            "dimension" => b.dimensions.push(Dimension {
-                text: v.text.clone(),
-                hidden: v.hidden != 0,
-                ..Default::default()
-            }),
+            "text" => {
+                let a = v.annot.as_deref().cloned().unwrap_or_default();
+                b.texts.push(TextEntity {
+                    text: v.text.clone(),
+                    hidden: v.hidden != 0,
+                    point: a.a.or_else(|| vertex_at(slots, a.connect[0])),
+                    label_point: a.label,
+                    screen_position: a.screen,
+                });
+            }
+            "dimension" => {
+                let a = v.annot.as_deref().cloned().unwrap_or_default();
+                // Free points carry their position; anchored ones resolve to
+                // their vertices (in the vertex's own definition's frame).
+                let pa = a.a.or_else(|| vertex_at(slots, a.connect[0]));
+                let pb = a.b.or_else(|| vertex_at(slots, a.connect[1]));
+                let (pa, pb) = match (pa, pb) {
+                    (Some(x), Some(y)) => (Some(x), Some(y)),
+                    _ => (None, None),
+                };
+                b.dimensions.push(Dimension {
+                    text: v.text.clone(),
+                    hidden: v.hidden != 0,
+                    a: pa,
+                    b: pb,
+                    offset: a.offset,
+                    offset_direction: pa
+                        .zip(pb)
+                        .zip(a.normal)
+                        .and_then(|((p, q), n)| offset_direction(n, p, q)),
+                    ..Default::default()
+                });
+            }
             "constructionline" => b.construction_lines.push(ConstructionLine {
                 point: v.xyz,
                 direction: v.direction,
@@ -2098,6 +2272,110 @@ fn scan_pages_for_layers(
     Ok(pages)
 }
 
+// ── styles ──────────────────────────────────────────────────────────
+//
+// `CSkpStyle` records sit after the model's entities, outside the walk. Each is
+// [tag][preamble][16-byte GUID][CString ""][u32 3][CString name]
+// [CString description][u32 n] then n items [u32 id][u32 k] with, when k is 1,
+// [u32 kind][value]: the items of a VFF style.xml, same ids and kinds (1 bool u8,
+// 3/4/5 int32, 6 f32, 7 f64). Seen in SketchUp 6 to 2020 files (schema 1 and 2;
+// schema 2 follows the items with more data, a PNG thumbnail among it); SketchUp 3
+// files have none. A model holds its styles, then a working copy of the current
+// one (same GUID) last.
+
+/// One `CSkpStyle` body starting at its first string; the GUID is the 16 bytes
+/// before it. Returns the style, its GUID and the end offset.
+fn style_at(d: &[u8], at: usize) -> Option<(RawStyle, [u8; 16], usize)> {
+    let guid: [u8; 16] = d.get(at.checked_sub(16)?..at)?.try_into().ok()?;
+    let mut r = R { d, p: at };
+    r.utf16().ok()?;
+    r.u32().ok()?;
+    let name = r.utf16().ok()?;
+    let description = r.utf16().ok()?;
+    let n = r.u32().ok()?;
+    if n == 0 || n > 2000 {
+        return None;
+    }
+    let mut out = RawStyle {
+        name,
+        description,
+        ..Default::default()
+    };
+    for _ in 0..n {
+        let id = i32::try_from(r.u32().ok()?).ok()?;
+        match r.u32().ok()? {
+            0 => continue,
+            1 => {}
+            _ => return None,
+        }
+        let kind = r.u32().ok()? as i32;
+        let value = match kind {
+            1 => r.u8().ok()?.to_string(),
+            3..=5 => (r.u32().ok()? as i32).to_string(),
+            6 => f32::from_le_bytes(r.raw(4).ok()?.try_into().ok()?).to_string(),
+            7 => r.f64().ok()?.to_string(),
+            _ => return None,
+        };
+        // Face colors: 2002 front, 2003 back, ABGR with red in the low byte.
+        if id == 2002 || id == 2003 {
+            let c = value.parse::<i32>().ok()? as u32;
+            let color = Some([c as u8, (c >> 8) as u8, (c >> 16) as u8]);
+            if id == 2002 {
+                out.front_color = color;
+            } else {
+                out.back_color = color;
+            }
+        }
+        out.items.insert(id, StyleItem { kind, value });
+    }
+    Some((out, guid, r.p))
+}
+
+/// Every `CSkpStyle` of a legacy file, the current one marked `active` (and the
+/// working copy `working_copy`, `modified` when its items differ).
+fn scan_styles(d: &[u8]) -> Vec<RawStyle> {
+    const NAME: &[u8] = b"CSkpStyle";
+    let Some(cls) = d
+        .windows(NAME.len())
+        .position(|w| w == NAME)
+        .filter(|&i| i >= 6 && d[i - 6] == 0xff && d[i - 5] == 0xff)
+    else {
+        return Vec::new();
+    };
+    // Records are not contiguous (schema 2 appends a thumbnail and more), so every
+    // string marker after the class is tried; the item list is strict enough to
+    // rule out other records.
+    let mut found: Vec<(RawStyle, [u8; 16])> = Vec::new();
+    let mut q = cls + NAME.len();
+    while q < d.len() {
+        if is_marker(d, q)
+            && let Some((st, guid, next)) = style_at(d, q)
+            && st.items.len() >= 5
+        {
+            found.push((st, guid));
+            q = next;
+        } else {
+            q += 1;
+        }
+    }
+    let n = found.len();
+    if n > 0 {
+        let current = found[..n - 1]
+            .iter()
+            .position(|(_, g)| *g == found[n - 1].1);
+        match current {
+            Some(i) => {
+                let modified = found[i].0.items != found[n - 1].0.items;
+                found[i].0.active = true;
+                found[i].0.modified = modified;
+                found[n - 1].0.working_copy = true;
+            }
+            None => found[n - 1].0.active = true,
+        }
+    }
+    found.into_iter().map(|(s, _)| s).collect()
+}
+
 pub fn parse_legacy(data: &[u8]) -> Result<RawParsed, Error> {
     let mut out = RawParsed {
         version: crate::vff::extract_version(data),
@@ -2256,6 +2534,24 @@ fn parse_into(data: &[u8], out: &mut RawParsed) -> Result<(), Error> {
         out.definitions.insert(slot as EntityId, d);
     }
     fill(&mut out.root.builder, &root, &ar.slots);
+    // Model-level dimensions: the root's with both endpoints, as for VFF files.
+    out.dimensions = out
+        .root
+        .builder
+        .dimensions
+        .iter()
+        .filter_map(|d| {
+            Some(RawDimension {
+                a: d.a?,
+                b: d.b?,
+                offset: d.offset,
+                offset_direction: d.offset_direction,
+                hidden: d.hidden,
+                text: d.text.clone(),
+                ..Default::default()
+            })
+        })
+        .collect();
     let start_pos = ar.r.p;
     let table = LegacySlotTable {
         slots: &mut ar.slots,
@@ -2263,6 +2559,7 @@ fn parse_into(data: &[u8], out: &mut RawParsed) -> Result<(), Error> {
         next: &mut ar.next,
     };
     out.pages = scan_pages_for_layers(data, start_pos, table).unwrap_or_default();
+    out.styles = scan_styles(data);
     Ok(())
 }
 
@@ -2429,6 +2726,56 @@ mod tests {
         assert_eq!(m.materials.len(), 1);
         assert_eq!(m.materials[0].name, "RedMat");
         assert_eq!(layer_names(&m), BTreeSet::from(["Layer0"]));
+    }
+
+    #[test]
+    fn styles() {
+        for (file, name, front) in [
+            ("capilla_quiroz_v17.skp", "[Urban Planning Style]", [255, 255, 255]),
+            // schema 2: more data after the items
+            ("gondola_v20.skp", "[Architectural Design Style]", [255, 255, 255]),
+            ("legacy_v6_synthetic.skp", "Style", [225, 225, 200]),
+        ] {
+            let Some(m) = fixture(file) else {
+                return;
+            };
+            assert_eq!(m.styles.len(), 2, "{file}");
+            let (active, copy) = (&m.styles[0], &m.styles[1]);
+            assert!(active.active && !active.modified && copy.working_copy, "{file}");
+            assert_eq!(active.name, name);
+            assert_eq!(active.front_color, Some(front));
+            assert_eq!(active.items[&2001].value, "2");
+            assert_eq!(active.items[&2005].value, "1");
+            assert_eq!(active.items[&2005].kind, 1);
+        }
+        assert!(fixture("legacy_v3_synthetic.skp").is_none_or(|m| m.styles.is_empty()));
+    }
+
+    #[test]
+    fn text_and_dimension_placement() {
+        // A screen text: no anchor, placed by view fractions.
+        if let Some(m) = fixture("legacy_v7_synthetic.skp") {
+            let t = &m.root.texts[0];
+            assert_eq!(t.screen_position, Some([0.01, 0.8]));
+            assert_eq!((t.point, t.label_point), (None, None));
+        }
+        // SketchUp 2017: a face-anchored area label and dimensions anchored to
+        // vertices (resolved through the connection refs).
+        let Some(m) = fixture("capilla_quiroz_v17.skp") else {
+            return;
+        };
+        let t = &m.root.texts[0];
+        assert_eq!(t.text, "4.06 m\u{b2}");
+        assert_eq!(t.point, None);
+        assert!(t.label_point.is_some());
+        assert_eq!(m.root.dimensions.len(), 28);
+        assert_eq!(m.dimensions.len(), 26);
+        for d in &m.dimensions {
+            // Every dimension lies in a plane y = const with normal +Y.
+            let dir = d.offset_direction.unwrap();
+            assert!(dir[1].abs() < 1e-12);
+            assert!((d.a.unwrap()[1] - d.b.unwrap()[1]).abs() < 1e-9);
+        }
     }
 
     #[test]

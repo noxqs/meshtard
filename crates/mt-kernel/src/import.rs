@@ -103,6 +103,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
     for (&id, d) in &src.definitions {
         let key = model.definitions.insert(Definition {
             description: String::new(),
+            glue: crate::model::GlueTo::None,
             name: d.name.clone(),
             guid: d.guid.clone(),
             entities: Entities::new(),
@@ -129,7 +130,11 @@ pub fn from_skp(src: &skp::Model) -> Model {
     }
     model.root = entities(&src.root, &maps);
     model.root.guides = guides(&src.root);
-    model.root.dimensions = crate::annotation::dimensions_from_skp(&src.dimensions);
+    // Model-level dimensions are world space (VFF: including those inside components);
+    // legacy files list the root's there too.
+    if !src.dimensions.is_empty() {
+        model.root.dimensions = dimensions(&src.dimensions);
+    }
     model.root.section_planes = src
         .root
         .section_planes
@@ -245,7 +250,57 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             material: material(i.material_id),
         });
     }
+    ents.texts = texts(d);
+    ents.dimensions = dimensions(&d.dimensions);
     ents
+}
+
+/// Dimensions with known endpoints. A dimension whose offset direction the reader
+/// derived (legacy files) is built from it; the others go through
+/// [`dimensions_from_skp`](crate::annotation::dimensions_from_skp) (VFF plane fields).
+fn dimensions(dims: &[skp::Dimension]) -> Vec<crate::annotation::Dimension> {
+    dims.iter()
+        .flat_map(|d| match (d.a, d.b, d.offset_direction) {
+            (Some(a), Some(b), Some(dir)) => {
+                let (a, b) = (DVec3::from(a), DVec3::from(b));
+                (a.distance(b) > crate::TOL)
+                    .then(|| crate::annotation::Dimension {
+                        text: (!d.text.is_empty()).then(|| d.text.clone()),
+                        hidden: d.hidden,
+                        ..crate::annotation::Dimension::linear(a, b, DVec3::from(dir) * d.offset)
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            _ => crate::annotation::dimensions_from_skp(std::slice::from_ref(d)),
+        })
+        .collect()
+}
+
+/// Leader and screen texts. A text anchored to an entity whose position is not
+/// decoded (e.g. a face) keeps its label position, without a leader.
+fn texts(d: &skp::Definition) -> Vec<crate::annotation::Text> {
+    use crate::annotation::Text;
+    d.texts
+        .iter()
+        .filter_map(|t| {
+            let mut out = match (t.point, t.label_point, t.screen_position) {
+                (Some(p), label, _) => {
+                    let p = DVec3::from(p);
+                    Text::leader(
+                        p,
+                        label.map_or(DVec3::ZERO, |l| DVec3::from(l) - p),
+                        t.text.clone(),
+                    )
+                }
+                (None, Some(l), _) => Text::leader(l.into(), DVec3::ZERO, t.text.clone()),
+                (None, None, Some([x, y])) => Text::screen(x, y, t.text.clone()),
+                (None, None, None) => return None,
+            };
+            out.hidden = t.hidden;
+            Some(out)
+        })
+        .collect()
 }
 
 fn face_normal(ents: &Entities, l: &Loop) -> DVec3 {

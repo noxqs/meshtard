@@ -36,6 +36,33 @@ pub struct Definition {
     /// apart from components). Imported from the `Group#n` names SketchUp gives group
     /// definitions (unverified that every group follows this).
     pub is_group: bool,
+    /// Component behavior "Glue to": instances placed on a face lie in its plane.
+    pub glue: GlueTo,
+}
+
+/// SketchUp's component "Glue to" setting (Make Component dialog).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlueTo {
+    #[default]
+    None,
+    Any,
+    Horizontal,
+    Vertical,
+    Sloped,
+}
+
+impl GlueTo {
+    /// Whether a face with this unit normal accepts the component.
+    pub fn accepts(self, normal: DVec3) -> bool {
+        let z = normal.z.abs();
+        match self {
+            Self::None => false,
+            Self::Any => true,
+            Self::Horizontal => z > 1.0 - 1e-6,
+            Self::Vertical => z < 1e-6,
+            Self::Sloped => z >= 1e-6 && z <= 1.0 - 1e-6,
+        }
+    }
 }
 
 /// A saved view: SketchUp's Scenes (pages in the Ruby API).
@@ -75,6 +102,10 @@ pub struct StyleSettings {
     pub section_planes: bool,
     /// View > Section Cuts: the active section cuts the model.
     pub section_cuts: bool,
+    /// View > Section Fill: fill the cut where it crosses closed geometry.
+    pub section_fill: bool,
+    /// Section fill color (sRGB). SketchUp's default is unverified (dark gray here).
+    pub section_fill_color: [u8; 3],
 }
 
 impl Default for StyleSettings {
@@ -88,6 +119,8 @@ impl Default for StyleSettings {
             xray: false,
             section_planes: true,
             section_cuts: true,
+            section_fill: true,
+            section_fill_color: [64, 64, 64],
         }
     }
 }

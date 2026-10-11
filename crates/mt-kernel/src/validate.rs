@@ -93,6 +93,10 @@ pub fn validate(ents: &Entities, checks: Checks) -> Vec<String> {
         }
     }
 
+    for e in ents.index_errors() {
+        err(e);
+    }
+
     if checks.geometry {
         check_vertex_spacing(ents, &mut err);
         check_edge_crossings(ents, &mut err);

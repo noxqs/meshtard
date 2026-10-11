@@ -243,6 +243,49 @@ pub(crate) fn orthographic_rh(
     )
 }
 
+/// Smooth ease-in-out (cubic smoothstep) of `t` clamped to 0..1.
+pub fn ease_in_out(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+impl Camera {
+    /// The view a fraction `t` (0..1, not eased) of the way from `self` to `to`, for
+    /// scene transitions. The target moves in a straight line; the eye swings around it
+    /// (azimuth the short way round, elevation linearly) while its distance changes
+    /// geometrically, so the camera never passes through the target. The field of view
+    /// is interpolated linearly; the projection switches at the end. SketchUp's own
+    /// transition path is unverified.
+    pub fn interpolate(&self, to: &Camera, t: f64) -> Camera {
+        if t <= 0.0 {
+            return self.clone();
+        }
+        if t >= 1.0 {
+            return to.clone();
+        }
+        let polar = |c: &Camera| {
+            let d = c.eye - c.target;
+            let r = d.length().max(1e-9);
+            (d.y.atan2(d.x), (d.z / r).clamp(-1.0, 1.0).asin(), r)
+        };
+        let (az0, el0, r0) = polar(self);
+        let (az1, el1, r1) = polar(to);
+        let tau = std::f64::consts::TAU;
+        let daz = (az1 - az0 + std::f64::consts::PI).rem_euclid(tau) - std::f64::consts::PI;
+        let az = az0 + daz * t;
+        let el = el0 + (el1 - el0) * t;
+        let r = r0 * (r1 / r0).powf(t);
+        let target = self.target.lerp(to.target, t);
+        let dir = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
+        Camera {
+            eye: target + dir * r,
+            target,
+            fov_deg: self.fov_deg + (to.fov_deg - self.fov_deg) * t,
+            perspective: self.perspective,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +391,61 @@ mod tests {
         };
         assert_eq!(c.right(), DVec3::X);
         assert!(c.up().distance(DVec3::Y) < 1e-12);
+    }
+
+    #[test]
+    fn ease_in_out_is_smooth_and_clamped() {
+        assert_eq!(ease_in_out(-1.0), 0.0);
+        assert_eq!(ease_in_out(0.0), 0.0);
+        assert_eq!(ease_in_out(0.5), 0.5);
+        assert_eq!(ease_in_out(1.0), 1.0);
+        assert_eq!(ease_in_out(2.0), 1.0);
+        // Slow at both ends.
+        assert!(ease_in_out(0.1) < 0.1 && ease_in_out(0.9) > 0.9);
+    }
+
+    #[test]
+    fn interpolate_hits_both_ends_and_swings_around_target() {
+        let a = Camera {
+            eye: DVec3::new(100.0, 0.0, 0.0),
+            target: DVec3::ZERO,
+            fov_deg: 30.0,
+            perspective: true,
+        };
+        let b = Camera {
+            eye: DVec3::new(10.0, 400.0, 0.0),
+            target: DVec3::new(10.0, 0.0, 0.0),
+            fov_deg: 60.0,
+            perspective: false,
+        };
+        assert_eq!(a.interpolate(&b, 0.0), a);
+        assert_eq!(a.interpolate(&b, 1.0), b);
+        let mid = a.interpolate(&b, 0.5);
+        assert!(mid.target.distance(DVec3::new(5.0, 0.0, 0.0)) < 1e-9);
+        assert!((mid.fov_deg - 45.0).abs() < 1e-9);
+        assert!(mid.perspective);
+        // Halfway between 100 and 400 geometrically, at 45 degrees.
+        assert!((mid.distance() - 200.0).abs() < 1e-9);
+        let d = (mid.eye - mid.target).normalize();
+        assert!(d.distance(DVec3::new(1.0, 1.0, 0.0).normalize()) < 1e-9);
+        // Continuous: small steps move the eye a little.
+        let mut prev = a.eye;
+        for i in 1..=100 {
+            let c = a.interpolate(&b, f64::from(i) / 100.0);
+            assert!(c.eye.distance(prev) < 20.0);
+            prev = c.eye;
+        }
+    }
+
+    #[test]
+    fn interpolate_takes_the_short_way_round() {
+        let at = |deg: f64| Camera {
+            eye: DVec3::new(deg.to_radians().cos(), deg.to_radians().sin(), 0.0) * 100.0,
+            target: DVec3::ZERO,
+            fov_deg: 35.0,
+            perspective: true,
+        };
+        let mid = at(170.0).interpolate(&at(-170.0), 0.5);
+        assert!(mid.eye.distance(DVec3::new(-100.0, 0.0, 0.0)) < 1e-6);
     }
 }

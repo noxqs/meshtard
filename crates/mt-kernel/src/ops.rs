@@ -6,6 +6,11 @@
 use glam::{DVec2, DVec3};
 
 use crate::TOL;
+
+/// Slack for plane queries of the spatial index: a face or edge coinciding with a plane
+/// (within TOL, with normals equal to 1e-9) lies within this of it, far out from the
+/// origin too.
+pub(crate) const PLANE_SLACK: f64 = 4.0 * TOL;
 use crate::arrangement::{self, Cell};
 use crate::entities::{CoEdge, EdgeId, Entities, FaceAttrs, FaceId, Loop, VertexId};
 use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
@@ -34,6 +39,7 @@ pub(crate) fn insert_line(
     if a.distance(b) <= TOL {
         return (Vec::new(), Vec::new());
     }
+    ents.ensure_index();
     let va = vertex_at(ents, a);
     let vb = vertex_at(ents, b);
     if va == vb {
@@ -44,9 +50,10 @@ pub(crate) fn insert_line(
 
     // Split edges that cross the line in both interiors.
     let crossing: Vec<(EdgeId, DVec3)> = ents
-        .edges
-        .iter()
-        .filter_map(|(id, e)| {
+        .edges_near_segment(pa, pb, TOL)
+        .into_iter()
+        .filter_map(|id| {
+            let e = &ents.edges[id];
             let (ps, pt) = (ents.pos(e.start), ents.pos(e.end));
             let (d, s, t) = segment_segment(pa, pb, ps, pt)?;
             let elen = ps.distance(pt);
@@ -64,11 +71,11 @@ pub(crate) fn insert_line(
 
     // Every vertex on the line, in order.
     let mut on_line: Vec<(f64, VertexId)> = ents
-        .vertices
-        .iter()
-        .filter(|(id, _)| *id != va && *id != vb)
-        .filter_map(|(id, v)| {
-            let (d, t) = point_segment(v.pos, pa, pb);
+        .vertices_near_segment(pa, pb, TOL)
+        .into_iter()
+        .filter(|id| *id != va && *id != vb)
+        .filter_map(|id| {
+            let (d, t) = point_segment(ents.pos(id), pa, pb);
             (d <= TOL && t > 0.0 && t < 1.0).then_some((t, id))
         })
         .collect();
@@ -103,11 +110,14 @@ pub(crate) fn insert_line(
 fn snap_edges_to(ents: &mut Entities, w: VertexId) {
     let p = ents.pos(w);
     let near: Vec<EdgeId> = ents
-        .edges
-        .iter()
-        .filter(|(_, e)| e.start != w && e.end != w)
-        .filter(|(_, e)| point_segment(p, ents.pos(e.start), ents.pos(e.end)).0 <= TOL)
-        .map(|(id, _)| id)
+        .edges_near(p, TOL)
+        .into_iter()
+        .filter(|&id| {
+            let e = &ents.edges[id];
+            e.start != w
+                && e.end != w
+                && point_segment(p, ents.pos(e.start), ents.pos(e.end)).0 <= TOL
+        })
         .collect();
     for e in near {
         if can_split_at(ents, e, w) {
@@ -164,7 +174,8 @@ fn vertex_at(ents: &mut Entities, p: DVec3) -> VertexId {
     if let Some(v) = ents.find_vertex(p) {
         return v;
     }
-    let on_edge = ents.edges.iter().find_map(|(id, e)| {
+    let on_edge = ents.edges_near(p, TOL).into_iter().find_map(|id| {
+        let e = &ents.edges[id];
         let (a, b) = (ents.pos(e.start), ents.pos(e.end));
         let (d, t) = point_segment(p, a, b);
         (d <= TOL).then_some((id, a + (b - a) * t))
@@ -192,7 +203,7 @@ fn candidate_planes(ents: &Entities, e: EdgeId, out: &mut Vec<Plane>) {
         }
     };
     let mid = (a + b) / 2.0;
-    for (f, _) in ents.faces.iter() {
+    for f in ents.faces_near(mid, TOL) {
         if ents.face_contains(f, mid)
             && ents.face_plane(f).contains(a)
             && ents.face_plane(f).contains(b)
@@ -355,8 +366,8 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
 
         // Faces in this plane that a new edge divides: replaced by their cells.
         let coplanar: Vec<FaceId> = ents
-            .faces
-            .keys()
+            .faces_near_plane(&plane, PLANE_SLACK)
+            .into_iter()
             .filter(|&f| ents.face_plane(f).coincides(&plane))
             .collect();
         let mut to_split: Vec<FaceId> = Vec::new();
@@ -402,9 +413,11 @@ pub(crate) fn update_faces(ents: &mut Entities, new_edges: &[EdgeId], create: bo
 /// - a vertex left with two collinear edges is healed into one edge (unverified);
 /// - vertices left without edges are deleted.
 pub fn erase_edge(ents: &mut Entities, e: EdgeId) {
-    let Some(edge) = ents.edges.get(e) else {
+    if !ents.edges.contains_key(e) {
         return;
-    };
+    }
+    ents.ensure_index();
+    let edge = &ents.edges[e];
     let (v1, v2) = (edge.start, edge.end);
     let faces = edge.faces.clone();
     let merge = match faces.as_slice() {
@@ -422,8 +435,8 @@ pub fn erase_edge(ents: &mut Entities, e: EdgeId) {
         for cell in arrangement::cells(ents, &plane, &edges) {
             let inside = r1.contains(&plane, cell.sample) || r2.contains(&plane, cell.sample);
             let taken = ents
-                .faces
-                .keys()
+                .faces_near(cell.sample, TOL)
+                .into_iter()
                 .any(|f| ents.face_contains(f, cell.sample));
             if inside && !taken {
                 face_from_cell(ents, &plane, &cell, keep.normal, keep.attrs.clone());
@@ -482,11 +495,9 @@ fn heal_vertex(ents: &mut Entities, v: VertexId) {
         .collect();
     for e in [e1, e2] {
         ents.edges[e].faces.clear();
-        ents.edges.remove(e);
-        ents.vertices[a].edges.retain(|&x| x != e);
-        ents.vertices[b].edges.retain(|&x| x != e);
+        ents.unlink_edge(e);
     }
-    ents.vertices.remove(v);
+    ents.remove_vertex_if_unused(v);
     let joined = ents.add_raw_edge(a, b, attrs);
     for (f, i, vs) in loops {
         let coedges: Vec<CoEdge> = (0..vs.len())
@@ -523,7 +534,11 @@ pub fn add_curve(
     let curve = ents.curves.insert(crate::entities::Curve { arc });
     let mut edges = Vec::new();
     for w in points.windows(2) {
-        let before: std::collections::HashSet<EdgeId> = ents.edges.keys().collect();
+        // Edges covering the segment that existed before it was added lie along it, so
+        // only edges near it need remembering.
+        ents.ensure_index();
+        let before: std::collections::HashSet<EdgeId> =
+            ents.edges_near_segment(w[0], w[1], 4.0 * TOL).into_iter().collect();
         for e in add_line(ents, w[0], w[1]) {
             if !before.contains(&e)
                 && let Some(edge) = ents.edges.get_mut(e)

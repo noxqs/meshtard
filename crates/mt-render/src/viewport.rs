@@ -409,6 +409,11 @@ pub struct Viewport {
     textures: Textures,
     selection: wgpu::RenderPipeline,
     selected: Option<FaceBuffers>,
+    /// Faces drawn live during Move, Rotate and Scale (see `set_preview_faces`).
+    preview: Option<FaceBuffers>,
+    /// Section fill: flat, unlit triangles in the section plane.
+    fill_pipeline: wgpu::RenderPipeline,
+    fill: Option<FaceBuffers>,
     axes: Option<wgpu::Buffer>,
     axes_count: u32,
     edges: Option<wgpu::Buffer>,
@@ -581,6 +586,16 @@ impl Viewport {
             alpha,
         );
 
+        // Section fill: opaque, unlit, not clipped (it lies in the plane).
+        let fill_pipeline = pipeline(
+            "section fill",
+            "face_vs",
+            "fill_fs",
+            &faces,
+            true,
+            Some(wgpu::BlendState::REPLACE),
+        );
+
         // Depth from the sun, regular Z (cleared to 1, nearer is smaller). Slope-scaled
         // bias against self-shadowing acne, on top of the normal offset in the shader.
         let shadow_pipeline_layout =
@@ -642,6 +657,9 @@ impl Viewport {
             textures,
             selection,
             selected: None,
+            preview: None,
+            fill_pipeline,
+            fill: None,
             axes: None,
             axes_count: 0,
             edges: None,
@@ -679,6 +697,17 @@ impl Viewport {
         self.textures.set(textures);
     }
 
+    /// Extra faces drawn like the model's (the targets of Move, Rotate and Scale at
+    /// their transformed position while the tool runs); empty slices clear them.
+    pub fn set_preview_faces(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[FaceVertex],
+        indices: &[u32],
+    ) {
+        self.preview = FaceBuffers::new(device, vertices, indices);
+    }
+
     /// Faces shown as selected (SketchUp's blue dot pattern); empty slices clear it.
     pub fn set_selected_faces(
         &mut self,
@@ -693,9 +722,28 @@ impl Viewport {
     /// edges on the side the normal points to are discarded per fragment, and do not
     /// cast shadows; axes are not clipped. Geometry within a small tolerance of the plane
     /// is kept so cut edges from [`crate::section_lines`] lying in it stay visible. The
-    /// cut is not capped (no section fill).
+    /// cut is not capped here; see [`Viewport::set_section_fill`].
     pub fn set_section(&mut self, plane: Option<SectionCut>) {
         self.section = plane;
+    }
+
+    /// Sets the section fill: triangles (e.g. from [`crate::section_fill`]) drawn in a
+    /// flat, unlit `color` (sRGB) with depth, after the opaque faces, unclipped by the
+    /// section plane. Not drawn in [`FaceStyle::Wireframe`]. Empty clears it.
+    pub fn set_section_fill(
+        &mut self,
+        device: &wgpu::Device,
+        triangles: &[[[f32; 3]; 3]],
+        color: [f32; 3],
+    ) {
+        let c = [color[0], color[1], color[2], 1.0];
+        let vertices: Vec<FaceVertex> = triangles
+            .iter()
+            .flatten()
+            .map(|&p| FaceVertex::new(p, [0.0, 0.0, 1.0], c, c))
+            .collect();
+        let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+        self.fill = FaceBuffers::new(device, &vertices, &indices);
     }
 
     /// Sets or clears sun shadows. While set, faces are shaded by the sun instead of
@@ -961,6 +1009,22 @@ impl Viewport {
                     pass.draw_indexed(faces.opaque.clone(), 0, 0..1);
                 }
             }
+            if let Some(fill) = self.fill.as_ref().filter(|_| !wireframe) {
+                pass.set_pipeline(&self.fill_pipeline);
+                pass.set_vertex_buffer(0, fill.vertices.slice(..));
+                pass.set_index_buffer(fill.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(fill.opaque.clone(), 0, 0..1);
+            }
+            if let Some(p) = self
+                .preview
+                .as_ref()
+                .filter(|p| !wireframe && !xray && !p.opaque.is_empty())
+            {
+                pass.set_pipeline(&self.faces_opaque);
+                pass.set_vertex_buffer(0, p.vertices.slice(..));
+                pass.set_index_buffer(p.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(p.opaque.clone(), 0, 0..1);
+            }
             if let Some(sel) = self
                 .selected
                 .as_ref()
@@ -994,6 +1058,13 @@ impl Viewport {
                 pass.set_vertex_buffer(0, faces.vertices.slice(..));
                 pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(range(faces), 0, 0..1);
+            }
+            let preview = self.preview.as_ref().filter(|_| !wireframe);
+            if let Some(p) = preview.filter(|p| !range(p).is_empty()) {
+                pass.set_pipeline(&self.faces_translucent);
+                pass.set_vertex_buffer(0, p.vertices.slice(..));
+                pass.set_index_buffer(p.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(range(p), 0, 0..1);
             }
         }
         queue.submit([encoder.finish()]);

@@ -54,6 +54,7 @@ pub fn transform_vertices(ents: &mut Entities, vertices: &[VertexId], xf: DMat4)
     if moves.is_empty() {
         return;
     }
+    ents.ensure_index();
     // A mirror turns loops around: faces that move as a whole are reversed so they keep
     // looking the same way relative to the geometry.
     let flip: Vec<FaceId> = if is_mirror(&xf) {
@@ -178,14 +179,19 @@ pub fn copy_geometry(
             .iter()
             .any(|(a, b, _)| point_segment(p, *a, *b).0 <= TOL)
     };
-    let new_edges: Vec<EdgeId> = ents
-        .edges
+    let mut near: Vec<EdgeId> = segments
         .iter()
-        .filter(|(_, e)| {
+        .flat_map(|(a, b, _)| ents.edges_near_segment(*a, *b, TOL))
+        .collect();
+    near.sort_unstable();
+    near.dedup();
+    let new_edges: Vec<EdgeId> = near
+        .into_iter()
+        .filter(|&id| {
+            let e = &ents.edges[id];
             let (a, b) = (ents.pos(e.start), ents.pos(e.end));
             on_copy(a) && on_copy(b) && on_copy((a + b) / 2.0)
         })
-        .map(|(id, _)| id)
         .collect();
     for c in curve_map.into_values() {
         if ents.curve_edges(c).is_empty() {
@@ -246,8 +252,8 @@ pub(crate) fn fill(
         let cells = arrangement::cells(ents, &d.plane, &edges);
         for cell in cells.iter().filter(|c| d.contains(c.sample)) {
             let taken = ents
-                .faces
-                .keys()
+                .faces_near(cell.sample, TOL)
+                .into_iter()
                 .find(|&g| ents.face_contains(g, cell.sample));
             match taken {
                 None => {
@@ -435,6 +441,7 @@ pub(crate) fn face_sample(ents: &Entities, f: FaceId) -> DVec3 {
 /// sliver folded onto itself), off its plane, or wound the wrong way. Removing a face
 /// never breaks the other invariants; these faces are narrower than the tolerance.
 pub(crate) fn drop_unsound_faces(ents: &mut Entities) {
+    if std::env::var_os("MT_NO_DROP").is_some() { return; } // TEMP
     let bad: Vec<FaceId> = ents
         .faces
         .iter()
@@ -526,9 +533,8 @@ fn try_in_place(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[F
     for &f in flip {
         flip_face(ents, f);
     }
-    for (&v, &p) in moves {
-        ents.vertices[v].pos = p;
-    }
+    let targets: Vec<(VertexId, DVec3)> = moves.iter().map(|(v, p)| (*v, *p)).collect();
+    ents.set_vertex_positions(&targets);
     let mut edges: Vec<EdgeId> = moves
         .keys()
         .flat_map(|v| ents.vertices[*v].edges.iter().copied())
@@ -544,9 +550,7 @@ fn try_in_place(ents: &mut Entities, moves: &HashMap<VertexId, DVec3>, flip: &[F
     let normals: Vec<(FaceId, DVec3)> = faces.iter().map(|&f| (f, ents.faces[f].normal)).collect();
     let ok = in_place_ok(ents, moves, &edges, &faces);
     if !ok {
-        for (v, p) in old {
-            ents.vertices[v].pos = p;
-        }
+        ents.set_vertex_positions(&old);
         for (f, n) in normals {
             ents.faces[f].normal = n;
         }
@@ -567,13 +571,14 @@ fn in_place_ok(
     for &v in moves.keys() {
         let p = ents.pos(v);
         if ents
-            .vertices
-            .iter()
-            .any(|(w, x)| w != v && x.pos.distance(p) <= TOL)
+            .vertices_near(p, TOL)
+            .into_iter()
+            .any(|w| w != v && ents.pos(w).distance(p) <= TOL)
         {
             return false;
         }
-        let on_edge = ents.edges.values().any(|e| {
+        let on_edge = ents.edges_near(p, TOL).into_iter().any(|e| {
+            let e = &ents.edges[e];
             e.start != v
                 && e.end != v
                 && point_segment(p, ents.pos(e.start), ents.pos(e.end)).0 <= TOL
@@ -586,7 +591,8 @@ fn in_place_ok(
     for &a in edges {
         let ea = &ents.edges[a];
         let (p0, p1) = (ents.pos(ea.start), ents.pos(ea.end));
-        let crosses = ents.edges.iter().any(|(b, eb)| {
+        let crosses = ents.edges_near_segment(p0, p1, TOL).into_iter().any(|b| {
+            let eb = &ents.edges[b];
             if b == a
                 || [eb.start, eb.end]
                     .iter()
@@ -598,9 +604,9 @@ fn in_place_ok(
                 .is_some_and(|(d, _, _)| d <= TOL)
         });
         let through = ents
-            .vertices
-            .iter()
-            .any(|(w, x)| w != ea.start && w != ea.end && point_segment(x.pos, p0, p1).0 <= TOL);
+            .vertices_near_segment(p0, p1, TOL)
+            .into_iter()
+            .any(|w| w != ea.start && w != ea.end && point_segment(ents.pos(w), p0, p1).0 <= TOL);
         if crosses || through {
             return false;
         }
@@ -630,15 +636,17 @@ fn in_place_ok(
     for &f in faces {
         let s = face_sample(ents, f);
         if ents
-            .faces
-            .keys()
+            .faces_near(s, TOL)
+            .into_iter()
             .any(|g| g != f && ents.face_contains(g, s))
         {
             return false;
         }
         let plane = ents.face_plane(f);
         let mine = face_edges(ents, f);
-        for (g, _) in ents.faces.iter() {
+        // Anything inside the face lies in its box.
+        let bounds = ents.face_bounds(f).expand(TOL);
+        for g in ents.faces_in(&bounds) {
             if g != f
                 && ents.face_plane(g).coincides(&plane)
                 && ents.face_contains(f, face_sample(ents, g))
@@ -646,7 +654,8 @@ fn in_place_ok(
                 return false;
             }
         }
-        let covered = ents.edges.iter().any(|(e, edge)| {
+        let covered = ents.edges_in(&bounds).into_iter().any(|e| {
+            let edge = &ents.edges[e];
             let (a, b) = (ents.pos(edge.start), ents.pos(edge.end));
             !mine.contains(&e)
                 && plane.contains(a)
@@ -660,7 +669,7 @@ fn in_place_ok(
     for &a in edges {
         let edge = &ents.edges[a];
         let (p, q) = (ents.pos(edge.start), ents.pos(edge.end));
-        let inside = ents.faces.keys().any(|g| {
+        let inside = ents.faces_near((p + q) / 2.0, TOL).into_iter().any(|g| {
             !edge.faces.contains(&g)
                 && ents.face_plane(g).contains(p)
                 && ents.face_plane(g).contains(q)

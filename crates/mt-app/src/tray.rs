@@ -75,6 +75,8 @@ impl App {
             profiles: m.style.profiles,
             profile_width: m.style.profile_width.round() as u8,
             section_cut_width: m.style.section_cut_width.round() as u8,
+            section_fill: m.style.section_fill,
+            section_fill_color: m.style.section_fill_color,
             face_style: match m.style.face_style {
                 mt_kernel::FaceStyle::Wireframe => mt_ui::FaceStyle::Wireframe,
                 mt_kernel::FaceStyle::HiddenLine => mt_ui::FaceStyle::HiddenLine,
@@ -264,7 +266,11 @@ impl App {
                 }
                 self.tool = crate::nav::Tool::Modify("tool.place_component");
                 self.draw = None;
-                self.modify = Some(Box::new(crate::modify::PlaceComponent { definition: d }));
+                let glue = doc.model.definitions[d].glue;
+                self.modify = Some(Box::new(crate::modify::PlaceComponent {
+                    definition: d,
+                    glue,
+                }));
                 false
             }
             Event::ComponentEdit {
@@ -371,11 +377,16 @@ impl App {
                     return false;
                 };
                 self.active_scene = Some(i);
-                // SketchUp animates the transition; this jumps.
-                self.camera.eye = p.eye;
-                self.camera.target = p.target;
-                self.camera.fov_deg = p.fov_deg;
-                self.camera.perspective = p.perspective;
+                // The camera moves there over `SCENE_TRANSITION_SECS` (see
+                // `App::animate_camera`); tag visibility changes at once (SketchUp fades
+                // it, unverified).
+                let to = mt_render::Camera {
+                    eye: p.eye,
+                    target: p.target,
+                    fov_deg: p.fov_deg,
+                    perspective: p.perspective,
+                };
+                self.transition = Some(Transition::new(self.camera.clone(), to));
                 for (k, l) in doc.model.layers.iter_mut().enumerate() {
                     l.visible = !p.hidden_layers.contains(&k);
                 }
@@ -387,6 +398,8 @@ impl App {
                 st.profiles = s.profiles;
                 st.profile_width = f32::from(s.profile_width);
                 st.section_cut_width = f32::from(s.section_cut_width);
+                st.section_fill = s.section_fill;
+                st.section_fill_color = s.section_fill_color;
                 st.xray = s.x_ray;
                 st.face_style = match s.face_style {
                     mt_ui::FaceStyle::Wireframe => mt_kernel::FaceStyle::Wireframe,
@@ -414,6 +427,65 @@ impl App {
                 true
             }
             _ => false,
+        }
+    }
+}
+
+/// SketchUp's default scene transition time (Model Info > Animation, 2 seconds;
+/// unverified).
+pub(crate) const SCENE_TRANSITION_SECS: f64 = 2.0;
+
+/// A camera move to an activated scene.
+pub(crate) struct Transition {
+    from: mt_render::Camera,
+    to: mt_render::Camera,
+    /// egui time of the first frame; set by the first [`Transition::at`].
+    start: Option<f64>,
+}
+
+impl Transition {
+    pub(crate) fn new(from: mt_render::Camera, to: mt_render::Camera) -> Self {
+        Self {
+            from,
+            to,
+            start: None,
+        }
+    }
+
+    /// The camera at egui time `now` and whether the move is over.
+    pub(crate) fn at(&mut self, now: f64) -> (mt_render::Camera, bool) {
+        let start = *self.start.get_or_insert(now);
+        let t = (now - start) / SCENE_TRANSITION_SECS;
+        let camera = self.from.interpolate(&self.to, mt_render::ease_in_out(t));
+        (camera, t >= 1.0)
+    }
+}
+
+impl App {
+    /// Advances a scene transition: sets the camera for this frame and asks for the
+    /// next one. Esc cancels it where it is (navigating cancels it too; see
+    /// [`App::cancel_transition_if_moved`]).
+    pub(crate) fn animate_camera(&mut self, ctx: &eframe::egui::Context) {
+        let Some(tr) = self.transition.as_mut() else {
+            return;
+        };
+        if ctx.input(|i| i.key_pressed(eframe::egui::Key::Escape)) {
+            self.transition = None;
+            return;
+        }
+        let (camera, done) = tr.at(ctx.input(|i| i.time));
+        self.camera = camera;
+        if done {
+            self.transition = None;
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Ends a scene transition when navigation moved the camera away from `before`.
+    pub(crate) fn cancel_transition_if_moved(&mut self, before: &mt_render::Camera) {
+        if self.camera != *before {
+            self.transition = None;
         }
     }
 }
@@ -485,4 +557,36 @@ fn outliner(m: &Model, ents: &Entities, selected: &[usize], depth: usize) -> Vec
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::DVec3;
+
+    fn cam(eye: DVec3, fov: f64) -> mt_render::Camera {
+        mt_render::Camera {
+            eye,
+            target: DVec3::ZERO,
+            fov_deg: fov,
+            perspective: true,
+        }
+    }
+
+    #[test]
+    fn transition_eases_from_start_to_scene() {
+        let from = cam(DVec3::new(100.0, 0.0, 0.0), 30.0);
+        let to = cam(DVec3::new(0.0, 100.0, 0.0), 60.0);
+        let mut tr = Transition::new(from.clone(), to.clone());
+        // The clock starts at the first frame.
+        assert_eq!(tr.at(10.0), (from.clone(), false));
+        let (mid, done) = tr.at(10.0 + SCENE_TRANSITION_SECS / 2.0);
+        assert!(!done);
+        assert!((mid.fov_deg - 45.0).abs() < 1e-9);
+        // Eased: a tenth of the time covers less than a tenth of the way.
+        let (early, _) = tr.at(10.0 + SCENE_TRANSITION_SECS / 10.0);
+        assert!(early.fov_deg - 30.0 < 3.0);
+        assert_eq!(tr.at(10.0 + SCENE_TRANSITION_SECS), (to.clone(), true));
+        assert_eq!(tr.at(100.0), (to, true));
+    }
 }
