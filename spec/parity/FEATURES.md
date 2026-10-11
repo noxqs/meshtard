@@ -44,7 +44,7 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
 17. [x] **Scenes from the View > Animation menu** (`view.anim_*`) S.
     Scenes and transitions exist in the tray; add Add/Update/Delete/Previous/Next/Play and the Settings dialog (transition time, scene delay). Trial: Update Scene's property dialog. Done (`crates/mt-app/src/animation.rs`); Update Scene updates at once (no property dialog); settings are not saved in the file.
 18. [x] **Tag tool and Window > Tags shortcuts** (`tool.tag`) S.
-    Click to move entities to the active tag (SketchUp 2026 Tag Tool: Alt to sample, Ctrl to keep selection). Trial: its exact keys. Done (`pick_tool.rs`): click tags, Alt+click samples; Ctrl not done.
+    Click to move entities to the active tag (SketchUp 2026 Tag Tool: Alt to sample; the help says Shift = Replace All, Ctrl = Tag All Instances, see item 57). Trial: its exact keys. Done (`pick_tool.rs`): click tags, Alt+click samples; Ctrl not done.
 19. [x] **Axes tool** (`tool.axes`) S.
     Reuse `AxesPick` from the Make Component dialog; store model axes in the file (model-level transformation) and drive drawing directions/inference from it. Done (`model_axes.rs`, `mt_infer::Axes`): axes drawn and inferred there; not saved in the file (mt-skp does not expose model axes); shape tools' default planes stay world-aligned.
 20. [x] **Position Camera, Walk, Look Around, Field of View** (`camera.position|walk|look_around|field_of_view`) M.
@@ -127,6 +127,42 @@ Effort: S = under a day, M = a few days, L = a week or more. "Trial" = what to n
     9. **Files** (help): default folders for Models, Components, Materials, Styles, Texture Images, Watermark Images, Export, Classifications, Templates, each with Change / Open folder; Import/Export preferences file (Windows only) with a Shortcuts checkbox. Use them as the starting folder of file dialogs.
     10. **Applications** (help): external image editor for Edit Texture Image (needs a texture-edit command: export the texture, open it in the editor, reload on change).
     Settings persist in `<config>/meshtard/preferences.toml` (exists for General). The trial screenshots each page (TRIAL_CHECKLIST.md static capture) to confirm layout, wording and the defaults the help does not state.
+
+## Gaps found comparing SketchUp's 2026 help pages with Meshtard (2026-10-11)
+
+Source: help.sketchup.com pages and the 2024.0-2026.2 release notes; the per-item sources and details are in `HELP_COMPARISON.md`. Every item still gets checked in the trial. Ranked; S/M/L effort.
+
+### M16: everyday gaps (High)
+44. [ ] **Viewport right-click menus** M: framework plus per-entity items (Entity Info, Erase, Hide, Make Group/Component, Zoom Selection; empty space: Select All, Make Group). The items below hang off it.
+45. [ ] **Select submenu** S: Connected Faces, Bounding Edges, All Connected, All with Same Tag / Material, Deselect Edges / Faces, Invert.
+46. [ ] **Reverse Faces / Orient Faces** S.
+47. [ ] **Flip Along > Red / Green / Blue; Reset Scale, Reset Skew, Scale Definition** S (instances).
+48. [ ] **Flip tool** M: three draggable planes, arrow keys pick the plane, Ctrl = flipped copy, Alt = object/parent axes, custom plane on a face, arrays `3x` / `3/`.
+49. [ ] **Inference inside an open group or component** M (STATUS `missing`): magenta markers, "in group" tooltip; also On Section, Perpendicular to Face, Extend Edge.
+50. [ ] **Paint Bucket modes** S: Alt sample, Shift all matching, Ctrl all connected, Ctrl+Shift same object; Default material.
+51. [ ] **Divide; Weld Edges / Explode Curve** S-M: live division points, typed segment count or length.
+52. [ ] **Entity Info fields** M: visibility / lock / shadow toggles, instance name vs definition, advanced attributes, editable length / radius / segments, soft/smooth on edges, section plane name and symbol, text and dimension options.
+53. [ ] **Materials Edit tab** M: color wheel / RGB / HSL / HEX, texture load/replace, size with aspect lock, external editor.
+54. [ ] **Texture Position** L: pins (move, scale/rotate, shear, distort), flip/rotate/reset, free pins.
+
+### M17: regular gaps (Medium)
+55. [ ] **Context items for curves, sections, text, axes, images** S-M: Find Center, Convert to Polygon, Align View / Align Axes, Area (selection / tag / material); section plane Reverse, Align View, Create Group from Slice, Troubleshoot Fill; dimension Text Position and Radius/Diameter type; leader Arrow and Leader style; axes Place / Move dialog / Reset; component Change Axes, Unglue, Save As, Reload, Select Instances, Replace Selected.
+56. [ ] **Lasso tool** M (Shift+Space): clockwise selects touched, counterclockwise inside only; segment mode.
+57. [ ] **Tool modifiers** S-M: Move typed `[x,y,z]` / `<x,y,z>`, Alt autofold, live stretching; Scale Shift uniform / Ctrl center (held, not toggled), Tape Measure rescale; Offset Alt overlaps and double-click repeat; Tape Measure Ctrl modes and guide points; Line Alt inference modes and Shift+Alt plane lock; Tag tool Shift Replace All, Ctrl Tag All Instances (corrects item 18's note); Arc Ctrl+/- segments, `20c`, Alt tangency, double-click fillet repeat, unround corner, midpoint drag.
+58. [ ] **Move/Rotate grips on bounding boxes** M: corner grips, Alt cycles grip points, rotation handles.
+59. [ ] **Component Snaps** L: snap disks, Make/Edit Snaps, snap-to-snap placement.
+60. [ ] **Panels** M: Materials Select tab (collections, duplicate, sample, area, thumbnail style); Components (Replace Selected, collections, Edit/Statistics tabs, Cut Opening, Always Face Camera, Shadows Face Sun); Styles (several In Model styles, Create / Update / Purge, .style files); Tags (folders, filter, Purge, Select All Tagged, dashes per tag, Color by Tag); Outliner (rename, eye, drag to reparent, status icons); Scenes (details, properties to save, thumbnails, reorder, Update dialog); Shadows (UTC, Use Sun for Shading, from edges).
+61. [ ] **Model Info pages** S-M: Components (fade / hide rest, show axes), Statistics Fix Problems, Dimensions (font, alignment, endpoints, update selected, expert settings), Text (fonts, leader defaults), Units (area / volume units, display format, angle precision applied, snapping used by inference), Geo-location (manual latitude / longitude, north angle).
+62. [ ] **Text / section naming** S: component leader shows its name, double-click face = area label, `<>` live value in custom text; section plane name/symbol prompt and arrow-key locks.
+63. [ ] **Search** S (Shift+S): type-ahead over menu commands, runs the choice.
+64. [ ] **Import extras** M-L: image as texture on a face, DWG/DXF import (layers as groups), PDF as image.
+
+### M18: occasional gaps (Low)
+65. [ ] **Styles extras**: edge endpoints / jitter / color by material or axis / dashes; face front-back colors, transparency quality, ambient occlusion; background sky / horizon / ground controls; watermarks; modeling colors.
+66. [ ] **Environments panel** L: HDRI/EXR library, sun location, skydome, reflections, rotation, exposure. **Instructor** S: per-tool help text.
+67. [ ] **Small items**: View > Hidden Objects separate from Hidden Geometry, Edit > Purge Unused, status bar geo pin and Model Info button, tool icons in menus, Model Info Rendering (anti-aliased textures), image Export / Use As Material, Make Unique Texture, tray handling (panels between trays, floating, Make Tray), smaller modifiers (Orbit roll, Zoom Shift = FOV, slope `8:12` in Rotate, Undo cancels a running tool).
+
+Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC, Overlays, Ruby and extensions, collaboration and comments, AI features, Analysis Hub, Scan Essentials, Revit Importer, Trimble Connect, 3D Warehouse, Add Location imagery, photoreal (PBR) materials until the renderer supports them.
 
 ## Tier 4: online services and plugins (not planned now)
 

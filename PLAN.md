@@ -219,6 +219,10 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Dialogs: one Windows-11-style dialog (draggable title bar, close button, border, shadow, dimmed backdrop) for every dialog in mt-app; Toolbars and Manage Trays windows still to convert.
 - [x] Splash at the image's size; "Meshtard" in UI text.
 
+### M16: everyday gaps from the help comparison (FEATURES.md 44-54)
+### M17: regular gaps (FEATURES.md 55-64)
+### M18: occasional gaps (FEATURES.md 65-67)
+
 ## Risks
 
 1. **Kernel robustness.** Floating-point tolerance bugs are where most effort goes. Invariant checker and property tests from day one.
