@@ -16,7 +16,8 @@ use crate::texture::{TextureSource, Textures};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const SAMPLES: u32 = 4;
+/// Multisample count when none is chosen (Preferences > Graphics).
+pub const DEFAULT_SAMPLES: u32 = 4;
 /// Axis half-length in inches. SketchUp's axes reach far past any normal model.
 const AXIS_LENGTH: f32 = 1.0e6;
 /// Dash length of the negative axis halves, in logical points.
@@ -427,16 +428,29 @@ fn fit_sun(sun: Vec3, bounds: (Vec3, Vec3)) -> (Mat4, f32) {
     )
 }
 
+/// The multisample counts (of 1, 2, 4, 8) the adapter supports for the viewport's
+/// color and depth formats.
+pub fn supported_samples(adapter: &wgpu::Adapter) -> Vec<u32> {
+    let color = adapter.get_texture_format_features(COLOR_FORMAT).flags;
+    let depth = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+    [1, 2, 4, 8]
+        .into_iter()
+        .filter(|&n| n == 1 || (color.sample_count_supported(n) && depth.sample_count_supported(n)))
+        .collect()
+}
+
 struct Targets {
     size: [u32; 2],
-    msaa: wgpu::TextureView,
+    /// The multisampled color target; `None` without anti-aliasing (one sample),
+    /// when the pass draws straight into `resolve`.
+    msaa: Option<wgpu::TextureView>,
     depth: wgpu::TextureView,
     resolve: wgpu::Texture,
     resolve_view: wgpu::TextureView,
 }
 
 impl Targets {
-    fn new(device: &wgpu::Device, size: [u32; 2]) -> Self {
+    fn new(device: &wgpu::Device, size: [u32; 2], samples: u32) -> Self {
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
@@ -455,8 +469,8 @@ impl Targets {
             })
         };
         let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        let msaa = texture("viewport msaa", COLOR_FORMAT, SAMPLES, attach);
-        let depth = texture("viewport depth", DEPTH_FORMAT, SAMPLES, attach);
+        let msaa = (samples > 1).then(|| texture("viewport msaa", COLOR_FORMAT, samples, attach));
+        let depth = texture("viewport depth", DEPTH_FORMAT, samples, attach);
         let resolve = texture(
             "viewport color",
             COLOR_FORMAT,
@@ -465,7 +479,7 @@ impl Targets {
         );
         Self {
             size,
-            msaa: msaa.create_view(&Default::default()),
+            msaa: msaa.map(|t| t.create_view(&Default::default())),
             depth: depth.create_view(&Default::default()),
             resolve_view: resolve.create_view(&Default::default()),
             resolve,
@@ -510,6 +524,8 @@ pub struct Viewport {
     edge_bounds: Option<(Vec3, Vec3)>,
     style: Style,
     targets: Option<Targets>,
+    /// Multisample count of the color and depth targets and pipelines (1: none).
+    samples: u32,
     /// Leave the background (sky, ground, background color) out and clear to
     /// transparent: [`Viewport::render_image`] for PNG export.
     transparent: bool,
@@ -517,6 +533,14 @@ pub struct Viewport {
 
 impl Viewport {
     pub fn new(device: &wgpu::Device, style: Style) -> Self {
+        Self::with_samples(device, style, DEFAULT_SAMPLES)
+    }
+
+    /// A viewport drawn with `samples` multisamples (1, 2, 4 or 8; 1 is no
+    /// anti-aliasing). The device must support the count for [`COLOR_FORMAT`] and the
+    /// depth format: see [`supported_samples`].
+    pub fn with_samples(device: &wgpu::Device, style: Style, samples: u32) -> Self {
+        let samples = samples.max(1);
         let shader = device.create_shader_module(wgpu::include_wgsl!("viewport.wgsl"));
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewport globals"),
@@ -609,7 +633,7 @@ impl Viewport {
                     bias: Default::default(),
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: SAMPLES,
+                    count: samples,
                     ..Default::default()
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -789,6 +813,7 @@ impl Viewport {
             edge_bounds: None,
             style: style.clone(),
             targets: None,
+            samples,
             transparent: false,
         };
         viewport.set_style(device, style);
@@ -929,7 +954,7 @@ impl Viewport {
     ) -> &wgpu::Texture {
         let size = [size[0].max(1), size[1].max(1)];
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
-            self.targets = Some(Targets::new(device, size));
+            self.targets = Some(Targets::new(device, size, self.samples));
         }
 
         let face_style = self.face_style;
@@ -1140,16 +1165,21 @@ impl Viewport {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &targets.msaa,
+                    view: targets.msaa.as_ref().unwrap_or(&targets.resolve_view),
                     depth_slice: None,
-                    resolve_target: Some(&targets.resolve_view),
+                    resolve_target: targets.msaa.as_ref().map(|_| &targets.resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(if self.transparent {
                             wgpu::Color::TRANSPARENT
                         } else {
                             wgpu::Color::WHITE
                         }),
-                        store: wgpu::StoreOp::Discard,
+                        // Without multisampling the pass draws into the result.
+                        store: if targets.msaa.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {

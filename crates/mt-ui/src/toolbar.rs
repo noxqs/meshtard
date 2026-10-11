@@ -108,9 +108,21 @@ impl Shell {
                 .frame(egui::Frame::NONE.fill(t.toolbar))
                 .exact_size(width)
                 .resizable(false)
-                .show_separator_line(true)
+                // egui draws the separator along the panel's whole rect, which grows
+                // with a toolbar taller than the dock and then crosses the bottom
+                // dock and the status bar: drawn here, within the dock, instead.
+                .show_separator_line(false)
                 .show(ui, |ui| {
                     let full = ui.max_rect().y_range();
+                    let x = if edge == DockEdge::Left {
+                        ui.max_rect().right() - 0.5
+                    } else {
+                        ui.max_rect().left() + 0.5
+                    };
+                    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                    ui.painter()
+                        .with_clip_rect(ui.max_rect())
+                        .vline(x, full, stroke);
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                         for (row, tbs) in lines {
@@ -412,30 +424,20 @@ impl Shell {
         }
     }
 
-    /// View > Toolbars...: a dialog with a check box per toolbar.
+    /// View > Toolbars...: a modeless dialog with a check box per toolbar.
     /// Unverified: SketchUp's dialog also has New/Rename/Delete/Reset and an Options tab.
     pub(crate) fn toolbars_dialog(&mut self, ctx: &egui::Context) {
         if !self.toolbars_dialog_open {
             return;
         }
-        let mut open = true;
-        let mut close = false;
-        egui::Window::new("Toolbars")
-            .id(Id::new("mt_ui_toolbars_dialog"))
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
+        let r = crate::dialog::Dialog::new("toolbars", "Toolbars")
+            .width(240.0)
+            .modal(false)
             .show(ctx, |ui| {
-                ui.set_min_width(220.0);
                 self.toolbar_menu(ui);
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    close = ui.button("Close").clicked();
-                });
+                crate::dialog::buttons(ui, &["Close"], None)
             });
-        if !open || close {
+        if r.closed || r.inner.is_some() {
             self.toolbars_dialog_open = false;
         }
     }
@@ -600,6 +602,25 @@ impl Shell {
                             }
                         }
                     });
+                // Escape closes the list, also when something else took the key
+                // event this frame (the raw events still have it).
+                let popup = r.response.id.with("popup");
+                if egui::Popup::is_id_open(ui.ctx(), popup)
+                    && ui.input(|i| {
+                        i.raw.events.iter().any(|e| {
+                            matches!(
+                                e,
+                                egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    ..
+                                }
+                            )
+                        })
+                    })
+                {
+                    egui::Popup::close_id(ui.ctx(), popup);
+                }
                 if let Some(i) = chosen
                     && i != current
                     && i < self.data.tags.len()

@@ -161,20 +161,13 @@ impl Shell {
             return;
         };
         d.selected = d.selected.min(self.trays.trays.len() - 1);
-        let mut open = true;
-        let mut close = false;
         let panels: Vec<(String, String)> = self
             .panels
             .iter()
             .map(|p| (p.id.clone(), p.title.clone()))
             .collect();
-        egui::Window::new("Manage Trays")
-            .id(egui::Id::new("mt_ui_trays_dialog"))
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
+        let r = crate::dialog::Dialog::new("manage_trays", "Manage Trays")
+            .width(380.0)
             .show(ctx, |ui| {
                 // The shell draws flat widgets; the name field needs a border.
                 ui.visuals_mut().widgets.inactive.bg_stroke =
@@ -266,12 +259,9 @@ impl Shell {
                         }
                     });
                 });
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    close = ui.button("Close").clicked();
-                });
+                crate::dialog::buttons(ui, &["Close"], None)
             });
-        if open && !close {
+        if !r.closed && r.inner.is_none() {
             self.trays_dialog = Some(d);
         }
     }
@@ -328,5 +318,33 @@ mod tests {
             s.tray_layout().unique_name(&back.trays[0].name),
             format!("{} 2", back.trays[0].name)
         );
+    }
+
+    #[test]
+    fn reset_workspace_and_icon_size() {
+        let spec = mt_spec::Spec::builtin().unwrap();
+        let mut s = Shell::new(&spec);
+        let mut layout = s.tray_layout().clone();
+        layout.trays.push(TrayDef {
+            name: "Mine".into(),
+            panels: vec!["window.materials".into()],
+        });
+        layout.active = 1;
+        s.set_tray_layout(layout);
+        s.set_toolbar_visible("standard", true);
+        s.set_tray_visible(false);
+        s.pending.clear();
+        s.reset_workspace();
+        assert_eq!(s.tray_layout(), &s.tray_default.clone());
+        assert!(s.tray_visible());
+        assert_eq!(s.toolbar_layout(), &s.toolbar_defaults.clone());
+        assert!(s.pending.contains(&Event::TrayLayoutChanged));
+        assert!(s.pending.contains(&Event::ToolbarLayoutChanged));
+        assert!(s.large_icons(&spec));
+        s.set_large_icons(&spec, false);
+        assert!(!s.large_icons(&spec));
+        assert_eq!(s.theme.sizes.toolbar_icon, crate::SMALL_ICON);
+        s.set_large_icons(&spec, true);
+        assert!(s.large_icons(&spec));
     }
 }

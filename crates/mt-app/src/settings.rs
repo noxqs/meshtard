@@ -78,3 +78,22 @@ pub fn save_tray_layout(layout: &mt_ui::TrayLayout) {
         log::warn!("could not save the trays to {}: {e}", path.display());
     }
 }
+
+/// The user data folder for files that are not settings (auto-save recovery files):
+/// `meshtard/` under `$XDG_DATA_HOME` (or `~/.local/share`) on Linux, `%LOCALAPPDATA%`
+/// on Windows and `~/Library/Application Support` on macOS.
+pub(crate) fn data_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    };
+    base.map(|b| b.join("meshtard"))
+}

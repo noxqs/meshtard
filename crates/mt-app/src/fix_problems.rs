@@ -30,6 +30,14 @@ impl Report {
     }
 }
 
+/// How many topology problems the model has (nothing is changed).
+pub(crate) fn count_problems(m: &Model) -> usize {
+    std::iter::once(&m.root)
+        .chain(m.definitions.values().map(|d| &d.entities))
+        .map(|e| validate(e, Checks::TOPOLOGY).len())
+        .sum()
+}
+
 /// Checks and repairs every entity collection of the model.
 pub(crate) fn fix_model(m: &mut Model) -> Report {
     let mut r = fix_entities(&mut m.root);

@@ -469,6 +469,10 @@ struct PanelState {
     expanded: bool,
 }
 
+/// Small toolbar icon and button sizes (Preferences > Workspace).
+pub const SMALL_ICON: f32 = 16.0;
+pub const SMALL_BUTTON: f32 = 22.0;
+
 impl Shell {
     pub fn new(spec: &Spec) -> Self {
         let toolbar_defaults = ToolbarLayout::from_spec(&spec.toolbars.toolbar);
@@ -662,7 +666,8 @@ impl Shell {
     /// them. Does nothing while a text field (e.g. the box itself) has keyboard focus.
     /// Safe to call more than once per frame.
     pub fn capture_typing(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        // An open dropdown or menu keeps its keys (Escape closes it).
+        if ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) {
             return;
         }
         let mut actions = Vec::new();
@@ -780,6 +785,39 @@ impl Shell {
     pub fn reset_toolbar_layout(&mut self) {
         self.toolbar_layout = self.toolbar_defaults.clone();
         self.toolbar_drag = None;
+    }
+
+    /// Preferences > Workspace > Workspace: puts the toolbars and trays back in their
+    /// default places and shows the tray (both layouts are reported changed).
+    pub fn reset_workspace(&mut self) {
+        self.reset_toolbar_layout();
+        self.trays = self.tray_default.clone();
+        self.apply_active_tray();
+        self.tray_visible = true;
+        self.pending.push(Event::ToolbarLayoutChanged);
+        self.pending.push(Event::TrayLayoutChanged);
+    }
+
+    /// Preferences > Workspace: large tool icons (`ui_theme.toml`'s size, the default)
+    /// or small ones ([`SMALL_ICON`] in [`SMALL_BUTTON`] buttons; sizes unverified).
+    pub fn set_large_icons(&mut self, spec: &Spec, large: bool) {
+        let full = theme::Theme32::from_spec(&spec.ui_theme).sizes;
+        let (icon, button) = if large {
+            (full.toolbar_icon, full.toolbar_button)
+        } else {
+            (
+                SMALL_ICON.min(full.toolbar_icon),
+                SMALL_BUTTON.min(full.toolbar_button),
+            )
+        };
+        self.theme.sizes.toolbar_icon = icon;
+        self.theme.sizes.toolbar_button = button;
+    }
+
+    /// Whether toolbar icons are large.
+    pub fn large_icons(&self, spec: &Spec) -> bool {
+        let full = theme::Theme32::from_spec(&spec.ui_theme).sizes;
+        self.theme.sizes.toolbar_icon >= full.toolbar_icon
     }
 
     /// All toolbars in spec order, with whether they are shown and floating; what

@@ -4,9 +4,9 @@
 //! `settings`), named by their file stem. The built-in template is the empty model
 //! meshtard starts with. The default template (used by File > New) is kept in
 //! `templates.toml` there as `default = "<name>"` (empty or missing: the built-in one);
-//! "Set as default template" in either dialog changes it, as SketchUp's Preferences >
-//! Template page does (SketchUp's template browser, thumbnails and descriptions are
-//! not done; the start-up model is always the built-in template). A model opened from
+//! Window > Preferences > Template changes it, as in SketchUp (SketchUp's template
+//! browser, thumbnails and descriptions are not done; the start-up model is always the
+//! built-in template). Preferences > Files > Templates can move the templates folder. A model opened from
 //! a template is a new untitled model: Save asks for a file name.
 
 use std::path::{Path, PathBuf};
@@ -20,8 +20,11 @@ use crate::document::Document;
 /// Label of the built-in template.
 pub(crate) const BUILT_IN: &str = "Simple Template (built-in)";
 
+/// The templates folder: Preferences > Files > Templates, else `templates/` in the
+/// config folder.
 pub(crate) fn templates_dir() -> Option<PathBuf> {
-    crate::settings::config_dir().map(|d| d.join("templates"))
+    crate::filedialog::folder(crate::filedialog::Folder::Templates)
+        .or_else(|| crate::settings::config_dir().map(|d| d.join("templates")))
 }
 
 fn default_file() -> Option<PathBuf> {
@@ -96,7 +99,6 @@ pub(crate) fn default_template() -> Option<PathBuf> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SaveTemplate {
     name: String,
-    make_default: bool,
     note: Option<String>,
 }
 
@@ -105,7 +107,6 @@ pub(crate) struct SaveTemplate {
 pub(crate) struct NewFromTemplate {
     list: Vec<(String, PathBuf)>,
     chosen: Option<usize>,
-    make_default: bool,
 }
 
 impl App {
@@ -120,11 +121,7 @@ impl App {
         let list = templates_dir().map_or_else(Vec::new, |d| list_templates(&d));
         let default = load_default();
         let chosen = default.and_then(|n| list.iter().position(|(m, _)| *m == n));
-        self.present.new_template = Some(NewFromTemplate {
-            list,
-            chosen,
-            make_default: false,
-        });
+        self.present.new_template = Some(NewFromTemplate { list, chosen });
     }
 
     /// File > New: a new model from the default template.
@@ -179,8 +176,6 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(260.0));
                         ui.end_row();
                     });
-                ui.add_space(6.0);
-                ui.checkbox(&mut d.make_default, "Set as default template");
                 if let Some(dir) = templates_dir() {
                     ui.add_space(6.0);
                     ui.weak(format!("Saved in {}", dir.display()));
@@ -209,12 +204,7 @@ impl App {
                     .and_then(|()| doc.to_skp().map_err(|e| e.to_string()))
                     .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
                 self.message = Some(match result {
-                    Ok(()) => {
-                        if d.make_default {
-                            save_default(Some(&name));
-                        }
-                        format!("Saved template \"{name}\" ({}).", path.display())
-                    }
+                    Ok(()) => format!("Saved template \"{name}\" ({}).", path.display()),
                     Err(e) => format!("Could not save the template: {e}"),
                 });
             }
@@ -268,7 +258,7 @@ impl App {
                     ui.weak("No saved templates yet: use File > Save As Template.");
                 }
                 ui.add_space(6.0);
-                ui.checkbox(&mut d.make_default, "Set as default template");
+                ui.weak("The default template is set in Window > Preferences > Template.");
                 crate::presentation::ok_cancel(ui, "Create")
             });
         let done = done.or(crate::presentation::answer(r));
@@ -277,9 +267,6 @@ impl App {
             Some(false) => {}
             Some(true) => {
                 let chosen = d.chosen.and_then(|i| d.list.get(i).cloned());
-                if d.make_default {
-                    save_default(chosen.as_ref().map(|(n, _)| n.as_str()));
-                }
                 self.request(ctx, frame, Pending::NewFrom(chosen.map(|(_, p)| p)));
             }
         }

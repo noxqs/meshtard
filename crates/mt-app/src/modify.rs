@@ -337,6 +337,28 @@ impl PushPull {
     }
 }
 
+/// The face Push/Pull starts on: the clicked face, or with one face selected
+/// beforehand (pre-pick), that face wherever the click is; a clicked face that is
+/// part of a selection of several stays the clicked one. The app passes no selection
+/// when Preferences > Drawing > Disable Pre-Pick on Push/Pull is on. Unverified:
+/// SketchUp's pre-pick with several selected faces (it may push them all).
+fn prepicked_face(ctx: &Ctx) -> Option<FaceId> {
+    let selected: Vec<FaceId> = ctx
+        .selection
+        .iter()
+        .filter_map(|o| match o {
+            Owner::Face(f) if ctx.ents.faces.contains_key(*f) => Some(*f),
+            _ => None,
+        })
+        .collect();
+    match (ctx.picked, selected.as_slice()) {
+        (Some(Owner::Face(f)), _) if selected.contains(&f) => Some(f),
+        (_, [only]) => Some(*only),
+        (Some(Owner::Face(f)), _) => Some(f),
+        _ => None,
+    }
+}
+
 impl ModifyTool for PushPull {
     fn direction_locks(&self) -> bool {
         true
@@ -369,7 +391,7 @@ impl ModifyTool for PushPull {
     fn click(&mut self, ctx: &mut Ctx, inf: &Inference) -> bool {
         match self.start {
             None => {
-                if let Some(Owner::Face(f)) = ctx.picked {
+                if let Some(f) = prepicked_face(ctx) {
                     let n = ctx.ents.faces[f].normal;
                     self.start = Some((f, inf.point, n));
                 }
@@ -1758,6 +1780,29 @@ mod tests {
             mt_kernel::add_line(ents, p[i], p[(i + 1) % 4]);
         }
         ents.faces.keys().next().unwrap()
+    }
+
+    #[test]
+    fn push_pull_prepick_uses_the_selected_face() {
+        let mut ents = Entities::default();
+        let f = square(&mut ents);
+        let sel = [Owner::Face(f)];
+        // Clicked off the face (nothing picked): the selected face is pushed.
+        let mut pp = PushPull::default();
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: None,
+            selection: &sel,
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
+        pp.click(&mut ctx, &inf(DVec3::new(50.0, 0.0, 0.0)));
+        assert_eq!(pp.start.map(|s| s.0), Some(f));
+        // Without the selection (pre-pick disabled) the click picks nothing.
+        let mut pp = PushPull::default();
+        ctx.selection = &[];
+        pp.click(&mut ctx, &inf(DVec3::new(50.0, 0.0, 0.0)));
+        assert!(pp.start.is_none());
     }
 
     #[test]

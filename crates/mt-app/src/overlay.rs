@@ -3,7 +3,9 @@
 use glam::DVec3;
 use mt_infer::{Inference, Kind};
 
+/// An inference color, with Preferences > Accessibility's colors.
 fn color32(c: [u8; 3]) -> egui::Color32 {
+    let c = crate::prefs_pages::remap(c);
     egui::Color32::from_rgb(c[0], c[1], c[2])
 }
 

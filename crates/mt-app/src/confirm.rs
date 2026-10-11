@@ -35,11 +35,8 @@ impl App {
         match action {
             Pending::New => self.new_document(ctx, frame),
             Pending::Open(path) => {
-                let path = path.or_else(|| {
-                    rfd::FileDialog::new()
-                        .add_filter("Meshtard Models", &["skp"])
-                        .pick_file()
-                });
+                let path =
+                    path.or_else(|| crate::filedialog::open(&[("Meshtard Models", &["skp"])]));
                 if let (Some(path), Some(rs)) = (path, frame.wgpu_render_state()) {
                     let device = rs.device.clone();
                     self.open(ctx, &device, &path);

@@ -88,7 +88,8 @@ impl App {
                     shell.open_trays_dialog();
                 }
             }
-            "help.welcome" | "help.knowledge_center" | "help.contact" => {
+            "help.welcome" => self.open_welcome(),
+            "help.knowledge_center" | "help.contact" => {
                 if let Err(e) = open_with_system(PROJECT_URL) {
                     self.message = Some(format!("Could not open {PROJECT_URL}: {e}"));
                 }

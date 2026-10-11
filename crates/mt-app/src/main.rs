@@ -6,6 +6,7 @@ mod animation;
 mod annot;
 mod camera_cmd;
 mod camera_tools;
+mod click_style;
 mod commands;
 mod component_dialog;
 mod confirm;
@@ -35,6 +36,7 @@ mod overlay;
 mod paint;
 mod pick_tool;
 mod preferences;
+mod prefs_pages;
 mod presentation;
 mod print;
 mod report;
@@ -55,6 +57,7 @@ mod tool_extra;
 mod tools;
 mod tray;
 mod tray_more;
+mod welcome;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
@@ -461,7 +464,8 @@ impl App {
             info.driver_info
         );
         let mut spec = spec;
-        let prefs = preferences::load(&mut spec);
+        let mut prefs = preferences::load(&mut spec);
+        let samples = prefs.set_adapter(&render_state.adapter);
         let shortcuts = preferences::shortcut_table(&spec, IMPLEMENTED);
         #[cfg(target_os = "macos")]
         let native_menu = macos_menu::NativeMenu::install(&spec, VIEW_TOGGLES);
@@ -481,7 +485,11 @@ impl App {
             }),
             camera: Camera::from_spec(&spec.default_model.camera),
             tool: Tool::Select,
-            viewport: Viewport::new(&render_state.device, Style::from_spec(&spec.default_model)),
+            viewport: Viewport::with_samples(
+                &render_state.device,
+                Style::from_spec(&spec.default_model),
+                samples,
+            ),
             texture: None,
             shortcuts,
             spec,
@@ -723,9 +731,14 @@ impl App {
             (Some(o), Some(doc)) if doc.is_locked(*o) => LOCKED,
             _ => SELECTED,
         };
+        // Compatibility > Bounding box only: selected groups and components show
+        // their box, not their edges.
+        let box_only = self.prefs.more.bbox_highlight;
         for (seg, owner) in self.scene.edges.iter().zip(&self.scene.edge_owner) {
             let mut seg = *seg;
-            let selected = owner.is_some_and(|o| self.selection.contains(&o));
+            let selected = owner.is_some_and(|o| {
+                self.selection.contains(&o) && !(box_only && matches!(o, Owner::Instance(_)))
+            });
             let color = if selected { highlight(owner) } else { SELECTED };
             match moved(owner) {
                 Some((xf, copy)) => {
@@ -946,6 +959,7 @@ impl App {
                 self.camera_history.clear();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 self.document = Some(doc);
+                self.after_open();
                 self.clipboard_changed_document();
                 self.selection.clear();
                 self.rebuild(device);
@@ -1246,7 +1260,7 @@ impl App {
         } else if id == "file.new" {
             self.request(ctx, frame, confirm::Pending::New);
         } else if matches!(id, "file.save" | "file.save_as" | "file.save_copy_as") {
-            self.save(ctx, id);
+            self.save_command(ctx, id);
         } else if id == "file.open" {
             self.request(ctx, frame, confirm::Pending::Open(None));
         }
@@ -1374,7 +1388,7 @@ impl App {
     /// format (the only one the writer produces); SketchUp 2026 opens them.
     /// Returns whether the file was written.
     fn save(&mut self, ctx: &egui::Context, id: &str) -> bool {
-        let Some(doc) = self.document.as_mut() else {
+        let Some(doc) = self.document.as_ref() else {
             return false;
         };
         let path = if id == "file.save" && doc.has_file {
@@ -1389,14 +1403,18 @@ impl App {
         let Some(path) = path else {
             return false;
         };
-        preferences::before_save(&self.prefs, &path);
+        // Preferences > General: Fix Problems, backup.
+        self.before_save(&path);
+        let Some(doc) = self.document.as_mut() else {
+            return false;
+        };
         let result = doc
             .to_skp()
             .map_err(|e| e.to_string())
             .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
         match result {
             Ok(()) => {
-                preferences::after_save(&path);
+                self.prefs.after_save(&path);
                 if id != "file.save_copy_as" {
                     doc.mark_saved(&path);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
@@ -1490,7 +1508,7 @@ impl App {
             },
             shift,
             wheel: if response.hovered() {
-                f64::from(notches)
+                f64::from(notches) * self.prefs.wheel_sign()
             } else {
                 0.0
             },
@@ -1569,6 +1587,7 @@ impl App {
             egui::Color32::WHITE,
         );
         self.draw_selection_box(ui, &response, rect);
+        self.crosshairs(ui, &response, rect, viewport_px);
         self.draw_lasso(ui, &response, rect);
         self.draw_zoom_box(ui, &response, rect);
         self.pick_overlay(ui, rect);
@@ -1724,8 +1743,13 @@ impl App {
             },
         );
 
-        let cursor = response
-            .hover_pos()
+        // A drag starts where the button went down.
+        let press = response
+            .drag_started_by(egui::PointerButton::Primary)
+            .then(|| ui.input(|i| i.pointer.press_origin()))
+            .flatten();
+        let cursor = press
+            .or(response.hover_pos())
             .or(response.interact_pointer_pos())
             .map(|p| {
                 DVec2::new(
@@ -1757,18 +1781,37 @@ impl App {
         };
         let inf = to_local(&inf, self.ctx_xf);
         let primary = egui::PointerButton::Primary;
-        let changed = if response.clicked_by(primary) {
-            doc.edit(|root| draw.click(root, &inf))
-        } else if response.drag_started_by(primary) {
-            doc.edit(|root| draw.drag_start(root, &inf))
-        } else if response.drag_stopped_by(primary) {
-            doc.edit(|root| draw.drag_end(root, &inf))
+        // Preferences > Drawing > Click Style (`click_style`); Freehand only drags.
+        let style = if self.tool == Tool::Draw("tool.freehand") {
+            click_style::ClickStyle::ClickDragRelease
         } else {
-            if response.dragged_by(primary) {
-                draw.drag_move(&inf);
-            }
-            false
+            self.prefs.drawing.click_style
         };
+        let changed = match self.prefs.pointer.gesture(style, response, press) {
+            click_style::Gesture::Click => doc.edit(|root| draw.click(root, &inf)),
+            click_style::Gesture::DragStart => {
+                let before = draw.anchor();
+                let changed = doc.edit(|root| draw.drag_start(root, &inf));
+                self.prefs
+                    .pointer
+                    .started(draw.anchor() != before || changed);
+                changed
+            }
+            click_style::Gesture::DragEnd => doc.edit(|root| draw.drag_end(root, &inf)),
+            click_style::Gesture::None => {
+                if response.dragged_by(primary) {
+                    draw.drag_move(&inf);
+                }
+                false
+            }
+        };
+        // "Continue line drawing" off: a drawn segment ends the Line tool's chain.
+        if changed
+            && self.tool == Tool::Draw("tool.line")
+            && !style.line_continues(self.prefs.drawing.continue_line)
+        {
+            draw.cancel();
+        }
         let changed = self.draw_tool_post(response, &inf) | changed;
         if changed {
             self.shift_lock.after_change(&mut self.engine);
@@ -1943,13 +1986,17 @@ impl App {
             return;
         };
         let inf = to_local(&inf, self.ctx_xf);
-        // A drag works like two clicks: press, then release (SketchUp's click-drag).
-        let primary = egui::PointerButton::Primary;
-        if !(response.clicked_by(primary)
-            || response.drag_started_by(primary)
-            || (response.drag_stopped_by(primary) && tool.anchor().is_some()))
-        {
-            return;
+        // A drag works like two clicks: press, then release (SketchUp's click-drag),
+        // as Preferences > Drawing > Click Style says (`click_style`).
+        let gesture = self
+            .prefs
+            .pointer
+            .gesture(self.prefs.drawing.click_style, response, press);
+        let anchor_before = tool.anchor();
+        match gesture {
+            click_style::Gesture::Click | click_style::Gesture::DragStart => {}
+            click_style::Gesture::DragEnd if anchor_before.is_some() => {}
+            _ => return,
         }
         let double = response.double_clicked();
         let mut picked =
@@ -1957,7 +2004,13 @@ impl App {
         if picked.is_some_and(|o| doc.is_locked(o)) {
             picked = None;
         }
-        let selection = unlocked;
+        // Preferences > Drawing > Disable Pre-Pick on Push/Pull.
+        let selection =
+            if self.prefs.drawing.no_prepick && self.tool == Tool::Modify("tool.push_pull") {
+                Vec::new()
+            } else {
+                unlocked
+            };
         let eye = self.ctx_xf.inverse().transform_point3(self.camera.eye);
         let changed = doc.edit(|root| {
             let mut ctx = modify::Ctx {
@@ -1971,6 +2024,11 @@ impl App {
             let clicked = tool.click(&mut ctx, &inf);
             clicked | (double && tool.double_click(&mut ctx, &inf))
         });
+        if gesture == click_style::Gesture::DragStart {
+            self.prefs
+                .pointer
+                .started(tool.anchor() != anchor_before || changed);
+        }
         // Paint Bucket with Alt: the sampled material becomes current.
         if let Some(m) = tool.take_sampled_material() {
             self.current_material = m;
@@ -2385,6 +2443,10 @@ fn wheel_notches(events: &[egui::Event]) -> f32 {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        self.preferences_exit();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let Some(mut shell) = self.shell.take() else {
             return;
@@ -2506,7 +2568,7 @@ impl eframe::App for App {
         self.text3d_ui(ui.ctx(), frame);
         self.animation_ui(ui.ctx(), frame);
         self.model_info_ui(ui.ctx(), frame);
-        self.preferences_ui(ui.ctx());
+        self.preferences_ui(ui.ctx(), frame);
         self.presentation_ui(ui.ctx(), frame);
         self.context_extra_ui(ui.ctx(), frame);
         self.tool_extra_ui(ui.ctx(), frame);

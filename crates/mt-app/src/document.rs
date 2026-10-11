@@ -384,6 +384,11 @@ impl Document {
         self.saved_state = self.state;
     }
 
+    /// Marks the model as having unsaved changes (a recovered auto-save).
+    pub fn mark_unsaved(&mut self) {
+        self.saved_state = u64::MAX;
+    }
+
     /// Definitions along a context path; `None` if the path is no longer valid.
     fn path_definitions(model: &Model, path: &[usize]) -> Option<Vec<DefinitionId>> {
         let mut ents = &model.root;

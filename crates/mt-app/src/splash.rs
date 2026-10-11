@@ -45,6 +45,11 @@ impl Loading {
 }
 
 impl Splash {
+    /// The splash screen has gone.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
