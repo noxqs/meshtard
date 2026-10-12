@@ -20,6 +20,9 @@ Still not saved: scenes, shadow settings, fog, model axes, locks, the active sec
 - Import... and Export... buttons on the Shortcuts page, and Show All....
 - Help > Keyboard Shortcuts: every shortcut grouped by menu, with a filter, Copy and Save as text for printing.
 - Menus and Search show punctuation keys as characters (`Ctrl+,`).
+- A command can have several shortcuts. New second keys as in SketchUp for Windows: Ctrl+Insert Copy, Shift+Delete Cut, Shift+Insert Paste, Alt+Backspace Undo, Ctrl+Shift+E Zoom Extents; on the Mac, Forward Delete also deletes. Preferences > Shortcuts shows every key with Remove per key and Add...; menus show the first key. Saved shortcut files from earlier versions still load.
+- Shift+F1 (Help > Context Help) opens the Instructor panel for the active tool.
+- Tool modifier keys follow SketchUp 2026's Quick Reference Card: Orbit suspends gravity with Alt (was Ctrl); Eraser unsoftens with Alt; Alt + plus / minus change segments; Lasso adds with Alt, adds and subtracts with Shift, subtracts with Shift+Alt. New: Rectangle Alt draws from the center, Follow Me Alt uses a face's perimeter as the path (Alt-click the profile, then click the face), Protractor Ctrl turns guide creation off and on.
 
 ## macOS
 

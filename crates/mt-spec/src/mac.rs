@@ -23,12 +23,14 @@ pub struct MacMenus {
     pub relabel: BTreeMap<String, String>,
 }
 
-/// `keymap_mac.toml`: shortcuts replacing the Windows ones; empty text unbinds.
+/// `keymap_mac.toml`: shortcuts replacing a command's Windows ones (all of them: a
+/// key or a list of keys); empty text unbinds.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MacKeymap {
     pub verified: bool,
-    pub bindings: BTreeMap<String, String>,
+    #[serde(deserialize_with = "crate::de_bindings")]
+    pub bindings: BTreeMap<String, Vec<String>>,
 }
 
 /// Both macOS files.
@@ -105,7 +107,7 @@ impl Spec {
         spec.menus.menu.insert(0, app);
         spec.menus.app_menu = true;
 
-        for (id, key) in &mac.keymap.bindings {
+        for (id, keys) in &mac.keymap.bindings {
             let err = |message: String| Error {
                 file: "keymap_mac.toml",
                 message: format!("`{id}`: {message}"),
@@ -113,13 +115,16 @@ impl Spec {
             if !known.contains_key(id) {
                 return Err(err("not a command in menus.toml".into()));
             }
-            if key.is_empty() {
+            if keys.is_empty() {
                 spec.keymap.bindings.remove(id);
             } else {
                 // Stored in keymap.toml's spelling ("Ctrl"), so string compares and
                 // the menu's shortcut text work the same on every system.
-                let s = Shortcut::parse(key).map_err(err)?;
-                spec.keymap.bindings.insert(id.clone(), s.to_string());
+                let keys = (keys.iter())
+                    .map(|k| Shortcut::parse(k).map(|s| s.to_string()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(err)?;
+                spec.keymap.bindings.insert(id.clone(), keys);
             }
         }
         spec.validate()?;
@@ -276,10 +281,13 @@ mod tests {
         let (win, mac) = both();
         for spec in [&win, &mac] {
             let mut seen = BTreeMap::new();
-            for (id, key) in &spec.keymap.bindings {
-                let s = Shortcut::parse(key).unwrap();
-                if let Some(other) = seen.insert(s, id) {
-                    panic!("`{key}` bound to `{other}` and `{id}`");
+            for (id, keys) in &spec.keymap.bindings {
+                assert!(!keys.is_empty(), "{id}");
+                for key in keys {
+                    let s = Shortcut::parse(key).unwrap();
+                    if let Some(other) = seen.insert(s, id) {
+                        panic!("`{key}` bound to `{other}` and `{id}`");
+                    }
                 }
                 assert!(spec.commands().contains_key(id), "{id}");
             }
@@ -297,6 +305,7 @@ mod tests {
                 !mac.keymap
                     .bindings
                     .values()
+                    .flatten()
                     .any(|k| Shortcut::parse(k).unwrap() == s),
                 "{key}"
             );
@@ -364,12 +373,21 @@ mod tests {
     #[test]
     fn mac_shortcuts_replace_windows_ones() {
         let (win, mac) = both();
-        let key = |s: &Spec, id: &str| s.keymap.bindings.get(id).cloned();
+        let key = |s: &Spec, id: &str| s.keymap.bindings.get(id).map(|k| k[0].clone());
+        let keys = |s: &Spec, id: &str| s.keymap.bindings[id].clone();
         assert_eq!(key(&win, "edit.redo").unwrap(), "Ctrl+Y");
         assert_eq!(key(&mac, "edit.redo").unwrap(), "Ctrl+Shift+Z");
         assert_eq!(key(&win, "edit.select_none").unwrap(), "Ctrl+T");
         assert_eq!(key(&mac, "edit.select_none").unwrap(), "Ctrl+Shift+A");
-        assert_eq!(key(&mac, "edit.delete").unwrap(), "Backspace");
+        // The Mac delete key (Backspace) and Forward Delete (fn+delete).
+        assert_eq!(keys(&mac, "edit.delete"), ["Backspace", "Delete"]);
+        assert_eq!(keys(&win, "edit.delete"), ["Delete"]);
+        // Windows second keys: Insert-key and Alt+Backspace ones are not on the Mac.
+        assert_eq!(keys(&win, "edit.copy"), ["Ctrl+C", "Ctrl+Insert"]);
+        assert_eq!(keys(&mac, "edit.copy"), ["Ctrl+C"]);
+        assert_eq!(keys(&mac, "edit.undo"), ["Ctrl+Z"]);
+        assert_eq!(keys(&mac, "edit.cut"), ["Ctrl+X"]);
+        assert_eq!(keys(&mac, "edit.paste"), ["Ctrl+V"]);
         assert_eq!(key(&mac, "window.preferences").unwrap(), "Ctrl+Comma");
         assert_eq!(key(&mac, "file.exit").unwrap(), "Ctrl+Q");
         // SketchUp 2026 for Windows also binds Ctrl+Q (spec/parity/SHORTCUTS.md).
@@ -423,6 +441,15 @@ mod tests {
         let mac = spec.mac_layout().unwrap();
         assert!(!mac.keymap.bindings.contains_key("edit.select_none"));
         assert!(spec.keymap.bindings.contains_key("edit.select_none"));
+        // An empty list unbinds too.
+        let keymap_mac = "verified = false\n[bindings]\n\"edit.select_none\" = []\n";
+        let spec = Spec::parse(&Sources {
+            keymap_mac,
+            ..BUILTIN
+        })
+        .unwrap();
+        let mac = spec.mac_layout().unwrap();
+        assert!(!mac.keymap.bindings.contains_key("edit.select_none"));
     }
 
     #[test]

@@ -101,7 +101,7 @@ impl Spec {
     }
 
     fn parse(src: &Sources) -> Result<Self, Error> {
-        let spec = Self {
+        let mut spec = Self {
             menus: parse_toml("menus.toml", src.menus)?,
             keymap: parse_toml("keymap.toml", src.keymap)?,
             default_model: parse_toml("default_model.toml", src.default_model)?,
@@ -113,6 +113,8 @@ impl Spec {
                 keymap: parse_toml("keymap_mac.toml", src.keymap_mac)?,
             },
         };
+        // `""` or `[]` in keymap.toml: no shortcut.
+        spec.keymap.bindings.retain(|_, keys| !keys.is_empty());
         spec.validate()?;
         // The Mac layout must hold up too, whatever system this runs on.
         spec.mac_layout()?;
@@ -163,16 +165,18 @@ impl Spec {
         self.validate_tray(&ids)?;
 
         let mut seen: BTreeMap<Shortcut, &str> = BTreeMap::new();
-        for (command, key) in &self.keymap.bindings {
-            let shortcut = Shortcut::parse(key).map_err(|message| Error {
-                file: "keymap.toml",
-                message: format!("`{command}`: {message}"),
-            })?;
-            if let Some(other) = seen.insert(shortcut, command) {
-                return Err(Error {
+        for (command, keys) in &self.keymap.bindings {
+            for key in keys {
+                let shortcut = Shortcut::parse(key).map_err(|message| Error {
                     file: "keymap.toml",
-                    message: format!("`{key}` is bound to both `{other}` and `{command}`"),
-                });
+                    message: format!("`{command}`: {message}"),
+                })?;
+                if let Some(other) = seen.insert(shortcut, command) {
+                    return Err(Error {
+                        file: "keymap.toml",
+                        message: format!("`{key}` is bound to both `{other}` and `{command}`"),
+                    });
+                }
             }
         }
         Ok(())
@@ -302,16 +306,67 @@ pub enum MenuItem {
 #[serde(deny_unknown_fields)]
 pub struct Keymap {
     pub verified: bool,
-    /// Command id to shortcut text, e.g. `"tool.line" = "L"`.
-    pub bindings: BTreeMap<String, String>,
+    /// Command id to its shortcuts, main one first: `"tool.line" = "L"` or
+    /// `"edit.copy" = ["Ctrl+C", "Ctrl+Insert"]` in the file. Commands without a
+    /// shortcut have no entry.
+    #[serde(deserialize_with = "de_bindings")]
+    pub bindings: BTreeMap<String, Vec<String>>,
 }
 
 impl Keymap {
+    /// The first (main) shortcut of `command`: the one menus show.
     pub fn shortcut(&self, command: &str) -> Option<Shortcut> {
+        self.shortcuts(command).into_iter().next()
+    }
+
+    /// Every shortcut of `command`, in order.
+    pub fn shortcuts(&self, command: &str) -> Vec<Shortcut> {
         self.bindings
             .get(command)
-            .and_then(|s| Shortcut::parse(s).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|s| Shortcut::parse(s).ok())
+            .collect()
     }
+
+    /// The command that has shortcut `s`.
+    pub fn holder(&self, s: &Shortcut) -> Option<&str> {
+        self.bindings
+            .iter()
+            .find(|(_, keys)| {
+                keys.iter()
+                    .any(|k| Shortcut::parse(k).ok().as_ref() == Some(s))
+            })
+            .map(|(id, _)| id.as_str())
+    }
+}
+
+/// One shortcut (`"L"`, `""` for none) or a list of them.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(s) if s.is_empty() => Vec::new(),
+            Self::One(s) => vec![s],
+            Self::Many(v) => v,
+        }
+    }
+}
+
+/// A `[bindings]` table whose values are a shortcut or a list of shortcuts. `""`
+/// and `[]` give an empty list (the macOS overlay's "unbind").
+pub(crate) fn de_bindings<'de, D>(d: D) -> Result<BTreeMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, OneOrMany>::deserialize(d)?;
+    Ok(raw.into_iter().map(|(k, v)| (k, v.into_vec())).collect())
 }
 
 /// A key with modifiers. `key` is an egui key name such as `L`, `Space`, `Delete`.
@@ -700,6 +755,32 @@ mod tests {
         let keymap = "verified = false\n[bindings]\n\"a\" = \"L\"\n\"b\" = \"L\"\n";
         let err = Spec::parse(&Sources { keymap, ..BUILTIN }).unwrap_err();
         assert!(err.to_string().contains("bound to both"), "{err}");
+        // Also inside a list, and between a list and a single key.
+        let keymap = "verified = false\n[bindings]\n\"a\" = [\"K\", \"L\"]\n\"b\" = \"L\"\n";
+        let err = Spec::parse(&Sources { keymap, ..BUILTIN }).unwrap_err();
+        assert!(err.to_string().contains("bound to both"), "{err}");
+    }
+
+    /// FEATURES.md 75: several keys per command, the first one the menus show.
+    #[test]
+    fn commands_can_have_several_keys() {
+        let spec = Spec::builtin().unwrap();
+        let k = &spec.keymap;
+        let texts =
+            |id: &str| -> Vec<String> { k.shortcuts(id).iter().map(ToString::to_string).collect() };
+        assert_eq!(texts("edit.copy"), ["Ctrl+C", "Ctrl+Insert"]);
+        assert_eq!(texts("edit.cut"), ["Ctrl+X", "Shift+Delete"]);
+        assert_eq!(texts("edit.paste"), ["Ctrl+V", "Shift+Insert"]);
+        assert_eq!(texts("edit.undo"), ["Ctrl+Z", "Alt+Backspace"]);
+        assert_eq!(texts("camera.zoom_extents"), ["Shift+Z", "Ctrl+Shift+E"]);
+        assert_eq!(k.shortcut("edit.copy").unwrap().to_string(), "Ctrl+C");
+        assert_eq!(texts("tool.line"), ["L"]);
+        let ins = Shortcut::parse("Ctrl+Insert").unwrap();
+        assert_eq!(k.holder(&ins), Some("edit.copy"));
+        // `""` and `[]` are no shortcut.
+        let keymap = "verified = false\n[bindings]\n\"a\" = \"\"\n\"b\" = []\n\"c\" = [\"L\"]\n";
+        let spec = Spec::parse(&Sources { keymap, ..BUILTIN }).unwrap();
+        assert_eq!(spec.keymap.bindings.keys().collect::<Vec<_>>(), ["c"]);
     }
 
     #[test]

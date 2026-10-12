@@ -307,6 +307,9 @@ items = [
   { id = "help.search", label = "Search" },
   # Not in SketchUp: a printable list of every shortcut (spec/parity/SHORTCUTS.md).
   { id = "help.keyboard_shortcuts", label = "Keyboard Shortcuts" },
+  # SketchUp has Context Help (Shift+F1) as a shortcut only (FEATURES.md 74):
+  # the Instructor panel for the active tool.
+  { id = "help.context_help", label = "Context Help" },
   { separator = true },
   { id = "help.welcome", label = "Welcome to Meshtard" },
   { id = "help.knowledge_center", label = "Knowledge Center" },

@@ -10,12 +10,11 @@
 //! nearest are that table and the Quick Reference Card PDF): every shortcut grouped
 //! by top-level menu, with a filter, and Copy / Save as text for printing.
 
-use std::collections::BTreeMap;
-
 use eframe::egui;
 use mt_spec::{Shortcut, Spec};
 
 use crate::App;
+use crate::preferences::Bindings;
 
 /// A command a shortcut can be given to.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,26 +66,31 @@ pub(crate) fn rows(spec: &Spec, extensions: &[(String, String, Vec<String>)]) ->
     out
 }
 
-/// The shortcut of `id` as shown to people (`Ctrl+,`), empty when none.
-pub(crate) fn key_label(bindings: &BTreeMap<String, String>, id: &str) -> String {
-    bindings
-        .get(id)
-        .and_then(|s| Shortcut::parse(s).ok())
+/// The shortcuts of `id` as shown to people (`Ctrl+,`), main one first.
+pub(crate) fn key_labels(bindings: &Bindings, id: &str) -> Vec<String> {
+    (bindings.get(id).into_iter().flatten())
+        .filter_map(|s| Shortcut::parse(s).ok())
         .map(|s| s.label())
-        .unwrap_or_default()
+        .collect()
 }
 
-/// Whether `row` matches the Filter text (lowercase): function, id or key.
-pub(crate) fn matches(row: &Row, key: &str, filter: &str) -> bool {
+/// The shortcuts of `id` in one text (`Ctrl+C  Ctrl+Insert`), empty when none.
+pub(crate) fn key_label(bindings: &Bindings, id: &str) -> String {
+    key_labels(bindings, id).join("  ")
+}
+
+/// Whether `row` matches the Filter text (lowercase): function, id or one of the
+/// keys.
+pub(crate) fn matches(row: &Row, keys: &[String], filter: &str) -> bool {
     filter.is_empty()
         || row.function.to_lowercase().contains(filter)
         || row.id.contains(filter)
-        || key.to_lowercase() == filter
+        || keys.iter().any(|k| k.to_lowercase() == filter)
 }
 
-/// The printable list: a heading per group, then function and key per line. Only
+/// The printable list: a heading per group, then function and keys per line. Only
 /// commands with a shortcut unless `all`.
-pub(crate) fn text(rows: &[Row], bindings: &BTreeMap<String, String>, all: bool) -> String {
+pub(crate) fn text(rows: &[Row], bindings: &Bindings, all: bool) -> String {
     let width = rows.iter().map(|r| r.function.len()).max().unwrap_or(0) + 2;
     let mut out = String::from("Meshtard keyboard shortcuts\n");
     let mut group = None;
@@ -130,6 +134,17 @@ impl App {
         rows(&self.spec, &self.extension_commands())
     }
 
+    /// Help > Context Help (Shift+F1, FEATURES.md 74). SketchUp's opens the help
+    /// page of the active tool ("Sketchup/Context Help" in a Windows shortcut export
+    /// [inf]; its behavior is from memory, unverified); Meshtard shows its own help
+    /// instead: the Instructor panel, which follows the active tool, opened and
+    /// expanded in the tray.
+    pub(crate) fn context_help(&mut self) {
+        if let Some(shell) = &mut self.shell {
+            shell.open_panel("window.instructor");
+        }
+    }
+
     pub(crate) fn open_shortcut_list(&mut self) {
         self.prefs
             .shortcut_list
@@ -165,10 +180,11 @@ impl App {
                             .show(ui, |ui| {
                                 let mut group = None;
                                 for r in &rows {
-                                    let key = key_label(bindings, &r.id);
-                                    if (key.is_empty() && !d.all) || !matches(r, &key, &filter) {
+                                    let keys = key_labels(bindings, &r.id);
+                                    if (keys.is_empty() && !d.all) || !matches(r, &keys, &filter) {
                                         continue;
                                     }
+                                    let key = keys.join("  ");
                                     if group != Some(&r.group) {
                                         ui.strong(&r.group);
                                         ui.end_row();
@@ -265,15 +281,46 @@ mod tests {
     fn default_keymap_is_usable() {
         let spec = Spec::builtin().unwrap();
         let commands = spec.commands();
-        let mut seen = BTreeMap::new();
-        for (id, text) in &spec.keymap.bindings {
-            let s = Shortcut::parse(text).unwrap();
-            assert!(egui::Key::from_name(&s.key).is_some(), "{id}: key {text}");
-            assert!(commands.contains_key(id), "{id} is not a menu command");
-            if let Some(other) = seen.insert(s, id) {
-                panic!("{text} is bound to both {other} and {id}");
+        let mut seen = std::collections::BTreeMap::new();
+        for spec in [spec.clone(), spec.mac_layout().unwrap()] {
+            seen.clear();
+            for (id, texts) in &spec.keymap.bindings {
+                assert!(commands.contains_key(id), "{id} is not a menu command");
+                for text in texts {
+                    let s = Shortcut::parse(text).unwrap();
+                    assert!(egui::Key::from_name(&s.key).is_some(), "{id}: key {text}");
+                    if let Some(other) = seen.insert(s, id.clone()) {
+                        panic!("{text} is bound to both {other} and {id}");
+                    }
+                }
             }
         }
+    }
+
+    /// FEATURES.md 75: SketchUp's second keys (Windows export [inf]) and the list
+    /// shows every key of a command.
+    #[test]
+    fn second_keys_are_bound_and_listed() {
+        let spec = Spec::builtin().unwrap();
+        let b = &spec.keymap.bindings;
+        for (id, keys) in [
+            ("camera.zoom_extents", ["Shift+Z", "Ctrl+Shift+E"]),
+            ("edit.undo", ["Ctrl+Z", "Alt+Backspace"]),
+            ("edit.cut", ["Ctrl+X", "Shift+Delete"]),
+            ("edit.copy", ["Ctrl+C", "Ctrl+Insert"]),
+            ("edit.paste", ["Ctrl+V", "Shift+Insert"]),
+        ] {
+            assert_eq!(b[id], keys, "{id}");
+        }
+        assert_eq!(key_label(b, "edit.copy"), "Ctrl+C  Ctrl+Insert");
+        assert_eq!(key_labels(b, "window.preferences"), ["Ctrl+,"]);
+        let rows = rows(&spec, &[]);
+        let copy = rows.iter().find(|r| r.id == "edit.copy").unwrap();
+        // The filter finds a command by any of its keys.
+        assert!(matches(copy, &key_labels(b, "edit.copy"), "ctrl+insert"));
+        assert!(!matches(copy, &key_labels(b, "edit.copy"), "ctrl+v"));
+        assert!(text(&rows, b, false).contains("Ctrl+C  Ctrl+Insert"));
+        assert_eq!(b["help.context_help"], ["Shift+F1"]);
     }
 
     /// The SketchUp 2026 (Windows) defaults researched in spec/parity/SHORTCUTS.md.
@@ -321,7 +368,7 @@ mod tests {
             ("view.anim_next", "PageDown"),
         ] {
             assert_eq!(
-                spec.keymap.bindings.get(id).map(String::as_str),
+                spec.keymap.bindings.get(id).map(|k| k[0].as_str()),
                 Some(key),
                 "{id}"
             );
@@ -351,9 +398,9 @@ mod tests {
             function: "Camera/Zoom Extents".into(),
             group: "Camera".into(),
         };
-        assert!(matches(&r, "Shift+Z", "zoom"));
-        assert!(matches(&r, "Shift+Z", "camera.zoom"));
-        assert!(matches(&r, "Shift+Z", "shift+z"));
-        assert!(!matches(&r, "Shift+Z", "orbit"));
+        assert!(matches(&r, &["Shift+Z".to_owned()], "zoom"));
+        assert!(matches(&r, &["Shift+Z".to_owned()], "camera.zoom"));
+        assert!(matches(&r, &["Shift+Z".to_owned()], "shift+z"));
+        assert!(!matches(&r, &["Shift+Z".to_owned()], "orbit"));
     }
 }

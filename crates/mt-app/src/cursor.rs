@@ -60,6 +60,19 @@ pub fn resize_icon(dx: f64, dy: f64) -> egui::CursorIcon {
     }
 }
 
+/// The Eraser's mode for the keys held, as `(hide, soften)` of
+/// `Document::erase` (both: unsoften). Shift hides, Ctrl softens and smooths, Alt
+/// unsoftens (2026 Windows Quick Reference Card [doc], FEATURES.md 76); Ctrl+Shift
+/// also unsoftens, as Meshtard did before (older help pages give it, unverified for
+/// 2026).
+pub fn eraser_mode(ctrl: bool, shift: bool, alt: bool) -> (bool, bool) {
+    if alt || (ctrl && shift) {
+        (true, true)
+    } else {
+        (shift, ctrl)
+    }
+}
+
 /// The cursor for `tool` with `mods` held in `state`.
 pub fn cursor_for(tool: Tool, mods: Mods, state: State) -> Cursor {
     match state.nav {
@@ -75,7 +88,11 @@ pub fn cursor_for(tool: Tool, mods: Mods, state: State) -> Cursor {
             } else {
                 Kind::Arrow
             },
-            match Mode::from_modifiers(mods.ctrl, mods.shift) {
+            match if tool == Tool::Lasso {
+                Mode::for_lasso(mods.ctrl, mods.shift, mods.alt)
+            } else {
+                Mode::from_modifiers(mods.ctrl, mods.shift)
+            } {
                 Mode::Replace => Badge::None,
                 Mode::Add => Badge::Plus,
                 Mode::Toggle => Badge::PlusMinus,
@@ -134,10 +151,10 @@ pub fn cursor_for(tool: Tool, mods: Mods, state: State) -> Cursor {
         },
         Tool::Eraser => Cursor::with(
             Kind::Eraser,
-            match (mods.ctrl, mods.shift) {
+            match eraser_mode(mods.ctrl, mods.shift, mods.alt) {
                 (false, false) => Badge::None,
-                (false, true) => Badge::Hide,
-                (true, false) => Badge::Soften,
+                (true, false) => Badge::Hide,
+                (false, true) => Badge::Soften,
                 (true, true) => Badge::Unsoften,
             },
         ),
@@ -488,6 +505,10 @@ mod tests {
         assert_eq!(e(SHIFT), Badge::Hide);
         assert_eq!(e(CTRL), Badge::Soften);
         assert_eq!(e(CTRL_SHIFT), Badge::Unsoften);
+        assert_eq!(e(ALT), Badge::Unsoften);
+        assert_eq!(eraser_mode(false, false, true), (true, true));
+        assert_eq!(eraser_mode(true, false, false), (false, true));
+        assert_eq!(eraser_mode(false, true, false), (true, false));
         let pb = Tool::from_command("tool.paint_bucket").unwrap();
         assert_eq!(cursor_for(pb, ALT, State::default()).kind, Kind::Eyedropper);
         let tag = Tool::from_command("tool.tag").unwrap();

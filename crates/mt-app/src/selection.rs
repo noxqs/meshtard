@@ -38,6 +38,17 @@ impl Mode {
             (true, true) => Self::Remove,
         }
     }
+
+    /// The Lasso's keys (2026 Windows Quick Reference Card [doc], FEATURES.md 76):
+    /// Shift adds and subtracts, Alt adds, Shift+Alt subtracts. Without Alt the
+    /// Select tool's Ctrl keys work too (Meshtard's earlier keys).
+    pub fn for_lasso(ctrl: bool, shift: bool, alt: bool) -> Self {
+        match (alt, shift) {
+            (true, false) => Self::Add,
+            (true, true) => Self::Remove,
+            (false, _) => Self::from_modifiers(ctrl, shift),
+        }
+    }
 }
 
 /// Selected top-level entities in selection order.
@@ -618,6 +629,18 @@ pub fn region_select(
 mod tests {
     use super::*;
     use mt_kernel::{EdgeId, FaceId, add_line};
+
+    /// FEATURES.md 76: the Lasso's Shift / Alt / Shift+Alt.
+    #[test]
+    fn lasso_modifiers() {
+        assert_eq!(Mode::for_lasso(false, false, false), Mode::Replace);
+        assert_eq!(Mode::for_lasso(false, true, false), Mode::Toggle);
+        assert_eq!(Mode::for_lasso(false, false, true), Mode::Add);
+        assert_eq!(Mode::for_lasso(false, true, true), Mode::Remove);
+        // Select's Ctrl keys still work.
+        assert_eq!(Mode::for_lasso(true, false, false), Mode::Add);
+        assert_eq!(Mode::for_lasso(true, true, false), Mode::Remove);
+    }
 
     fn square(e: &mut Entities, x: f64) {
         let p = |a: f64, b: f64| DVec3::new(a + x, b, 0.0);

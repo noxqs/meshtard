@@ -119,7 +119,7 @@ pub(crate) struct Prefs {
     /// The pointer between frames, for the click style.
     pub pointer: crate::click_style::Pointer,
     /// The built-in keymap (Reset All goes back to it).
-    pub(crate) defaults: BTreeMap<String, String>,
+    pub(crate) defaults: Bindings,
     /// The spec's axis colors (Accessibility's defaults for the drawn axes).
     spec_axes: [[f32; 3]; 3],
     dialog: Option<Dialog>,
@@ -147,18 +147,22 @@ pub(crate) struct Prefs {
     icons_applied: Option<bool>,
 }
 
-/// The shortcut table the app matches key presses against: implemented commands
-/// with a shortcut whose key egui knows.
+/// A keymap: command id to its shortcuts (keymap text, main one first).
+pub(crate) type Bindings = BTreeMap<String, Vec<String>>;
+
+/// The shortcut table the app matches key presses against: every shortcut of the
+/// implemented commands whose key egui knows.
 pub(crate) fn shortcut_table(
     spec: &Spec,
     implemented: &[&'static str],
 ) -> Vec<(Shortcut, egui::Key, &'static str)> {
     implemented
         .iter()
-        .filter_map(|&id| {
-            let shortcut = spec.keymap.shortcut(id)?;
-            let key = egui::Key::from_name(&shortcut.key)?;
-            Some((shortcut, key, id))
+        .flat_map(|&id| {
+            spec.keymap.shortcuts(id).into_iter().filter_map(move |s| {
+                let key = egui::Key::from_name(&s.key)?;
+                Some((s, key, id))
+            })
         })
         .collect()
 }
@@ -180,45 +184,73 @@ fn is_modifier(key: egui::Key) -> bool {
     )
 }
 
-/// Reads `shortcuts.toml` text: command id to shortcut, `""` for removed.
-pub(crate) fn parse_overrides(text: &str) -> Result<BTreeMap<String, String>, String> {
-    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
-    let Some(bindings) = table.get("bindings") else {
-        return Ok(BTreeMap::new());
-    };
-    let bindings = bindings.as_table().ok_or("`bindings` is not a table")?;
-    bindings
+/// Reads saved shortcut differences from a table: command id to a shortcut, a list
+/// of shortcuts, or `""` (none). Files written before commands could have several
+/// keys hold single strings only and read the same as before.
+pub(crate) fn overrides_from_table(table: &toml::Table) -> Result<Bindings, String> {
+    table
         .iter()
         .map(|(id, v)| {
-            let s = v.as_str().ok_or(format!("`{id}`: not a string"))?;
-            if !s.is_empty() {
-                Shortcut::parse(s).map_err(|e| format!("`{id}`: {e}"))?;
+            let keys: Vec<String> = match v {
+                toml::Value::String(s) if s.is_empty() => Vec::new(),
+                toml::Value::String(s) => vec![s.clone()],
+                toml::Value::Array(a) => a
+                    .iter()
+                    .map(|k| k.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()
+                    .ok_or(format!("`{id}`: not a list of strings"))?,
+                _ => return Err(format!("`{id}`: not a string")),
+            };
+            for k in &keys {
+                Shortcut::parse(k).map_err(|e| format!("`{id}`: {e}"))?;
             }
-            Ok((id.clone(), s.to_owned()))
+            Ok((id.clone(), keys))
         })
         .collect()
 }
 
-pub(crate) fn overrides_text(overrides: &BTreeMap<String, String>) -> String {
-    let bindings: toml::Table = overrides
+/// Reads `shortcuts.toml` text (see [`overrides_from_table`]).
+pub(crate) fn parse_overrides(text: &str) -> Result<Bindings, String> {
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    let Some(bindings) = table.get("bindings") else {
+        return Ok(BTreeMap::new());
+    };
+    overrides_from_table(bindings.as_table().ok_or("`bindings` is not a table")?)
+}
+
+/// Saved differences as a table: `""` for none, a string for one key (as older
+/// versions read it), a list for several.
+pub(crate) fn overrides_table(overrides: &Bindings) -> toml::Table {
+    overrides
         .iter()
-        .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
-        .collect();
+        .map(|(k, v)| {
+            let value = match v.as_slice() {
+                [] => toml::Value::String(String::new()),
+                [one] => toml::Value::String(one.clone()),
+                many => toml::Value::Array(many.iter().map(|s| s.as_str().into()).collect()),
+            };
+            (k.clone(), value)
+        })
+        .collect()
+}
+
+pub(crate) fn overrides_text(overrides: &Bindings) -> String {
     let mut table = toml::Table::new();
-    table.insert("bindings".into(), toml::Value::Table(bindings));
+    table.insert(
+        "bindings".into(),
+        toml::Value::Table(overrides_table(overrides)),
+    );
     format!(
-        "# meshtard keyboard shortcuts that differ from the built-in ones (\"\" = none).\n{table}"
+        "# meshtard keyboard shortcuts that differ from the built-in ones (\"\" = none,\n# a list for several keys).\n{table}"
     )
 }
 
-/// The differences of `current` from `defaults`.
-pub(crate) fn diff(
-    defaults: &BTreeMap<String, String>,
-    current: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+/// The differences of `current` from `defaults`: each changed command with all its
+/// keys.
+pub(crate) fn diff(defaults: &Bindings, current: &Bindings) -> Bindings {
     let mut out = BTreeMap::new();
     for id in defaults.keys().filter(|id| !current.contains_key(*id)) {
-        out.insert(id.clone(), String::new());
+        out.insert(id.clone(), Vec::new());
     }
     for (id, s) in current {
         if defaults.get(id) != Some(s) {
@@ -228,45 +260,71 @@ pub(crate) fn diff(
     out
 }
 
+fn has(keys: &[String], s: &Shortcut) -> bool {
+    keys.iter()
+        .any(|k| Shortcut::parse(k).ok().as_ref() == Some(s))
+}
+
 /// The command other than `id` that has shortcut `s`.
-pub(crate) fn holder(
-    bindings: &BTreeMap<String, String>,
-    id: &str,
-    s: &Shortcut,
-) -> Option<String> {
+pub(crate) fn holder(bindings: &Bindings, id: &str, s: &Shortcut) -> Option<String> {
     bindings
         .iter()
-        .find(|(k, v)| *k != id && Shortcut::parse(v).ok().as_ref() == Some(s))
+        .find(|(k, v)| *k != id && has(v, s))
         .map(|(k, _)| k.clone())
 }
 
-/// Gives `id` the shortcut `to` (none: removes it). A command that had the same
-/// shortcut loses it; returns that command.
-pub(crate) fn rebind(
-    bindings: &mut BTreeMap<String, String>,
-    id: &str,
-    to: Option<&Shortcut>,
-) -> Option<String> {
-    let Some(to) = to else {
-        bindings.remove(id);
-        return None;
-    };
-    let other = holder(bindings, id, to);
-    if let Some(o) = &other {
-        bindings.remove(o);
+/// Takes shortcut `s` from every command but `id`; returns the one that had it.
+fn take(bindings: &mut Bindings, id: &str, s: &Shortcut) -> Option<String> {
+    let other = holder(bindings, id, s);
+    if let Some(o) = &other
+        && let Some(keys) = bindings.get_mut(o)
+    {
+        keys.retain(|k| Shortcut::parse(k).ok().as_ref() != Some(s));
+        if keys.is_empty() {
+            bindings.remove(o);
+        }
     }
-    bindings.insert(id.to_owned(), to.to_string());
     other
 }
 
-/// Applies saved overrides to a keymap.
-pub(crate) fn apply_overrides(
-    bindings: &mut BTreeMap<String, String>,
-    overrides: &BTreeMap<String, String>,
-) {
-    for (id, s) in overrides {
-        let shortcut = Shortcut::parse(s).ok();
-        rebind(bindings, id, shortcut.as_ref());
+/// Adds shortcut `s` to `id`'s keys (SketchUp's + on the Shortcuts page). A command
+/// that had it loses it; returns that command.
+pub(crate) fn add_key(bindings: &mut Bindings, id: &str, s: &Shortcut) -> Option<String> {
+    let other = take(bindings, id, s);
+    let keys = bindings.entry(id.to_owned()).or_default();
+    if !has(keys, s) {
+        keys.push(s.to_string());
+    }
+    other
+}
+
+/// Removes shortcut `s` from `id` (SketchUp's -).
+pub(crate) fn remove_key(bindings: &mut Bindings, id: &str, s: &Shortcut) {
+    if let Some(keys) = bindings.get_mut(id) {
+        keys.retain(|k| Shortcut::parse(k).ok().as_ref() != Some(s));
+        if keys.is_empty() {
+            bindings.remove(id);
+        }
+    }
+}
+
+/// Gives `id` exactly the shortcuts `keys` (none: removes its entry); commands that
+/// had one of them lose it.
+pub(crate) fn set_keys(bindings: &mut Bindings, id: &str, keys: &[Shortcut]) {
+    bindings.remove(id);
+    for s in keys {
+        add_key(bindings, id, s);
+    }
+}
+
+/// Applies saved overrides to a keymap (shortcuts that no longer parse are dropped).
+pub(crate) fn apply_overrides(bindings: &mut Bindings, overrides: &Bindings) {
+    for (id, keys) in overrides {
+        let keys: Vec<Shortcut> = keys
+            .iter()
+            .filter_map(|k| Shortcut::parse(k).ok())
+            .collect();
+        set_keys(bindings, id, &keys);
     }
 }
 
@@ -776,10 +834,7 @@ impl App {
             return;
         };
         let p = &self.prefs;
-        let overrides: toml::Table = diff(&p.defaults, &self.spec.keymap.bindings)
-            .into_iter()
-            .map(|(k, v)| (k, toml::Value::String(v)))
-            .collect();
+        let overrides = overrides_table(&diff(&p.defaults, &self.spec.keymap.bindings));
         let text = crate::prefs_pages::export_text(
             &settings_text(&p.general, &p.drawing, &p.more),
             shortcuts.then_some(&overrides),
@@ -807,16 +862,21 @@ impl App {
         };
         let (general, drawing, more) = settings_from_table(&table);
         self.set_settings(general, drawing, more, frame);
+        let mut note = String::new();
         if shortcuts && let Some(keys) = keys {
-            let overrides: BTreeMap<String, String> = keys
-                .into_iter()
-                .filter_map(|(k, v)| Some((k, v.as_str()?.to_owned())))
-                .collect();
-            self.spec.keymap.bindings = self.prefs.defaults.clone();
-            apply_overrides(&mut self.spec.keymap.bindings, &overrides);
-            self.keymap_changed();
+            match overrides_from_table(&keys) {
+                Ok(overrides) => {
+                    self.spec.keymap.bindings = self.prefs.defaults.clone();
+                    apply_overrides(&mut self.spec.keymap.bindings, &overrides);
+                    self.keymap_changed();
+                }
+                Err(e) => note = format!(" The shortcuts were not imported: {e}"),
+            }
         }
-        self.message = Some(format!("Imported the preferences from {}.", path.display()));
+        self.message = Some(format!(
+            "Imported the preferences from {}.{note}",
+            path.display()
+        ));
     }
 
     /// Ask to Purge All before a save.
@@ -958,18 +1018,19 @@ impl App {
     ///
     /// Layout after SketchUp for Windows (help: creating-and-editing-shortcuts,
     /// importing-and-exporting-shortcuts [doc]): Filter, the Function list with the
-    /// Assigned key, a selected command's key set by pressing it, a warning with
-    /// Keep Original / Replace when another command has that key, Remove, Reset All,
-    /// Import and Export. SketchUp types the key into an Add Shortcut box and adds it
-    /// with +; here the key is recorded when pressed. Show All opens Help > Keyboard
-    /// Shortcuts (this app's own).
+    /// Assigned keys (a command can have several), a selected command's keys each
+    /// with Remove (SketchUp's -) and Add... (SketchUp's +), a warning with Keep
+    /// Original / Replace when another command has that key, Reset All, Import and
+    /// Export. SketchUp types the key into an Add Shortcut box; here the key is
+    /// recorded when pressed. Show All opens Help > Keyboard Shortcuts (this app's
+    /// own).
     fn shortcuts_page(
         &mut self,
         ui: &mut egui::Ui,
         d: &mut Dialog,
         action: &mut Option<crate::prefs_pages::FilesAction>,
     ) -> bool {
-        use crate::shortcut_list::{key_label, matches};
+        use crate::shortcut_list::{key_labels, matches};
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("Filter:");
@@ -989,8 +1050,8 @@ impl App {
                         ui.strong("Assigned");
                         ui.end_row();
                         for r in &rows {
-                            let key = key_label(&self.spec.keymap.bindings, &r.id);
-                            if !matches(r, &key, &filter) {
+                            let keys = key_labels(&self.spec.keymap.bindings, &r.id);
+                            if !matches(r, &keys, &filter) {
                                 continue;
                             }
                             let selected = d.selected.as_deref() == Some(r.id.as_str());
@@ -1002,7 +1063,7 @@ impl App {
                                 d.capturing = false;
                                 d.conflict = None;
                             }
-                            ui.label(key);
+                            ui.label(keys.join("  "));
                             ui.end_row();
                         }
                     });
@@ -1025,7 +1086,7 @@ impl App {
                         d.conflict = None;
                     }
                     if ui.button("Replace").clicked() {
-                        rebind(&mut self.spec.keymap.bindings, &id, Some(&s));
+                        add_key(&mut self.spec.keymap.bindings, &id, &s);
                         d.note = Some(format!(
                             "{} was removed from {}.",
                             s.label(),
@@ -1036,19 +1097,38 @@ impl App {
                     }
                 });
             } else {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}:", function(&id)));
-                    let current = key_label(&self.spec.keymap.bindings, &id);
+                // The Assigned keys, each with Remove (SketchUp's -), and Add...
+                // (SketchUp's +): a command can have several keys.
+                let keys = self.spec.keymap.shortcuts(&id);
+                ui.label(format!("{}:", function(&id)));
+                ui.horizontal_wrapped(|ui| {
+                    if keys.is_empty() {
+                        ui.weak("(none)");
+                    }
+                    let mut remove = None;
+                    for s in &keys {
+                        ui.monospace(s.label());
+                        if ui
+                            .small_button("Remove")
+                            .on_hover_text(format!("Remove {}", s.label()))
+                            .clicked()
+                        {
+                            remove = Some(s.clone());
+                        }
+                        ui.add_space(8.0);
+                    }
+                    if let Some(s) = remove {
+                        remove_key(&mut self.spec.keymap.bindings, &id, &s);
+                        changed = true;
+                    }
                     let text = if d.capturing {
-                        "Press keys...".to_owned()
-                    } else if current.is_empty() {
-                        "(none)".to_owned()
+                        "Press keys..."
                     } else {
-                        current
+                        "Add..."
                     };
                     let r = ui
                         .button(text)
-                        .on_hover_text("Click, then press the new shortcut (Escape cancels).");
+                        .on_hover_text("Click, then press the shortcut to add (Escape cancels).");
                     if r.clicked() {
                         d.capturing = true;
                         d.note = None;
@@ -1064,16 +1144,12 @@ impl App {
                                 match holder(&self.spec.keymap.bindings, &id, &s) {
                                     Some(other) => d.conflict = Some((s, other)),
                                     None => {
-                                        rebind(&mut self.spec.keymap.bindings, &id, Some(&s));
+                                        add_key(&mut self.spec.keymap.bindings, &id, &s);
                                         changed = true;
                                     }
                                 }
                             }
                         }
-                    }
-                    if ui.button("Remove").clicked() {
-                        rebind(&mut self.spec.keymap.bindings, &id, None);
-                        changed = true;
                     }
                 });
             }
@@ -1133,33 +1209,69 @@ fn captured(ui: &egui::Ui) -> Option<Option<Shortcut>> {
 mod tests {
     use super::*;
 
-    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    /// A keymap from (id, keys separated by spaces); `""` is no key.
+    fn map(pairs: &[(&str, &str)]) -> Bindings {
         pairs
             .iter()
-            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .map(|(a, b)| {
+                let keys = b.split_whitespace().map(str::to_owned).collect();
+                ((*a).to_owned(), keys)
+            })
             .collect()
+    }
+
+    fn key(s: &str) -> Shortcut {
+        Shortcut::parse(s).unwrap()
     }
 
     #[test]
     fn overrides_round_trip_through_text() {
-        let o = map(&[("tool.line", "Ctrl+Shift+L"), ("tool.move", "")]);
+        let o = map(&[
+            ("tool.line", "Ctrl+Shift+L"),
+            ("tool.move", ""),
+            ("edit.copy", "Ctrl+C Ctrl+Insert"),
+        ]);
         let text = overrides_text(&o);
         assert_eq!(parse_overrides(&text).unwrap(), o);
+        // One key is written as a string (older versions read it), several as a list.
+        assert!(text.contains("\"tool.line\" = \"Ctrl+Shift+L\""), "{text}");
+        assert!(text.contains("\"tool.move\" = \"\""), "{text}");
+        assert!(text.contains("[\"Ctrl+C\", \"Ctrl+Insert\"]"), "{text}");
         assert!(parse_overrides("[bindings]\n\"tool.line\" = \"Hyper+L\"").is_err());
+        assert!(parse_overrides("[bindings]\n\"tool.line\" = [\"L\", \"Hyper+L\"]").is_err());
+        assert!(parse_overrides("[bindings]\n\"tool.line\" = 3").is_err());
         assert!(parse_overrides("").unwrap().is_empty());
     }
 
+    /// A shortcuts.toml written before commands could have several keys still loads.
     #[test]
-    fn rebinding_moves_a_taken_shortcut() {
+    fn old_shortcuts_files_load() {
+        let old = "[bindings]\n\"tool.line\" = \"M\"\n\"tool.move\" = \"\"\n\"edit.copy\" = \"Ctrl+Shift+C\"\n";
+        let o = parse_overrides(old).unwrap();
+        let mut b = map(&[
+            ("tool.line", "L"),
+            ("tool.move", "M"),
+            ("edit.copy", "Ctrl+C Ctrl+Insert"),
+        ]);
+        apply_overrides(&mut b, &o);
+        assert_eq!(b, map(&[("tool.line", "M"), ("edit.copy", "Ctrl+Shift+C")]));
+    }
+
+    #[test]
+    fn adding_a_key_moves_a_taken_shortcut() {
         let defaults = map(&[("tool.line", "L"), ("tool.move", "M"), ("tool.eraser", "E")]);
         let mut b = defaults.clone();
-        let m = Shortcut::parse("M").unwrap();
         assert_eq!(
-            rebind(&mut b, "tool.line", Some(&m)),
+            add_key(&mut b, "tool.line", &key("M")),
             Some("tool.move".into())
         );
-        assert_eq!(b, map(&[("tool.line", "M"), ("tool.eraser", "E")]));
-        rebind(&mut b, "tool.eraser", None);
+        // Added after the command's own key; the other command loses it.
+        assert_eq!(b, map(&[("tool.line", "L M"), ("tool.eraser", "E")]));
+        // Adding a key the command has changes nothing.
+        assert_eq!(add_key(&mut b, "tool.line", &key("M")), None);
+        assert_eq!(b["tool.line"], ["L", "M"]);
+        remove_key(&mut b, "tool.line", &key("L"));
+        remove_key(&mut b, "tool.eraser", &key("E"));
         let o = diff(&defaults, &b);
         assert_eq!(
             o,
@@ -1171,18 +1283,58 @@ mod tests {
         assert_eq!(again, b);
     }
 
+    #[test]
+    fn second_keys_survive_diff_and_apply() {
+        let defaults = map(&[
+            ("edit.copy", "Ctrl+C Ctrl+Insert"),
+            ("edit.paste", "Ctrl+V"),
+        ]);
+        let mut b = defaults.clone();
+        // Taking one of two keys leaves the other.
+        add_key(&mut b, "edit.paste", &key("Ctrl+Insert"));
+        assert_eq!(
+            b,
+            map(&[
+                ("edit.copy", "Ctrl+C"),
+                ("edit.paste", "Ctrl+V Ctrl+Insert")
+            ])
+        );
+        let o = diff(&defaults, &b);
+        let mut again = defaults.clone();
+        apply_overrides(&mut again, &parse_overrides(&overrides_text(&o)).unwrap());
+        assert_eq!(again, b);
+        set_keys(&mut b, "edit.copy", &[]);
+        assert!(!b.contains_key("edit.copy"));
+    }
+
     /// The Shortcuts page asks Keep Original / Replace when the key is taken.
     #[test]
     fn holder_finds_the_other_command() {
-        let b = map(&[("tool.line", "L"), ("tool.move", "M")]);
-        let m = Shortcut::parse("M").unwrap();
+        let b = map(&[
+            ("tool.line", "L"),
+            ("tool.move", "M"),
+            ("edit.copy", "Ctrl+C Ctrl+Insert"),
+        ]);
+        let m = key("M");
         assert_eq!(holder(&b, "tool.line", &m), Some("tool.move".into()));
         // A command's own key is no conflict.
         assert_eq!(holder(&b, "tool.move", &m), None);
+        assert_eq!(holder(&b, "tool.line", &key("K")), None);
+        // A second key is found too.
         assert_eq!(
-            holder(&b, "tool.line", &Shortcut::parse("K").unwrap()),
-            None
+            holder(&b, "tool.line", &key("Ctrl+Insert")),
+            Some("edit.copy".into())
         );
+    }
+
+    /// Every key of a command is in the table the app matches presses against.
+    #[test]
+    fn shortcut_table_has_every_key() {
+        let spec = Spec::builtin().unwrap();
+        let t = shortcut_table(&spec, &["edit.copy", "tool.line"]);
+        let keys: Vec<String> = t.iter().map(|(s, _, _)| s.to_string()).collect();
+        assert_eq!(keys, ["Ctrl+C", "Ctrl+Insert", "L"]);
+        assert_eq!(t[1].1, egui::Key::Insert);
     }
 
     #[test]

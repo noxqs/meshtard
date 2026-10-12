@@ -35,9 +35,9 @@ steps = [
   "Release to close the loop: drawn clockwise it selects anything the loop touches, counter-clockwise only what is fully inside (Preferences > Drawing > Lasso Direction swaps this).",
 ]
 modifiers = [
-  { key = "Ctrl", action = "Add to the selection." },
   { key = "Shift", action = "Toggle entities in and out of the selection." },
-  { key = "Ctrl+Shift", action = "Remove from the selection." },
+  { key = "Alt", action = "Add to the selection." },
+  { key = "Shift+Alt", action = "Remove from the selection." },
 ]
 
 [[tool]]
@@ -52,7 +52,7 @@ steps = [
 modifiers = [
   { key = "Shift", action = "Hide instead of erasing." },
   { key = "Ctrl", action = "Soften and smooth edges instead of erasing." },
-  { key = "Ctrl+Shift", action = "Unsoften edges." },
+  { key = "Alt", action = "Unsoften edges (Ctrl+Shift also works)." },
 ]
 
 [[tool]]
@@ -164,7 +164,7 @@ steps = [
   "Click the profile face; with no selection, drag along the path edges.",
 ]
 modifiers = [
-  { key = "Alt", action = "Use the clicked face's perimeter as the path." },
+  { key = "Alt", action = "Click the profile with Alt held, then click a face: its perimeter is the path." },
 ]
 tip = "Draw the profile at one end of the path, perpendicular to it."
 
@@ -236,7 +236,9 @@ summary = "Draws an arc through three points."
 steps = [
   "Click the start point, a point on the arc and the end point.",
 ]
-modifiers = []
+modifiers = [
+  { key = "Alt+plus / Alt+minus", action = "More or fewer segments." },
+]
 
 [[tool]]
 id = "tool.pie"
@@ -257,7 +259,7 @@ steps = [
   "A dashed diagonal shows a square or a golden section.",
 ]
 modifiers = [
-  { key = "Ctrl", action = "Draw from the center." },
+  { key = "Alt", action = "Toggle drawing from the center: the first click is the center." },
   { key = "Arrow keys", action = "Lock the rectangle's plane to an axis." },
 ]
 
@@ -508,7 +510,7 @@ steps = [
 ]
 modifiers = [
   { key = "Shift", action = "Pan while held." },
-  { key = "Ctrl", action = "Suspend gravity: orbit freely over the top and bottom." },
+  { key = "Alt", action = "Suspend gravity: orbit freely over the top and bottom." },
 ]
 
 [[tool]]

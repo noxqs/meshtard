@@ -323,6 +323,7 @@ const IMPLEMENTED: &[&str] = &[
     "edit.replace_selected",
     "help.search",
     "help.keyboard_shortcuts",
+    "help.context_help",
     "window.3d_warehouse",
     "camera.match_new_photo",
     // Extensions (extensions/): Extension Manager, Warehouse, Console.
@@ -1180,6 +1181,8 @@ impl App {
             self.open_preferences();
         } else if id == "help.keyboard_shortcuts" {
             self.open_shortcut_list();
+        } else if id == "help.context_help" {
+            self.context_help();
         } else if id == "file.exit" {
             self.request(ctx, frame, confirm::Pending::Exit);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -1589,12 +1592,16 @@ impl App {
         let pressed: Vec<(&'static str, Option<egui::Key>)> = ctx.input(|i| {
             self.shortcuts
                 .iter()
-                .filter(|(s, key, _)| {
+                .filter(|(s, key, id)| {
                     let m = i.modifiers;
                     // While typing into the Measurements box, plain keys are text.
                     let plain = !s.ctrl && !s.alt;
-                    // On macOS the native menu bar owns shortcuts with modifiers.
-                    if cfg!(target_os = "macos") && !plain {
+                    // On macOS the native menu bar owns a command's first shortcut
+                    // when it has modifiers (its key equivalent); second keys are ours.
+                    if cfg!(target_os = "macos")
+                        && !plain
+                        && self.spec.keymap.shortcut(id).as_ref() == Some(s)
+                    {
                         return false;
                     }
                     !(typing && plain)
@@ -1659,7 +1666,7 @@ impl App {
                 DVec2::ZERO
             },
             shift,
-            ctrl: ui.input(|i| i.modifiers.command),
+            alt: ui.input(|i| i.modifiers.alt),
             wheel: if response.hovered() {
                 f64::from(notches) * self.prefs.wheel_sign()
             } else {
@@ -2255,7 +2262,7 @@ impl App {
     }
 
     /// The Eraser: click or drag over edges and components to erase them. Shift hides
-    /// instead, Ctrl softens and smooths, Ctrl+Shift unsoftens.
+    /// instead, Ctrl softens and smooths, Alt unsoftens (see [`cursor::eraser_mode`]).
     fn eraser_tool(
         &mut self,
         ui: &egui::Ui,
@@ -2289,7 +2296,7 @@ impl App {
         // of it (hiding and softening work per edge).
         let whole_curve = |app: &Self, o: Owner| -> Vec<Owner> {
             let curve = match (o, &app.document) {
-                (Owner::Edge(e), Some(doc)) if !mods.shift && !mods.command => {
+                (Owner::Edge(e), Some(doc)) if !mods.shift && !mods.command && !mods.alt => {
                     doc.active().edges.get(e).and_then(|x| x.attrs.curve)
                 }
                 _ => None,
@@ -2348,7 +2355,8 @@ impl App {
             return;
         }
         if let Some(doc) = &mut self.document {
-            doc.erase(&done, mods.shift, mods.command);
+            let (hide, soften) = cursor::eraser_mode(mods.command, mods.shift, mods.alt);
+            doc.erase(&done, hide, soften);
         }
         self.rebuild(device);
     }

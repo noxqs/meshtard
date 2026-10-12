@@ -3,8 +3,9 @@
 //! As SketchUp's help describes it: a lasso drawn clockwise selects everything it
 //! touches (like a crossing box), drawn counterclockwise only what lies fully inside
 //! (like a window box). Drag for a freehand lasso (released: selected), or click
-//! points for a lasso of straight segments and double-click to finish. Ctrl adds,
-//! Shift toggles and Ctrl+Shift removes, as with Select. Escape drops the lasso.
+//! points for a lasso of straight segments and double-click to finish. Shift adds and
+//! subtracts, Alt adds and Shift+Alt subtracts (2026 Quick Reference Card; the
+//! Select tool's Ctrl adds and Ctrl+Shift removes work too). Escape drops the lasso.
 //!
 //! Unverified against SketchUp 2026: the outline's look (solid for inside, dashed for
 //! touching, like the selection box), that the outline closes itself with a straight
@@ -69,7 +70,7 @@ impl App {
             )
         };
         let mods = ui.input(|i| i.modifiers);
-        let mode = Mode::from_modifiers(mods.command, mods.shift);
+        let mode = Mode::for_lasso(mods.command, mods.shift, mods.alt);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.lasso = Lasso::default();
             return;

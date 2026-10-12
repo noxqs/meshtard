@@ -164,10 +164,14 @@ impl App {
                 shell.sync_toolbars(&self.spec);
             }
             for (id, key) in self.extensions.default_shortcuts() {
-                let taken = (self.spec.keymap.bindings.values()).any(|v| *v == key);
+                let taken = mt_spec::Shortcut::parse(&key)
+                    .map_or(true, |s| self.spec.keymap.holder(&s).is_some());
                 if !self.spec.keymap.bindings.contains_key(&id) && !taken {
-                    self.spec.keymap.bindings.insert(id.clone(), key.clone());
-                    self.prefs.defaults.insert(id, key);
+                    self.spec
+                        .keymap
+                        .bindings
+                        .insert(id.clone(), vec![key.clone()]);
+                    self.prefs.defaults.insert(id, vec![key]);
                 }
             }
             self.add_extension_shortcuts();
