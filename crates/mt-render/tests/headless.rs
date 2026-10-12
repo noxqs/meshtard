@@ -1780,3 +1780,66 @@ fn selection_dots_use_the_selection_color() {
 fn camera_for_dots() -> Camera {
     top_down()
 }
+
+#[test]
+fn environment_skydome_replaces_the_sky() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let spec = Spec::builtin().unwrap().default_model;
+    let camera = Camera::from_spec(&spec.camera);
+    let mut viewport = Viewport::new(&device, Style::from_spec(&spec));
+    let before = read_back(
+        &device,
+        &queue,
+        &viewport.render(&device, &queue, &camera, SIZE, 1.0).clone(),
+    );
+    // A flat red panorama: every background pixel turns red.
+    let env = mt_render::EnvImage {
+        width: 8,
+        height: 4,
+        pixels: vec![[1.0, 0.0, 0.0]; 32],
+    };
+    viewport.set_environment(Some((
+        std::sync::Arc::new(env),
+        mt_render::EnvView::default(),
+    )));
+    let after = read_back(
+        &device,
+        &queue,
+        &viewport.render(&device, &queue, &camera, SIZE, 1.0).clone(),
+    );
+    let top = after.get_pixel(5, 5);
+    assert!(close(top, [1.0, 0.0, 0.0], 2), "{top:?}");
+    assert_ne!(before.get_pixel(5, 5), top);
+    // Exposure 0.5 darkens it (sRGB of 0.5 linear is about 188).
+    viewport.set_environment(Some((
+        std::sync::Arc::new(mt_render::EnvImage {
+            width: 8,
+            height: 4,
+            pixels: vec![[1.0, 0.0, 0.0]; 32],
+        }),
+        mt_render::EnvView {
+            skydome_exposure: 0.5,
+            ..Default::default()
+        },
+    )));
+    let dim = read_back(
+        &device,
+        &queue,
+        &viewport.render(&device, &queue, &camera, SIZE, 1.0).clone(),
+    );
+    assert!(
+        dim.get_pixel(5, 5)[0].abs_diff(188) <= 3,
+        "{:?}",
+        dim.get_pixel(5, 5)
+    );
+    viewport.set_environment(None);
+    let back = read_back(
+        &device,
+        &queue,
+        &viewport.render(&device, &queue, &camera, SIZE, 1.0).clone(),
+    );
+    assert_eq!(back.get_pixel(5, 5), before.get_pixel(5, 5));
+}

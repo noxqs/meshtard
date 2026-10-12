@@ -90,6 +90,14 @@ pub enum Badge {
     Soften,
     /// Eraser with Ctrl+Shift.
     Unsoften,
+    /// Paint Bucket with Ctrl: fill connected faces (two joined squares).
+    FillConnected,
+    /// Paint Bucket with Shift: replace the material everywhere (three squares).
+    FillAll,
+    /// Paint Bucket with Ctrl+Shift: replace on the same object (a box).
+    FillObject,
+    /// Follow Me while following a path (a curved path with an arrow).
+    Path,
 }
 
 /// A viewport cursor: drawing plus badge.
@@ -1090,6 +1098,53 @@ fn draw_badge(k: &mut Ink, badge: Badge, c: Pt) {
                 INK,
             );
         }
+        Badge::FillConnected => {
+            let sq = |x: f32, y: f32| [(x, y), (x + 4.0, y), (x + 4.0, y + 4.0), (x, y + 4.0)];
+            k.shape(&sq(c.0 - 4.5, c.1 - 2.0), FACE);
+            k.shape(&sq(c.0 - 0.5, c.1 - 2.0), FACE);
+        }
+        Badge::FillAll => {
+            let sq = |x: f32, y: f32| [(x, y), (x + 3.0, y), (x + 3.0, y + 3.0), (x, y + 3.0)];
+            k.shape(&sq(c.0 - 5.0, c.1 + 0.5), FACE);
+            k.shape(&sq(c.0 + 2.0, c.1 + 0.5), FACE);
+            k.shape(&sq(c.0 - 1.5, c.1 - 4.5), FACE);
+        }
+        Badge::FillObject => {
+            k.shape(
+                &[
+                    (c.0 - 4.5, c.1 - 2.0),
+                    (c.0 + 2.0, c.1 - 2.0),
+                    (c.0 + 2.0, c.1 + 4.5),
+                    (c.0 - 4.5, c.1 + 4.5),
+                ],
+                FACE,
+            );
+            k.line(
+                &[
+                    (c.0 - 4.5, c.1 - 2.0),
+                    (c.0 - 2.0, c.1 - 4.5),
+                    (c.0 + 4.5, c.1 - 4.5),
+                    (c.0 + 4.5, c.1 + 2.0),
+                    (c.0 + 2.0, c.1 + 4.5),
+                ],
+                W,
+                INK,
+            );
+            k.line(&[(c.0 + 2.0, c.1 - 2.0), (c.0 + 4.5, c.1 - 4.5)], W, INK);
+        }
+        Badge::Path => {
+            let mut pts = arc_pts((c.0 - 1.0, c.1 + 4.5), 5.0, 180.0, 300.0);
+            pts.push((c.0 + 4.5, c.1 - 3.0));
+            k.line(&pts, 1.6, RED);
+            k.fill(
+                &[
+                    (c.0 + 5.5, c.1 - 4.5),
+                    (c.0 + 2.0, c.1 - 3.5),
+                    (c.0 + 4.8, c.1 - 0.8),
+                ],
+                RED,
+            );
+        }
     }
 }
 
@@ -1108,6 +1163,10 @@ mod tests {
         Badge::Hide,
         Badge::Soften,
         Badge::Unsoften,
+        Badge::FillConnected,
+        Badge::FillAll,
+        Badge::FillObject,
+        Badge::Path,
     ];
 
     #[test]

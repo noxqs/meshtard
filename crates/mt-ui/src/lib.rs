@@ -120,6 +120,7 @@ pub mod cursors;
 pub mod dialog;
 pub mod dock;
 mod entity_info;
+mod env_panel;
 pub mod icons;
 mod menu;
 mod panels;
@@ -138,6 +139,7 @@ use mt_spec::Spec;
 
 pub use dialog::{Dialog, DialogResponse};
 pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
+pub use env_panel::{EXPOSURE_RANGE, EnvSettings, EnvironmentData, EnvironmentRow};
 pub use menu::menu_list;
 pub use style_panel::{
     EDGE_COLOR_MODES, StyleExtras, WATERMARK_ANCHORS, WATERMARK_MODES, WatermarkRow,
@@ -415,6 +417,16 @@ pub enum Event {
     StylePurge,
     /// Styles: a style clicked in the Select tab: apply it.
     StyleApply(usize),
+
+    /// Environments: a library environment clicked (`None`: no environment).
+    EnvironmentSelect(Option<usize>),
+    /// Environments: "Add Environment..." clicked (the app asks for a file).
+    EnvironmentAdd,
+    /// Environments: "Remove" clicked for this (user-added) library entry.
+    EnvironmentRemove(usize),
+    /// Environments: an Edit setting changed (skydome, reflections, exposures,
+    /// rotation, sun location); the complete new settings.
+    EnvironmentChanged(EnvSettings),
 }
 
 /// A toolbar as listed by [`Shell::toolbars`].
@@ -473,6 +485,20 @@ pub struct Shell {
     trays: TrayLayout,
     tray_default: TrayLayout,
     trays_dialog: Option<trays::TraysDialog>,
+    /// Environments panel data and its Set Sun Location mode.
+    env_data: EnvironmentData,
+    env_sun_mode: bool,
+    /// Instructor panel text (`spec/instructor.toml`); `None` if it failed to parse.
+    instructor: Option<mt_spec::Instructor>,
+    /// Menu labels the app replaced (Edit > Undo shows the operation's name).
+    menu_labels: HashMap<String, String>,
+    /// The model is geo-located (status bar pin).
+    geo_located: bool,
+    /// Where each tray was drawn this frame (docked and floating), for panel drops.
+    tray_rects: Vec<(usize, egui::Rect)>,
+    last_tray_rects: Vec<(usize, egui::Rect)>,
+    /// A panel header being dragged: panel id and the tray it is in.
+    panel_drag: Option<(String, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -531,6 +557,32 @@ impl Shell {
             trays: TrayLayout::from_spec(spec),
             tray_default: TrayLayout::from_spec(spec),
             trays_dialog: None,
+            env_data: EnvironmentData::default(),
+            env_sun_mode: false,
+            instructor: mt_spec::Instructor::builtin().ok(),
+            menu_labels: HashMap::new(),
+            geo_located: false,
+            tray_rects: Vec::new(),
+            last_tray_rects: Vec::new(),
+            panel_drag: None,
+        }
+    }
+
+    /// Whether the model is geo-located (the status bar's pin is filled).
+    pub fn set_geo_located(&mut self, located: bool) {
+        self.geo_located = located;
+    }
+
+    /// Replaces the menu label of command `id` (e.g. "Undo Move" for `edit.undo`);
+    /// `None` restores the spec's label.
+    pub fn set_menu_label(&mut self, id: &str, label: Option<String>) {
+        match label {
+            Some(l) => {
+                self.menu_labels.insert(id.to_owned(), l);
+            }
+            None => {
+                self.menu_labels.remove(id);
+            }
         }
     }
 
@@ -587,6 +639,9 @@ impl Shell {
         self.docked_toolbars(ui, frame, DockEdge::Left);
         self.docked_toolbars(ui, frame, DockEdge::Right);
 
+        // Drops use the trays of the last frame (floating ones are drawn after the
+        // docked one).
+        self.last_tray_rects = std::mem::take(&mut self.tray_rects);
         if self.tray_visible {
             egui::Panel::right("mt_ui_tray")
                 .frame(egui::Frame::NONE.fill(t.tray))
@@ -609,6 +664,7 @@ impl Shell {
             .frame(egui::Frame::NONE)
             .show(ui, viewport);
 
+        self.floating_trays(ui.ctx(), frame);
         self.floating_toolbars(ui.ctx(), frame);
         self.toolbars_dialog(ui.ctx());
         self.trays_dialog_ui(ui.ctx());
@@ -759,6 +815,17 @@ impl Shell {
     /// Shows and expands the tray panel opened by Window menu command `id`.
     /// Returns false if `id` is not a tray panel.
     pub fn open_panel(&mut self, id: &str) -> bool {
+        // A panel in a floating tray is expanded there.
+        if let Some(p) = self.panels.iter_mut().find(|p| p.id == id)
+            && self
+                .trays
+                .trays
+                .iter()
+                .any(|t| t.floating && t.panels.iter().any(|x| x == id))
+        {
+            p.expanded = true;
+            return true;
+        }
         match self.panels.iter_mut().find(|p| p.id == id) {
             Some(p) => {
                 p.expanded = true;
@@ -773,9 +840,14 @@ impl Shell {
 
     /// Whether tray panel `id` is shown and expanded.
     pub fn panel_expanded(&self, id: &str) -> bool {
+        let floating = self
+            .trays
+            .trays
+            .iter()
+            .any(|t| t.floating && t.panels.iter().any(|x| x == id));
         self.panels
             .iter()
-            .any(|p| p.id == id && p.shown && p.expanded)
+            .any(|p| p.id == id && (p.shown || floating) && p.expanded)
     }
 
     /// Where the toolbars are: docked rows and floating positions, and which are

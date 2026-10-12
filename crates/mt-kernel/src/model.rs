@@ -180,6 +180,10 @@ pub struct StyleSettings {
     /// View > Hidden Geometry: draw hidden entities (edges dashed, faces faded) and let
     /// them be selected.
     pub hidden_geometry: bool,
+    /// View > Hidden Objects: draw hidden groups, components, section planes and
+    /// annotations and let them be selected (help page "Softening, smoothing and
+    /// hiding geometry"). Model-only: not written to .skp yet.
+    pub hidden_objects: bool,
     /// View > Edge Style > Back Edges: edges behind faces drawn dashed.
     pub back_edges: bool,
     /// View > Edge Style > Depth Cue and its width in pixels (the nearest edges' width).
@@ -247,6 +251,7 @@ impl Default for StyleSettings {
             axes: true,
             guides: true,
             hidden_geometry: false,
+            hidden_objects: false,
             // Off, widths 4 and 2: from memory of SketchUp's rendering options
             // (DrawDepthQue, DepthQueWidth, ExtendLines, LineExtension), unverified.
             back_edges: false,
@@ -344,6 +349,10 @@ pub struct Model {
     pub text_style: crate::model_data::TextStyle,
     /// Model Info > Geo-location.
     pub geo: crate::model_data::GeoLocation,
+    /// Environments panel.
+    pub environment: crate::model_data::EnvironmentSettings,
+    /// Model Info > Rendering.
+    pub rendering: crate::model_data::RenderingOptions,
 }
 
 impl Default for Model {
@@ -371,6 +380,8 @@ impl Default for Model {
             dimension_style: Default::default(),
             text_style: Default::default(),
             geo: Default::default(),
+            environment: Default::default(),
+            rendering: Default::default(),
         }
     }
 }

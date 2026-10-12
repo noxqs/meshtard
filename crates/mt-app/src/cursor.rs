@@ -39,6 +39,25 @@ pub struct State {
     /// Solid Tools: the first solid is picked.
     pub second: bool,
     pub nav: Option<NavDrag>,
+    /// Follow Me is following a path (its profile is picked).
+    pub path: bool,
+}
+
+/// The system resize cursor for a Scale grip seen in screen direction (`dx`, `dy`)
+/// from the box center (y down): horizontal, vertical or one of the diagonals.
+pub fn resize_icon(dx: f64, dy: f64) -> egui::CursorIcon {
+    let (ax, ay) = (dx.abs(), dy.abs());
+    if ax < 1e-9 && ay < 1e-9 {
+        egui::CursorIcon::Move
+    } else if ax > ay * 2.4 {
+        egui::CursorIcon::ResizeHorizontal
+    } else if ay > ax * 2.4 {
+        egui::CursorIcon::ResizeVertical
+    } else if (dx > 0.0) == (dy > 0.0) {
+        egui::CursorIcon::ResizeNwSe
+    } else {
+        egui::CursorIcon::ResizeNeSw
+    }
 }
 
 /// The cursor for `tool` with `mods` held in `state`.
@@ -90,9 +109,19 @@ pub fn cursor_for(tool: Tool, mods: Mods, state: State) -> Cursor {
             "tool.scale" => Cursor::new(Kind::Scale),
             "tool.flip" => Cursor::with(Kind::Flip, copy),
             "tool.offset" => Cursor::new(Kind::Offset),
+            "tool.follow_me" if state.path => Cursor::with(Kind::FollowMe, Badge::Path),
             "tool.follow_me" => Cursor::new(Kind::FollowMe),
             "tool.paint_bucket" if mods.alt => Cursor::new(Kind::Eyedropper),
-            "tool.paint_bucket" => Cursor::new(Kind::PaintBucket),
+            // The fill modes (help "Applying materials", badges drawn from memory).
+            "tool.paint_bucket" => Cursor::with(
+                Kind::PaintBucket,
+                match (mods.ctrl, mods.shift) {
+                    (false, false) => Badge::None,
+                    (true, false) => Badge::FillConnected,
+                    (false, true) => Badge::FillAll,
+                    (true, true) => Badge::FillObject,
+                },
+            ),
             "tool.section_plane" => Cursor::new(Kind::SectionPlane),
             "tool.axes" | "tool.component_axes" => Cursor::new(Kind::Axes),
             "tool.sandbox_from_scratch" => Cursor::new(Kind::Sandbox),
@@ -162,6 +191,11 @@ impl App {
         let Some(pos) = pointer else {
             return;
         };
+        // A long command is about to run: the system wait cursor.
+        if self.small.busy() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Wait);
+            return;
+        }
         let m = ui.input(|i| i.modifiers);
         let mods = Mods {
             ctrl: m.command,
@@ -193,11 +227,26 @@ impl App {
             let hit = selection::pick(&self.scene, self.bvh.as_ref(), &self.camera, c, viewport_px);
             invalid = !matches!(hit, Some(Owner::Face(_)));
         }
+        // Scale grips: the system resize cursor along the grip's direction on screen.
+        if nav.is_none()
+            && let Some((center, grip)) = modify.and_then(|t| t.hot_grip())
+            && let (Some(c), Some(g)) = (
+                self.camera
+                    .project(self.ctx_xf.transform_point3(center), viewport_px),
+                self.camera
+                    .project(self.ctx_xf.transform_point3(grip), viewport_px),
+            )
+        {
+            ui.ctx().set_cursor_icon(resize_icon(g.x - c.x, g.y - c.y));
+            return;
+        }
         let state = State {
             copy: modify.is_some_and(|t| t.copy_mode()),
             invalid,
             second: pick.is_some_and(|p| p.first.is_some()),
             nav,
+            path: matches!(self.tool, Tool::Modify("tool.follow_me"))
+                && modify.is_some_and(|t| t.anchor().is_some()),
         };
         mt_ui::cursors::show(ui.ctx(), pos, cursor_for(self.tool, mods, state));
     }
@@ -337,6 +386,7 @@ mod tests {
                                 invalid,
                                 second,
                                 nav: None,
+                                path: false,
                             };
                             let c = cursor_for(t, mods, s);
                             assert!(t == Tool::Select || c.kind != Kind::Arrow, "{t:?}");
@@ -436,6 +486,32 @@ mod tests {
             Kind::Eyedropper
         );
         assert_eq!(cursor_for(tag, NONE, State::default()).kind, Kind::Tag);
+        // Paint Bucket's fill modes.
+        let p = |m| cursor_for(pb, m, State::default()).badge;
+        assert_eq!(p(NONE), Badge::None);
+        assert_eq!(p(CTRL), Badge::FillConnected);
+        assert_eq!(p(SHIFT), Badge::FillAll);
+        assert_eq!(p(CTRL_SHIFT), Badge::FillObject);
+        // Follow Me along a path.
+        let fm = Tool::from_command("tool.follow_me").unwrap();
+        let path = State {
+            path: true,
+            ..State::default()
+        };
+        assert_eq!(cursor_for(fm, NONE, path).badge, Badge::Path);
+        assert_eq!(cursor_for(fm, NONE, State::default()).badge, Badge::None);
+    }
+
+    #[test]
+    fn scale_grips_get_resize_cursors() {
+        use egui::CursorIcon as C;
+        assert_eq!(resize_icon(10.0, 0.5), C::ResizeHorizontal);
+        assert_eq!(resize_icon(-10.0, 0.0), C::ResizeHorizontal);
+        assert_eq!(resize_icon(0.0, 7.0), C::ResizeVertical);
+        assert_eq!(resize_icon(5.0, 5.0), C::ResizeNwSe);
+        assert_eq!(resize_icon(-5.0, -4.0), C::ResizeNwSe);
+        assert_eq!(resize_icon(5.0, -5.0), C::ResizeNeSw);
+        assert_eq!(resize_icon(0.0, 0.0), C::Move);
     }
 
     #[test]

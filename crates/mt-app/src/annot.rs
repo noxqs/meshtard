@@ -104,7 +104,8 @@ pub fn collect(doc: &Document, scene: &mut Scene) {
     let root = doc.context.is_empty();
     let o = Options {
         units: doc.units,
-        show_hidden: doc.model.style.hidden_geometry,
+        // Dimensions and texts are objects: View > Hidden Objects shows them.
+        show_hidden: doc.model.style.hidden_objects,
         dimension: doc.model.dimension_style,
         text: doc.model.text_style,
     };

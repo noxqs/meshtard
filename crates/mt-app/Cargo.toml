@@ -25,6 +25,7 @@ glam.workspace = true
 image = { workspace = true, features = ["jpeg"] }
 log.workspace = true
 toml.workspace = true
+serde.workspace = true
 ttf-parser = "0.25"
 # Bundled 3D Text fonts (Ubuntu Light, Hack): already built for egui.
 epaint_default_fonts = "0.36"

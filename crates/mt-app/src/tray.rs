@@ -176,6 +176,9 @@ impl App {
 
     /// Applies a tray event. Returns whether the scene must be rebuilt.
     pub(crate) fn tray_event(&mut self, event: Event) -> bool {
+        if let Some(rebuild) = self.environment_event(&event) {
+            return rebuild;
+        }
         let event = match event {
             Event::EntityInfoEdit { key, edit } => return self.entity_info_edit(&key, &edit),
             Event::MaterialTexture { index, action } => {

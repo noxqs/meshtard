@@ -84,20 +84,38 @@ struct Facts {
     extra: crate::context_extra::ExtraFacts,
     /// Right click on the drawing axes.
     axes: bool,
+    /// An image entity is selected (Export, Use As Material).
+    image: bool,
+    /// A selected face is painted with a textured material (Make Unique Texture).
+    textured_face: bool,
 }
 
 impl Facts {
     fn of(doc: &Document, items: &[Owner]) -> Self {
         let ents = doc.active();
         let mut f = Self {
-            hidden_geometry_shown: doc.model.style.hidden_geometry,
+            hidden_geometry_shown: doc.model.style.hidden_geometry
+                || doc.model.style.hidden_objects,
             context_open: !doc.context.is_empty(),
             ..Default::default()
         };
         for &o in items {
             f.hidden |= is_hidden(ents, o);
             match o {
-                Owner::Face(x) if ents.faces.contains_key(x) => f.faces.push(x),
+                Owner::Face(x) if ents.faces.contains_key(x) => {
+                    f.faces.push(x);
+                    let a = &ents.faces[x].attrs;
+                    f.textured_face |=
+                        [a.material, a.back_material]
+                            .into_iter()
+                            .flatten()
+                            .any(|m| {
+                                doc.model
+                                    .materials
+                                    .get(m)
+                                    .is_some_and(|m| m.texture.is_some())
+                            });
+                }
                 Owner::Edge(x) if ents.edges.contains_key(x) => {
                     f.edges.push(x);
                     f.curve |= ents.edges[x].attrs.curve.is_some();
@@ -107,6 +125,7 @@ impl Facts {
                         continue;
                     };
                     f.instances.push(i);
+                    f.image |= crate::small_items::image_material(&doc.model, ents, i).is_some();
                     let is_group = doc
                         .model
                         .definitions
@@ -164,6 +183,8 @@ impl Facts {
             "edit.explode_curve" => self.curve,
             "edit.explode" => self.unlocked_instance,
             "edit.make_unique" => self.component,
+            "edit.image_export" | "edit.image_use_as_material" => self.image,
+            "edit.make_unique_texture" => self.textured_face,
             "edit.intersect_context" => !self.faces.is_empty() && self.context_open,
             "edit.unhide_selected" => self.hidden,
             "edit.lock" => self.unlocked_instance,
@@ -391,8 +412,19 @@ fn menu(f: &Facts, empty: bool) -> Vec<MenuItem> {
     if f.faces.len() == 1 {
         v.push(sub(
             "Texture",
-            vec![cmd("tool.texture_position", "Position")],
+            vec![
+                cmd("tool.texture_position", "Position"),
+                cmd("edit.make_unique_texture", "Make Unique Texture"),
+            ],
         ));
+    } else if f.textured_face {
+        v.push(cmd("edit.make_unique_texture", "Make Unique Texture"));
+    }
+    if f.image {
+        // The image entity's items (help page "Context menu items"); its Shadows
+        // toggle is not built.
+        v.push(cmd("edit.image_export", "Export..."));
+        v.push(cmd("edit.image_use_as_material", "Use As Material"));
     }
     if !f.instances.is_empty() {
         let whose = if f.group && !f.component {

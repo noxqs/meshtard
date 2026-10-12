@@ -66,6 +66,7 @@ const SYNONYMS: &[(&str, &str)] = &[
     ("view.xray", "transparent see through"),
     ("view.wireframe", "transparent lines"),
     ("view.hidden_geometry", "hidden show"),
+    ("view.hidden_objects", "hidden show groups components"),
     ("view.shadows", "sun light shade"),
     ("camera.zoom_extents", "fit all everything"),
     ("camera.orbit", "rotate view turn view"),

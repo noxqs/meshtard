@@ -3,7 +3,7 @@
 //! Navigation constants are first guesses; scenario `spec/parity/00_camera_navigation.md`
 //! measures the real values.
 
-use glam::{DMat4, DVec2, DVec3, DVec4};
+use glam::{DMat4, DQuat, DVec2, DVec3, DVec4};
 use mt_spec::CameraSpec;
 
 /// Degrees of orbit per pixel of mouse drag.
@@ -216,6 +216,26 @@ impl Camera {
                     elevation.cos() * azimuth.sin(),
                     elevation.sin(),
                 );
+    }
+
+    /// Orbit with gravity suspended (Orbit tool with Ctrl, help [doc]): the eye turns
+    /// about the target around the view's own up and right axes instead of the world's
+    /// blue axis, so a horizontal drag tumbles the model when looking down at it. The
+    /// camera keeps no roll (its up stays on the blue axis's side), so the view cannot
+    /// pass over the poles; SketchUp's exact behavior is unverified.
+    pub fn orbit_free(&mut self, delta: DVec2) {
+        let offset = self.eye - self.target;
+        let yaw = DQuat::from_axis_angle(self.up(), -(delta.x * ORBIT_DEG_PER_PX).to_radians());
+        let pitch =
+            DQuat::from_axis_angle(self.right(), -(delta.y * ORBIT_DEG_PER_PX).to_radians());
+        let turned = pitch * yaw * offset;
+        // Stop just short of straight up or down, where the view's right is undefined.
+        let max = 89.99f64.to_radians().sin();
+        let dir = turned.normalize();
+        if dir.z.abs() > max {
+            return;
+        }
+        self.eye = self.target + turned;
     }
 
     /// Moves eye and target so the point at target depth under the cursor follows the cursor.
@@ -605,6 +625,25 @@ mod tests {
         c.orbit(DVec2::new(250.0, -80.0));
         assert!((c.distance() - d).abs() < 1e-9);
         assert_eq!(c.target, t);
+    }
+
+    #[test]
+    fn free_orbit_keeps_distance_and_turns_about_the_view_axes() {
+        let mut c = camera(true);
+        let (d, t) = (c.distance(), c.target);
+        let z = c.eye.z;
+        let up = c.up();
+        c.orbit_free(DVec2::new(90.0 / ORBIT_DEG_PER_PX, 0.0));
+        assert!((c.distance() - d).abs() < 1e-9);
+        assert_eq!(c.target, t);
+        // Turning about the tilted view up changes the eye's height (unlike `orbit`).
+        assert!(up.z < 0.999 && (c.eye.z - z).abs() > 1e-3);
+        // It never reaches straight above.
+        for _ in 0..50 {
+            c.orbit_free(DVec2::new(0.0, 100.0));
+        }
+        assert!(c.forward().z.abs() < 1.0);
+        assert!(c.up().is_finite());
     }
 
     #[test]

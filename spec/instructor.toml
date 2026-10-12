@@ -1,0 +1,530 @@
+# Window > Instructor: help for the active tool (FEATURES.md 66).
+# Written for meshtard in its own words from the tool descriptions on SketchUp's help
+# pages (help.sketchup.com, read 2026-10-11) and from memory where no page covers a
+# tool; SketchUp's Instructor text and animations are not copied. Modifier keys are
+# SketchUp's Windows keys as documented (Ctrl is Option and Alt is Command on a Mac);
+# a few may not be built in meshtard yet. Unverified against SketchUp's Instructor
+# panel, which also shows an animation.
+#
+# Each entry: id (tool command id from menus.toml), title, summary, steps (in order),
+# modifiers (key and what it does), and an optional tip.
+verified = false
+
+[[tool]]
+id = "tool.select"
+title = "Select"
+summary = "Picks the entities that the other tools and commands work on."
+steps = [
+  "Click an entity to select it.",
+  "Double-click a face to select it with its edges; triple-click to select everything connected to it.",
+  "Drag left to right for a window selection (only what is fully inside), right to left for a crossing selection (anything touched).",
+  "Click empty space or press Escape to clear the selection.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Add to the selection." },
+  { key = "Shift", action = "Toggle entities in and out of the selection." },
+  { key = "Ctrl+Shift", action = "Remove from the selection." },
+]
+
+[[tool]]
+id = "tool.lasso"
+title = "Lasso"
+summary = "Selects entities inside a freehand loop."
+steps = [
+  "Press and drag around the entities to select.",
+  "Release to close the loop: drawn clockwise it selects anything the loop touches, counter-clockwise only what is fully inside (Preferences > Drawing > Lasso Direction swaps this).",
+]
+modifiers = [
+  { key = "Ctrl", action = "Add to the selection." },
+  { key = "Shift", action = "Toggle entities in and out of the selection." },
+  { key = "Ctrl+Shift", action = "Remove from the selection." },
+]
+
+[[tool]]
+id = "tool.eraser"
+title = "Eraser"
+summary = "Deletes edges (and the faces they bound), guides, dimensions and other entities."
+steps = [
+  "Click an entity to erase it.",
+  "Or drag over several entities: they highlight, and are erased when you release.",
+  "Press Escape while dragging to cancel.",
+]
+modifiers = [
+  { key = "Shift", action = "Hide instead of erasing." },
+  { key = "Ctrl", action = "Soften and smooth edges instead of erasing." },
+  { key = "Ctrl+Shift", action = "Unsoften edges." },
+]
+
+[[tool]]
+id = "tool.tag"
+title = "Tag"
+summary = "Assigns the active tag to the entities you click."
+steps = [
+  "Choose a tag in the tool's list or make one active in the Tags panel.",
+  "Click entities to give them that tag.",
+]
+modifiers = [
+  { key = "Alt", action = "Sample the tag of the clicked entity." },
+]
+
+[[tool]]
+id = "tool.paint_bucket"
+title = "Paint Bucket"
+summary = "Applies the current material of the Materials panel to faces, groups and components."
+steps = [
+  "Pick a material in the Materials panel.",
+  "Click a face to paint it; click a group or component to paint its default material.",
+  "With faces selected, clicking one of them paints the whole selection.",
+]
+modifiers = [
+  { key = "Alt", action = "Sample the material of the clicked face (eyedropper)." },
+  { key = "Ctrl", action = "Paint every connected face with the same material." },
+  { key = "Shift", action = "Replace the material on every face in the same context that has it." },
+  { key = "Ctrl+Shift", action = "Replace the material only on faces connected to the clicked one." },
+]
+
+[[tool]]
+id = "tool.texture_position"
+title = "Texture Position"
+summary = "Moves, scales, rotates and distorts a face's texture with pins."
+steps = [
+  "Select one textured face and start the tool (or right-click > Texture > Position).",
+  "Drag the pins: red moves, green scales and rotates, blue shears and scales, yellow distorts.",
+  "Press Enter or click outside the face to finish; Escape cancels.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.move"
+title = "Move"
+summary = "Moves, copies and stretches entities; also makes linear arrays."
+steps = [
+  "Select what to move, or hover an entity to move just it.",
+  "Click a start point, move the cursor (inferences lock the direction), click the end point.",
+  "Type a distance and press Enter for an exact move.",
+  "After a copy, type 3x (or /3) to make an array of copies (or divide the distance).",
+]
+modifiers = [
+  { key = "Ctrl", action = "Move a copy, leaving the original." },
+  { key = "Shift", action = "Lock the current inference direction." },
+  { key = "Arrow keys", action = "Lock to the red (right), green (left) or blue (up) axis." },
+  { key = "Alt", action = "Auto-fold: allow moves that fold faces." },
+]
+
+[[tool]]
+id = "tool.rotate"
+title = "Rotate"
+summary = "Rotates entities about an axis; also makes radial arrays."
+steps = [
+  "Select what to rotate.",
+  "Click to place the protractor (its plane follows the face under the cursor).",
+  "Click a start point of the angle, then an end point.",
+  "Type an angle (or a slope such as 8:12) and press Enter for an exact rotation.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Rotate a copy (then type 4x for a radial array)." },
+  { key = "Shift", action = "Lock the protractor's plane." },
+  { key = "Arrow keys", action = "Lock the protractor to a plane: red, green or blue." },
+]
+
+[[tool]]
+id = "tool.scale"
+title = "Scale"
+summary = "Resizes or stretches entities with grips on their bounding box."
+steps = [
+  "Select what to scale.",
+  "Click a grip: corners scale uniformly, edge and face grips stretch along one or two axes.",
+  "Move and click, or type a factor (2, or 2,1,1 for each axis) or a length with units.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Scale about the center instead of the opposite grip." },
+  { key = "Shift", action = "Toggle uniform scaling." },
+]
+
+[[tool]]
+id = "tool.push_pull"
+title = "Push/Pull"
+summary = "Extrudes a flat face into 3D, or pushes it back into the model."
+steps = [
+  "Hover a face, click, move the cursor along the face's normal and click again.",
+  "Type a distance and press Enter for an exact extrusion.",
+  "Double-click a face to repeat the last distance.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Keep the original face: create a new one at the end." },
+  { key = "Alt", action = "Stretch: move the face and its neighbors instead of extruding." },
+]
+
+[[tool]]
+id = "tool.follow_me"
+title = "Follow Me"
+summary = "Sweeps a face along a path of edges."
+steps = [
+  "Select the path edges first (optional), then start the tool.",
+  "Click the profile face; with no selection, drag along the path edges.",
+]
+modifiers = [
+  { key = "Alt", action = "Use the clicked face's perimeter as the path." },
+]
+tip = "Draw the profile at one end of the path, perpendicular to it."
+
+[[tool]]
+id = "tool.offset"
+title = "Offset"
+summary = "Draws copies of a face's edges, or of connected edges, at an even distance."
+steps = [
+  "Click a face (or select coplanar edges first).",
+  "Move inward or outward and click, or type a distance.",
+  "Double-click a face to repeat the last distance.",
+]
+modifiers = [
+  { key = "Alt", action = "Allow overlapping offsets." },
+]
+
+[[tool]]
+id = "tool.line"
+title = "Line"
+summary = "Draws edges; edges that close a flat loop make a face."
+steps = [
+  "Click the start point.",
+  "Click the end point; drawing continues from there.",
+  "Type a length (or x,y,z coordinates) and press Enter for an exact edge.",
+  "Press Escape to stop drawing.",
+]
+modifiers = [
+  { key = "Shift", action = "Lock the current inference direction." },
+  { key = "Arrow keys", action = "Lock to the red (right), green (left) or blue (up) axis; Down locks parallel or perpendicular." },
+]
+
+[[tool]]
+id = "tool.freehand"
+title = "Freehand"
+summary = "Draws irregular lines as a curve by dragging."
+steps = [
+  "Press the mouse button and drag to draw.",
+  "Release to finish; ending on the start point closes a face.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.arc"
+title = "Arc"
+summary = "Draws an arc from its center, a start point and an angle."
+steps = [
+  "Click the center.",
+  "Click the start point (sets the radius).",
+  "Click the end point, or type an angle.",
+  "Type a number followed by s to change the segment count.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.arc_2pt"
+title = "2 Point Arc"
+summary = "Draws an arc from two end points and a bulge."
+steps = [
+  "Click the start point and the end point.",
+  "Move to set the bulge (a cyan arc shows when it is tangent) and click.",
+  "Double-click at the end of an arc to draw a fillet with the same radius.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.arc_3pt"
+title = "3 Point Arc"
+summary = "Draws an arc through three points."
+steps = [
+  "Click the start point, a point on the arc and the end point.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.pie"
+title = "Pie"
+summary = "Draws a closed pie-shaped face."
+steps = [
+  "Click the center, then the start of the arc, then the end of the arc.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.rectangle"
+title = "Rectangle"
+summary = "Draws a rectangular face from two opposite corners."
+steps = [
+  "Click the first corner.",
+  "Move to the opposite corner and click, or type length,width.",
+  "A dashed diagonal shows a square or a golden section.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Draw from the center." },
+  { key = "Arrow keys", action = "Lock the rectangle's plane to an axis." },
+]
+
+[[tool]]
+id = "tool.rotated_rectangle"
+title = "Rotated Rectangle"
+summary = "Draws a rectangle at any angle and in any plane."
+steps = [
+  "Click two points for the first side.",
+  "Swing the protractor to set the angle and the other side, then click.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.circle"
+title = "Circle"
+summary = "Draws a circular face from a center and a radius."
+steps = [
+  "Click the center (the circle lies on the face under the cursor).",
+  "Click to set the radius, or type it.",
+  "Type a number followed by s to change the segment count.",
+]
+modifiers = [
+  { key = "Shift", action = "Lock the circle's plane." },
+]
+
+[[tool]]
+id = "tool.polygon"
+title = "Polygon"
+summary = "Draws a regular polygon face."
+steps = [
+  "Click the center, then click to set the radius.",
+  "Type a number followed by s to change the number of sides.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Toggle inscribed and circumscribed radius." },
+]
+
+[[tool]]
+id = "tool.tape_measure"
+title = "Tape Measure"
+summary = "Measures distances, creates guide lines and points, and resizes the model."
+steps = [
+  "Click a start point and an end point to measure; the length is in the Measurements box.",
+  "Starting on an edge draws a parallel guide line; starting on a point draws a guide line and a guide point at the end.",
+  "Type a new length after measuring to resize the whole model or the open group.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Toggle creating guides." },
+]
+
+[[tool]]
+id = "tool.protractor"
+title = "Protractor"
+summary = "Measures angles and creates angled guide lines."
+steps = [
+  "Click to place the protractor's center.",
+  "Click a point along the start of the angle.",
+  "Move and click to set the angle, or type an angle or a slope.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Toggle creating a guide." },
+  { key = "Shift", action = "Lock the protractor's plane." },
+]
+
+[[tool]]
+id = "tool.axes"
+title = "Axes"
+summary = "Moves and reorients the drawing axes."
+steps = [
+  "Click the new origin.",
+  "Click a point along the new red axis, then a point along the new green axis.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.dimensions"
+title = "Dimensions"
+summary = "Places linear, radius and diameter dimensions."
+steps = [
+  "Click the start and end points of the distance (or click an edge, arc or circle).",
+  "Move away to place the dimension line and click.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.text"
+title = "Text"
+summary = "Places leader text attached to an entity, or screen text."
+steps = [
+  "Click an entity, move to place the text and click; or click empty space for screen text.",
+  "Type the text and click outside it or press Enter twice.",
+  "Double-click a face to label it with its area.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.text_3d"
+title = "3D Text"
+summary = "Creates text as geometry, filled and optionally extruded."
+steps = [
+  "Type the text and choose font, alignment, height and extrusion in the dialog.",
+  "Click Place, then click in the model to put the text group down.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.section_plane"
+title = "Section Plane"
+summary = "Places a section plane that cuts away part of the model."
+steps = [
+  "Hover a face to orient the plane, then click to place it.",
+  "Name the plane in the prompt.",
+  "Move and rotate the plane with Move and Rotate to change the cut.",
+]
+modifiers = [
+  { key = "Shift", action = "Lock the plane's orientation." },
+  { key = "Arrow keys", action = "Lock the plane to an axis." },
+]
+
+[[tool]]
+id = "tool.flip"
+title = "Flip"
+summary = "Mirrors the selection about a plane."
+steps = [
+  "Select what to flip.",
+  "Click one of the three planes shown on the selection's box.",
+]
+modifiers = [
+  { key = "Ctrl", action = "Flip a copy." },
+]
+
+[[tool]]
+id = "tool.outer_shell"
+title = "Outer Shell"
+summary = "Merges overlapping solid groups and components, keeping only their outside."
+steps = [
+  "Click the first solid, then the second; or select several solids first.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.solid_intersect"
+title = "Intersect"
+summary = "Keeps only where two solids overlap."
+steps = ["Click the first solid, then the second."]
+modifiers = []
+
+[[tool]]
+id = "tool.solid_union"
+title = "Union"
+summary = "Combines two solids into one, keeping their inner voids."
+steps = ["Click the first solid, then the second."]
+modifiers = []
+
+[[tool]]
+id = "tool.solid_subtract"
+title = "Subtract"
+summary = "Removes the first solid and the part of the second it overlaps."
+steps = ["Click the solid to subtract, then the solid to cut."]
+modifiers = []
+
+[[tool]]
+id = "tool.solid_trim"
+title = "Trim"
+summary = "Cuts the first solid's shape out of the second, keeping both."
+steps = ["Click the cutting solid, then the solid to trim."]
+modifiers = []
+
+[[tool]]
+id = "tool.solid_split"
+title = "Split"
+summary = "Splits two overlapping solids into the overlap and the two remainders."
+steps = ["Click the first solid, then the second."]
+modifiers = []
+
+[[tool]]
+id = "tool.sandbox_from_contours"
+title = "From Contours"
+summary = "Makes a terrain surface from selected contour lines."
+steps = ["Select the contour edges, then start the tool."]
+modifiers = []
+
+[[tool]]
+id = "tool.sandbox_from_scratch"
+title = "From Scratch"
+summary = "Draws a flat grid to sculpt into terrain."
+steps = [
+  "Click the first corner, click to set the width, click to set the depth.",
+  "Type a grid spacing first to change it.",
+]
+modifiers = []
+
+[[tool]]
+id = "camera.orbit"
+title = "Orbit"
+summary = "Turns the view around the model."
+steps = [
+  "Drag in the direction you want to orbit.",
+  "Double-click to center the view on the clicked point.",
+  "The middle mouse button orbits from any tool.",
+]
+modifiers = [
+  { key = "Shift", action = "Pan while held." },
+  { key = "Ctrl", action = "Suspend gravity: orbit freely over the top and bottom." },
+]
+
+[[tool]]
+id = "camera.pan"
+title = "Pan"
+summary = "Slides the view up, down and sideways."
+steps = [
+  "Drag in the direction you want the view to move.",
+  "Shift with the middle mouse button pans from any tool.",
+]
+modifiers = []
+
+[[tool]]
+id = "camera.zoom"
+title = "Zoom"
+summary = "Moves the camera closer to or away from the model."
+steps = [
+  "Drag up to zoom in, down to zoom out; or roll the mouse wheel.",
+  "Type a field of view (35deg) or a lens length (50mm) and press Enter.",
+  "Double-click to center the view on the clicked point.",
+]
+modifiers = [
+  { key = "Shift", action = "Change the field of view instead." },
+]
+
+[[tool]]
+id = "camera.zoom_window"
+title = "Zoom Window"
+summary = "Zooms to fit a rectangle you draw."
+steps = ["Drag a rectangle around the area to fill the view with."]
+modifiers = []
+
+[[tool]]
+id = "camera.position"
+title = "Position Camera"
+summary = "Places the camera at a point at eye height, or looking from one point at another."
+steps = [
+  "Click a point to stand there at eye height (type a height first to change it).",
+  "Or press on the eye point and drag to the point to look at.",
+]
+modifiers = []
+
+[[tool]]
+id = "camera.walk"
+title = "Walk"
+summary = "Walks through the model at eye height."
+steps = [
+  "Press and drag: up walks forward, down walks back, left and right turn.",
+  "The arrow keys walk too.",
+]
+modifiers = [
+  { key = "Shift", action = "Move up and down, or sideways." },
+  { key = "Ctrl", action = "Run." },
+  { key = "Alt", action = "Walk through walls (no collision)." },
+]
+
+[[tool]]
+id = "camera.look_around"
+title = "Look Around"
+summary = "Turns the camera in place, like turning your head."
+steps = [
+  "Drag in the direction to look.",
+  "Type an eye height and press Enter to change it.",
+]
+modifiers = []

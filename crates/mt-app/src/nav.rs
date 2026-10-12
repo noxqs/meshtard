@@ -134,6 +134,8 @@ pub struct Input {
     pub left_drag: DVec2,
     pub middle_drag: DVec2,
     pub shift: bool,
+    /// Ctrl held: Orbit suspends gravity ([`Camera::orbit_free`]).
+    pub ctrl: bool,
     /// Wheel notches; positive zooms in.
     pub wheel: f64,
 }
@@ -160,6 +162,10 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
             | Tool::PositionCamera
             | Tool::Walk => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
+            Tool::Orbit if input.ctrl => {
+                camera.orbit_free(input.left_drag);
+                camera.two_point = false;
+            }
             Tool::Orbit => {
                 camera.orbit(input.left_drag);
                 camera.two_point = false;

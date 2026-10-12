@@ -121,6 +121,17 @@ pub(crate) struct More {
     pub invert_wheel: bool,
     /// Files.
     pub folders: Folders,
+    /// Drawing > Lasso Direction: Clockwise (help: the default) makes clockwise
+    /// lassos select what they touch; Counterclockwise swaps the two.
+    pub lasso_clockwise_crossing: bool,
+    /// Drawing > Show Move Tool Rotation Grips (on by default; unverified).
+    pub rotation_grips: bool,
+    /// Graphics: the GPU to draw with (adapter name), `None` = the system's choice.
+    /// Takes effect after a restart.
+    pub gpu: Option<String>,
+    /// Applications: the image editor for Materials > Edit Texture Image; `None` =
+    /// the system's default application.
+    pub image_editor: Option<PathBuf>,
 }
 
 impl Default for More {
@@ -132,6 +143,10 @@ impl Default for More {
             bbox_highlight: false,
             invert_wheel: false,
             folders: Folders::default(),
+            lasso_clockwise_crossing: true,
+            rotation_grips: true,
+            gpu: None,
+            image_editor: None,
         }
     }
 }
@@ -171,6 +186,9 @@ impl More {
         t.insert("accessibility".into(), acc.into());
         let mut g = toml::Table::new();
         g.insert("msaa".into(), i64::from(self.msaa).into());
+        if let Some(gpu) = &self.gpu {
+            g.insert("gpu".into(), gpu.clone().into());
+        }
         t.insert("graphics".into(), g.into());
         let mut c = toml::Table::new();
         c.insert("bbox_highlight".into(), self.bbox_highlight.into());
@@ -183,6 +201,21 @@ impl More {
             }
         }
         t.insert("files".into(), f.into());
+        let mut d = toml::Table::new();
+        d.insert(
+            "lasso_clockwise_crossing".into(),
+            self.lasso_clockwise_crossing.into(),
+        );
+        d.insert("rotation_grips".into(), self.rotation_grips.into());
+        t.insert("drawing_more".into(), d.into());
+        let mut a = toml::Table::new();
+        if let Some(p) = &self.image_editor {
+            a.insert(
+                "image_editor".into(),
+                p.to_string_lossy().into_owned().into(),
+            );
+        }
+        t.insert("applications".into(), a.into());
     }
 
     /// Reads the pages' sections of `t`; missing or bad values keep their default.
@@ -201,6 +234,21 @@ impl More {
         if let Some(n) = section("graphics").and_then(|g| g.get("msaa")?.as_integer()) {
             m.msaa = msaa_choice(n);
         }
+        m.gpu = section("graphics")
+            .and_then(|g| g.get("gpu")?.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let d = section("drawing_more");
+        if let Some(v) = flag(d, "lasso_clockwise_crossing") {
+            m.lasso_clockwise_crossing = v;
+        }
+        if let Some(v) = flag(d, "rotation_grips") {
+            m.rotation_grips = v;
+        }
+        m.image_editor = section("applications")
+            .and_then(|a| a.get("image_editor")?.as_str())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
         let c = section("compatibility");
         if let Some(v) = flag(c, "bbox_highlight") {
             m.bbox_highlight = v;
@@ -374,10 +422,104 @@ impl App {
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Monospace),
         );
-        if ui.button("Copy").clicked() {
-            ui.ctx().copy_text(self.prefs.adapter_details.clone());
+        ui.horizontal(|ui| {
+            if ui.button("Copy").clicked() {
+                ui.ctx().copy_text(self.prefs.adapter_details.clone());
+            }
+            if ui
+                .button("Show Log File")
+                .on_hover_text("The graphics log written when meshtard started")
+                .clicked()
+            {
+                match crate::graphics::log_path().filter(|p| p.exists()) {
+                    Some(p) => {
+                        if let Err(e) = crate::presentation::open_with_system(&p.to_string_lossy())
+                        {
+                            self.message = Some(format!("Could not open {}: {e}", p.display()));
+                        }
+                    }
+                    None => self.message = Some("No graphics log was written.".into()),
+                }
+            }
+        });
+        ui.add_space(8.0);
+        ui.strong("GPU");
+        let adapters = crate::graphics::adapters();
+        let current = m.gpu.clone().unwrap_or_else(|| "Automatic".to_owned());
+        egui::ComboBox::from_id_salt("mt_pref_gpu")
+            .selected_text(current)
+            .width(320.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut m.gpu, None, "Automatic");
+                for a in adapters {
+                    ui.selectable_value(&mut m.gpu, Some(a.clone()), a);
+                }
+            });
+        if m.gpu != self.prefs.more.gpu {
+            ui.label(
+                egui::RichText::new("Restart meshtard to use the chosen GPU.")
+                    .small()
+                    .color(egui::Color32::from_rgb(180, 30, 30)),
+            );
         }
     }
+}
+
+/// The Drawing page's Lasso Direction and Move tool options.
+pub(crate) fn drawing_more(ui: &mut egui::Ui, m: &mut More) {
+    ui.add_space(8.0);
+    ui.strong("Lasso Direction");
+    if ui
+        .radio(m.lasso_clockwise_crossing, "Clockwise")
+        .on_hover_text(
+            "Clockwise selects what the lasso touches; counterclockwise only what is inside",
+        )
+        .clicked()
+    {
+        m.lasso_clockwise_crossing = true;
+    }
+    if ui
+        .radio(!m.lasso_clockwise_crossing, "Counterclockwise")
+        .on_hover_text(
+            "Counterclockwise selects what the lasso touches; clockwise only what is inside",
+        )
+        .clicked()
+    {
+        m.lasso_clockwise_crossing = false;
+    }
+    ui.add_space(8.0);
+    ui.strong("Move Tool");
+    ui.checkbox(&mut m.rotation_grips, "Show Move tool rotation grips");
+}
+
+/// The Applications page: the image editor for Edit Texture Image.
+pub(crate) fn applications_page(ui: &mut egui::Ui, m: &mut More) {
+    ui.strong("Default Image Editor");
+    ui.label(
+        egui::RichText::new("Opens texture images from the Materials panel's Edit tab.")
+            .small()
+            .weak(),
+    );
+    ui.add_space(4.0);
+    let shown = m
+        .image_editor
+        .as_ref()
+        .map_or_else(|| "System default".to_owned(), |p| p.display().to_string());
+    ui.add(egui::Label::new(egui::RichText::new(shown).monospace()).truncate());
+    ui.horizontal(|ui| {
+        if ui.button("Choose...").clicked() {
+            // No filter: programs often have no extension.
+            if let Some(p) = crate::filedialog::open(&[]) {
+                m.image_editor = Some(p);
+            }
+        }
+        if ui
+            .add_enabled(m.image_editor.is_some(), egui::Button::new("Default"))
+            .clicked()
+        {
+            m.image_editor = None;
+        }
+    });
 }
 
 /// The Accessibility page.
@@ -514,6 +656,10 @@ mod tests {
             msaa: 8,
             bbox_highlight: true,
             invert_wheel: true,
+            lasso_clockwise_crossing: false,
+            rotation_grips: false,
+            gpu: Some("GPU (Vulkan)".into()),
+            image_editor: Some(PathBuf::from("/usr/bin/gimp")),
             ..Default::default()
         };
         m.palette.0[Swatch::Y.index()] = Some([1, 2, 3]);

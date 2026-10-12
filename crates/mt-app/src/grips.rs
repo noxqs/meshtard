@@ -433,7 +433,13 @@ impl App {
                     },
                 );
             }
-            for handle in handles(&b, eye, view_dir) {
+            // Preferences > Drawing > Show Move Tool Rotation Grips.
+            let shown = if self.prefs.more.rotation_grips {
+                handles(&b, eye, view_dir)
+            } else {
+                Vec::new()
+            };
+            for handle in shown {
                 consider(
                     handle.point,
                     Hot::Handle {
@@ -591,7 +597,12 @@ impl App {
             Some(Hot::Handle { handle, .. }) => Some(handle),
             _ => None,
         };
-        for h in handles(&b, eye, view_dir) {
+        let shown = if self.prefs.more.rotation_grips {
+            handles(&b, eye, view_dir)
+        } else {
+            Vec::new()
+        };
+        for h in shown {
             let Some(q) = to_screen(h.point) else {
                 continue;
             };

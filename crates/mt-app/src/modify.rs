@@ -163,6 +163,11 @@ pub trait ModifyTool {
     fn markers(&self, _cur: &Inference) -> Vec<Marker> {
         Vec::new()
     }
+    /// The grip under the cursor or held (Scale): the box center and the grip's point,
+    /// context space, for the resize cursor.
+    fn hot_grip(&self) -> Option<(DVec3, DVec3)> {
+        None
+    }
     /// The targets being transformed and the transform at the cursor (context space),
     /// to draw them live; `copy`: the originals stay where they are.
     fn live(&self, _cur: &Inference) -> Option<(&[Owner], DMat4, bool)> {
@@ -1306,6 +1311,12 @@ impl ModifyTool for Scale {
             (Some(b), Some(c)) => pick_grip(&b, h.project, c, GRIP_RADIUS_PX),
             _ => None,
         };
+    }
+
+    fn hot_grip(&self) -> Option<(DVec3, DVec3)> {
+        let b = self.bbox?;
+        let g = self.grab.map(|g| g.grip).or(self.hot)?;
+        Some((b.at(DVec3::ZERO), b.at(grip_vec(g))))
     }
 
     /// The grips, on the scaled box while one is held.

@@ -41,6 +41,13 @@ pub struct Document {
     /// What the last Edit > Hide hid, and the context it was in (Edit > Unhide > Last).
     /// Not part of undo: an undo can leave it naming other entities.
     last_hidden: Option<(Vec<usize>, Vec<Owner>)>,
+    /// Operation names of the undo and redo steps, in step with `undo` and `redo`
+    /// (Edit > Undo shows "Undo Move").
+    undo_names: Vec<String>,
+    redo_names: Vec<String>,
+    /// Name given to the next recorded step: the app sets it to the running tool or
+    /// command before edits happen.
+    pub operation: String,
 }
 
 /// A state Undo and Redo go back to: the model, the edit context, the state id and
@@ -333,6 +340,9 @@ impl Document {
             next_state: 1,
             has_file: true,
             last_hidden: None,
+            undo_names: Vec::new(),
+            redo_names: Vec::new(),
+            operation: String::new(),
         })
     }
 
@@ -358,6 +368,9 @@ impl Document {
             next_state: 1,
             has_file: false,
             last_hidden: None,
+            undo_names: Vec::new(),
+            redo_names: Vec::new(),
+            operation: String::new(),
         }
     }
 
@@ -518,10 +531,13 @@ impl Document {
 
     fn record(&mut self, before: Snapshot) {
         self.undo.push(before);
+        self.undo_names.push(self.operation.clone());
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
+            self.undo_names.remove(0);
         }
         self.redo.clear();
+        self.redo_names.clear();
         self.state = self.next_state;
         self.next_state += 1;
     }
@@ -548,6 +564,20 @@ impl Document {
         true
     }
 
+    /// The name of the step Edit > Undo would undo (empty when unnamed).
+    pub fn undo_name(&self) -> Option<&str> {
+        self.undo
+            .last()
+            .map(|_| self.undo_names.last().map_or("", String::as_str))
+    }
+
+    /// The name of the step Edit > Redo would redo.
+    pub fn redo_name(&self) -> Option<&str> {
+        self.redo
+            .last()
+            .map(|_| self.redo_names.last().map_or("", String::as_str))
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -562,6 +592,8 @@ impl Document {
         };
         let now = self.restore(snapshot);
         self.redo.push(now);
+        let name = self.undo_names.pop().unwrap_or_default();
+        self.redo_names.push(name);
         self.fix_context();
         true
     }
@@ -572,6 +604,8 @@ impl Document {
         };
         let now = self.restore(snapshot);
         self.undo.push(now);
+        let name = self.redo_names.pop().unwrap_or_default();
+        self.undo_names.push(name);
         self.fix_context();
         true
     }
@@ -742,7 +776,8 @@ impl Document {
         };
         let f = |p: DVec3| p.as_vec3().to_array();
         for (i, sp) in ents.section_planes.iter().enumerate() {
-            if sp.hidden && !self.model.style.hidden_geometry {
+            // A section plane is an object: View > Hidden Objects shows it.
+            if sp.hidden && !self.model.style.hidden_objects {
                 continue;
             }
             let c = xf.transform_point3(sp.point);
@@ -826,6 +861,8 @@ impl Document {
         out: &mut Scene,
     ) {
         let show_hidden = self.model.style.hidden_geometry;
+        // View > Hidden Objects: hidden groups and components (drawn as hidden).
+        let show_objects = self.model.style.hidden_objects;
         // View > Component Edit > Hide Rest Of Model: only the open context's path is
         // walked outside it.
         let editing = !self.context.is_empty();
@@ -889,7 +926,8 @@ impl Document {
             let hidden = ghost || e.attrs.hidden || e.attrs.soft;
             if rest_here
                 || (!style.edges && !style.profiles)
-                || (hidden && !show_hidden)
+                || ((e.attrs.hidden || e.attrs.soft) && !show_hidden)
+                || (ghost && !show_objects)
                 || !self.layer_visible(e.attrs.layer)
             {
                 continue;
@@ -945,7 +983,11 @@ impl Document {
 
         for (f, face) in &ents.faces {
             let hidden = ghost || face.attrs.hidden;
-            if rest_here || (hidden && !show_hidden) || !self.layer_visible(face.attrs.layer) {
+            if rest_here
+                || (face.attrs.hidden && !show_hidden)
+                || (ghost && !show_objects)
+                || !self.layer_visible(face.attrs.layer)
+            {
                 continue;
             }
             let front_material = face.attrs.material.or(inherited);
@@ -1038,7 +1080,7 @@ impl Document {
         }
 
         for (index, i) in ents.instances.iter().enumerate() {
-            if (i.hidden && !show_hidden) || !self.layer_visible(i.layer) {
+            if (i.hidden && !show_objects) || !self.layer_visible(i.layer) {
                 continue;
             }
             let on_path = matches!(level, Level::Context([first, ..]) if *first == index);
@@ -1302,6 +1344,26 @@ mod tests {
     }
 
     #[test]
+    fn undo_steps_keep_their_names() {
+        let mut doc = Document::untitled();
+        doc.operation = "Line".into();
+        assert!(doc.edit(|root| !mt_kernel::add_line(root, DVec3::ZERO, DVec3::X).is_empty()));
+        doc.operation = "Move".into();
+        assert!(doc.edit(|root| !mt_kernel::add_line(root, DVec3::Y, DVec3::Z).is_empty()));
+        assert_eq!(doc.undo_name(), Some("Move"));
+        assert_eq!(doc.redo_name(), None);
+        doc.undo();
+        assert_eq!(doc.undo_name(), Some("Line"));
+        assert_eq!(doc.redo_name(), Some("Move"));
+        doc.redo();
+        assert_eq!(doc.undo_name(), Some("Move"));
+        doc.undo();
+        doc.undo();
+        assert_eq!(doc.undo_name(), None);
+        assert_eq!(doc.redo_name(), Some("Line"));
+    }
+
+    #[test]
     fn edits_undo_and_redo() {
         let mut doc = Document::untitled();
         let a = DVec3::ZERO;
@@ -1448,9 +1510,20 @@ mod tests {
             !doc.hide(&[Owner::Face(face)]),
             "already hidden: no undo step"
         );
-        // Hidden Geometry shows them, selectable, and marks their edges as hidden.
+        // Hidden Geometry shows the hidden face, Hidden Objects the hidden group;
+        // each alone shows only its own kind.
+        doc.model.style.hidden_geometry = true;
+        let geometry_only = doc.scene();
+        assert!(geometry_only.tri_owner.contains(&Some(Owner::Face(face))));
+        assert!(!geometry_only.tri_owner.contains(&Some(Owner::Instance(0))));
+        doc.model.style.hidden_geometry = false;
+        doc.model.style.hidden_objects = true;
+        let objects_only = doc.scene();
+        assert!(!objects_only.tri_owner.contains(&Some(Owner::Face(face))));
+        assert!(objects_only.tri_owner.contains(&Some(Owner::Instance(0))));
         doc.model.style.hidden_geometry = true;
         let scene = doc.scene();
+        doc.model.style.hidden_objects = false;
         assert_eq!(scene.triangles.len(), visible_tris);
         assert!(scene.tri_owner.contains(&Some(Owner::Instance(0))));
         assert!(scene.tri_owner.contains(&Some(Owner::Face(face))));

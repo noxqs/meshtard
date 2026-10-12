@@ -11,8 +11,12 @@ impl Shell {
         let h = t.sizes.panel_header_height;
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
-        // Title bar: tray name, pin and close.
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), h + 2.0), Sense::hover());
+        let active = self.trays.active;
+        self.tray_rects.push((active, ui.max_rect()));
+        // Title bar: tray name, pin and close; right-click for the tray menu.
+        let (bar, bar_response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), h + 2.0), Sense::click());
+        self.tray_menu(&bar_response, active);
         ui.painter().rect_filled(bar, 0.0, t.tray_title);
         ui.painter().hline(
             bar.x_range(),
@@ -69,17 +73,20 @@ impl Shell {
                     if !self.panels[i].shown {
                         continue;
                     }
-                    self.panel(ui, frame, i);
+                    self.panel(ui, frame, i, active);
                 }
             });
     }
 
-    fn panel(&mut self, ui: &mut egui::Ui, frame: &Frame, i: usize) {
+    /// Panel `i` of the spec list, in tray `tray`.
+    pub(crate) fn panel(&mut self, ui: &mut egui::Ui, frame: &Frame, i: usize, tray: usize) {
         let t = self.theme.clone();
         let h = t.sizes.panel_header_height;
         let id = self.panels[i].id.clone();
         let (header, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+            ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
+        self.panel_header_drag(ui, &response, &id, tray);
+        self.panel_menu(&response, &id, tray);
         let painter = ui.painter();
         let fill = if response.hovered() {
             t.hover
@@ -124,7 +131,9 @@ impl Shell {
         let closed = close_button(ui, close, ("mt_ui_panel_close", &id), &t).clicked();
         if closed {
             // Closing a panel takes it out of the tray (Window menu puts it back).
-            self.set_panel_in_tray(&id, false);
+            if self.set_panel_in(tray, &id, false) {
+                self.apply_active_tray();
+            }
             return;
         }
         if response.clicked() {
@@ -141,6 +150,10 @@ impl Shell {
                 ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
                 if id == "window.entity_info" {
                     self.entity_info_panel(ui, frame.entity_info);
+                } else if id == "window.environments" {
+                    self.environments_panel(ui);
+                } else if id == "window.instructor" {
+                    self.instructor_panel(ui, frame.active_tool);
                 } else if !self.panel_body(ui, &id) {
                     ui.label(
                         egui::RichText::new(format!(

@@ -16,11 +16,13 @@ mod context_menu;
 mod cursor;
 mod document;
 mod entity_info;
+mod environments;
 mod errors;
 mod export;
 mod filedialog;
 mod fix_problems;
 mod flip;
+mod graphics;
 mod grips;
 mod image_entity;
 mod import;
@@ -48,6 +50,7 @@ mod search;
 mod section_export;
 mod selection;
 mod settings;
+mod small_items;
 mod snap;
 mod soften;
 mod solid_tools;
@@ -163,6 +166,11 @@ const IMPLEMENTED: &[&str] = &[
     "view.xray",
     "tool.section_plane",
     "edit.delete_guides",
+    "edit.purge_unused",
+    "edit.image_export",
+    "edit.image_use_as_material",
+    "edit.make_unique_texture",
+    "window.model_info_geo",
     "edit.undo",
     "edit.redo",
     "edit.select_all",
@@ -197,6 +205,8 @@ const IMPLEMENTED: &[&str] = &[
     "window.outliner",
     "window.scenes",
     "window.shadows",
+    "window.environments",
+    "window.instructor",
     "view.toolbars",
     "edit.invert_selection",
     "edit.hide",
@@ -209,6 +219,7 @@ const IMPLEMENTED: &[&str] = &[
     "view.axes",
     "view.guides",
     "view.hidden_geometry",
+    "view.hidden_objects",
     "view.scene_tabs",
     "view.edges",
     "view.back_edges",
@@ -324,6 +335,8 @@ fn main() -> eframe::Result {
             )
             .with_inner_size([1280.0, 800.0]),
         renderer: eframe::Renderer::Wgpu,
+        // Preferences > Graphics > GPU (after a restart).
+        wgpu_options: graphics::wgpu_options(graphics::saved_gpu()),
         ..Default::default()
     };
     eframe::run_native(
@@ -461,6 +474,10 @@ struct App {
     stretch: move_extra::Stretch,
     /// Window > Model Library (3D Warehouse equivalent).
     library: library::Library,
+    /// Window > Environments library.
+    envs: environments::Environments,
+    /// FEATURES.md 67 items' state (`small_items`).
+    small: small_items::State,
 }
 
 impl App {
@@ -477,6 +494,12 @@ impl App {
         let mut spec = spec;
         let mut prefs = preferences::load(&mut spec);
         let samples = prefs.set_adapter(&render_state.adapter);
+        graphics::write_log(&graphics::log_text(
+            &info,
+            prefs.more.gpu.as_deref(),
+            samples,
+            &prefs.samples_supported,
+        ));
         let shortcuts = preferences::shortcut_table(&spec, IMPLEMENTED);
         #[cfg(target_os = "macos")]
         let native_menu = macos_menu::NativeMenu::install(&spec, VIEW_TOGGLES);
@@ -568,6 +591,8 @@ impl App {
             grips: Default::default(),
             stretch: Default::default(),
             library: Default::default(),
+            envs: Default::default(),
+            small: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -691,6 +716,9 @@ impl App {
 
     /// Passes the model's shadow settings to the viewport.
     fn apply_shadows(&mut self) {
+        self.apply_environment();
+        let env_sun =
+            (self.document.as_ref()).and_then(|d| environments::sun_override(&d.model.environment));
         let shadows = self
             .document
             .as_ref()
@@ -710,6 +738,8 @@ impl App {
                     s.minute,
                 );
                 let sun = mt_render::rotate_north(sun, north);
+                // Environments > Set Sun Location replaces the sun.
+                let sun = env_sun.unwrap_or(sun);
                 mt_render::Shadows {
                     sun_dir: sun.as_vec3().to_array(),
                     light: s.light as f32,
@@ -1015,6 +1045,9 @@ impl App {
     }
 
     fn run_command(&mut self, ctx: &egui::Context, frame: &eframe::Frame, id: &str) {
+        if self.early_command(ctx, frame, id) {
+            return;
+        }
         if id == "tool.snaps"
             && let Some(rs) = frame.wgpu_render_state()
             && !self.snaps_command(&rs.device.clone())
@@ -1154,7 +1187,10 @@ impl App {
                     if changed {
                         // Hidden entities leave the selection unless they stay visible
                         // (View > Hidden Geometry); locking keeps it.
-                        if id == "edit.hide" && !doc.model.style.hidden_geometry {
+                        if id == "edit.hide"
+                            && !doc.model.style.hidden_geometry
+                            && !doc.model.style.hidden_objects
+                        {
                             self.selection.clear();
                         }
                         self.rebuild(&device);
@@ -1554,6 +1590,7 @@ impl App {
                 DVec2::ZERO
             },
             shift,
+            ctrl: ui.input(|i| i.modifiers.command),
             wheel: if response.hovered() {
                 f64::from(notches) * self.prefs.wheel_sign()
             } else {
@@ -2404,6 +2441,7 @@ fn view_toggle(s: &mut mt_kernel::StyleSettings, id: &str) -> bool {
         "view.axes" => s.axes = !s.axes,
         "view.guides" => s.guides = !s.guides,
         "view.hidden_geometry" => s.hidden_geometry = !s.hidden_geometry,
+        "view.hidden_objects" => s.hidden_objects = !s.hidden_objects,
         "view.wireframe" => s.face_style = F::Wireframe,
         "view.hidden_line" => s.face_style = F::HiddenLine,
         "view.shaded" => s.face_style = F::Shaded,
@@ -2432,6 +2470,7 @@ fn view_checked(s: &mt_kernel::StyleSettings, id: &str) -> bool {
         "view.axes" => s.axes,
         "view.guides" => s.guides,
         "view.hidden_geometry" => s.hidden_geometry,
+        "view.hidden_objects" => s.hidden_objects,
         "view.wireframe" => s.face_style == F::Wireframe,
         "view.hidden_line" => s.face_style == F::HiddenLine,
         "view.shaded" => s.face_style == F::Shaded,
@@ -2455,6 +2494,7 @@ const VIEW_TOGGLES: &[&str] = &[
     "view.shadows",
     "view.scene_tabs",
     "view.hidden_geometry",
+    "view.hidden_objects",
     "view.axes",
     "view.guides",
     "view.section_planes",
@@ -2582,6 +2622,10 @@ impl eframe::App for App {
         let playing = self.animation.is_playing();
         let tray_on = shell.tray_visible();
         let spec = self.spec.clone();
+        let small_on: Vec<(&str, bool)> = small_items::COMMANDS
+            .iter()
+            .map(|id| (*id, self.small_enabled(id).unwrap_or(true)))
+            .collect();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
             active_tool: self.tool.command(),
@@ -2596,7 +2640,10 @@ impl eframe::App for App {
                 "camera.previous" => can_go_back,
                 "camera.next" => can_go_forward,
                 "file.revert" => has_file,
-                _ => IMPLEMENTED.contains(&id),
+                _ => small_on
+                    .iter()
+                    .find(|(c, _)| *c == id)
+                    .map_or_else(|| IMPLEMENTED.contains(&id), |x| x.1),
             },
             is_checked: &|id| {
                 camera_cmd::is_checked(&camera, id)
@@ -2618,6 +2665,7 @@ impl eframe::App for App {
             self.run_command(ui.ctx(), frame, &id);
         }
         self.shell = Some(shell);
+        self.frame_hook(ui.ctx(), frame);
         self.context_menu_command(ui.ctx(), frame);
         self.poll_loading(ui.ctx(), frame);
         self.splash_ui(ui.ctx());
@@ -2707,13 +2755,18 @@ mod tests {
     #[test]
     fn view_toggles_flip_and_check() {
         let mut s = mt_kernel::StyleSettings::default();
-        for id in ["view.axes", "view.guides", "view.hidden_geometry"] {
+        for id in [
+            "view.axes",
+            "view.guides",
+            "view.hidden_geometry",
+            "view.hidden_objects",
+        ] {
             let before = view_checked(&s, id);
             assert!(view_toggle(&mut s, id));
             assert_eq!(view_checked(&s, id), !before, "{id}");
             assert!(IMPLEMENTED.contains(&id));
         }
-        assert!(!s.axes && !s.guides && s.hidden_geometry);
+        assert!(!s.axes && !s.guides && s.hidden_geometry && s.hidden_objects);
         assert!(
             !view_toggle(&mut s, "view.scene_tabs"),
             "app state, not style"

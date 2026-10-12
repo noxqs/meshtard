@@ -530,18 +530,28 @@ pub fn box_select(
     region_select(scene, camera, viewport, &rect, window)
 }
 
-/// Entities selected by a lasso: clockwise (on screen) selects what the outline
-/// touches, counterclockwise only what lies fully inside it.
+/// Whether a lasso drawn this way selects what it touches (crossing). Preferences >
+/// Drawing > Lasso Direction: Clockwise (the default, help) makes clockwise lassos
+/// crossing and counterclockwise ones window; Counterclockwise swaps them.
+pub fn lasso_crossing(clockwise: bool, clockwise_is_crossing: bool) -> bool {
+    clockwise == clockwise_is_crossing
+}
+
+/// Entities selected by a lasso: with `clockwise_is_crossing`, clockwise (on screen)
+/// selects what the outline touches, counterclockwise only what lies fully inside it;
+/// the other way round without.
 pub fn lasso_select(
     scene: &Scene,
     camera: &Camera,
     viewport: DVec2,
     lasso: &Polygon,
+    clockwise_is_crossing: bool,
 ) -> Vec<Owner> {
     if lasso.points.len() < 3 {
         return Vec::new();
     }
-    region_select(scene, camera, viewport, lasso, !lasso.is_clockwise())
+    let crossing = lasso_crossing(lasso.is_clockwise(), clockwise_is_crossing);
+    region_select(scene, camera, viewport, lasso, !crossing)
 }
 
 /// Entities in a screen region: `window` needs them fully inside, otherwise touching
@@ -761,7 +771,7 @@ mod tests {
             Owner::Face(f) => e.loop_points(&e.faces[f].outer).iter().all(|p| p.x < 2.0),
             _ => false,
         };
-        let inside = lasso_select(&scene, &camera, viewport, &ccw);
+        let inside = lasso_select(&scene, &camera, viewport, &ccw, true);
         // A's face and four edges, and B's left edge (x = 5) which lies inside too.
         assert_eq!(inside.len(), 6, "{inside:?}");
         assert_eq!(inside.iter().filter(|o| !in_a(o)).count(), 1);
@@ -770,13 +780,21 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, Owner::Face(_)) && !in_a(o))
         );
-        let touched = lasso_select(&scene, &camera, viewport, &cw);
+        let touched = lasso_select(&scene, &camera, viewport, &cw, true);
         // B's face, its two edges across the outline and its left edge are touched
         // too; its right edge is not.
         assert_eq!(touched.len(), 5 + 4, "{touched:?}");
         assert_eq!(touched.iter().filter(|o| !in_a(o)).count(), 4);
+        // Lasso Direction > Counterclockwise swaps them.
+        assert_eq!(lasso_select(&scene, &camera, viewport, &cw, false), inside);
+        assert_eq!(
+            lasso_select(&scene, &camera, viewport, &ccw, false),
+            touched
+        );
+        assert!(lasso_crossing(true, true) && !lasso_crossing(false, true));
+        assert!(lasso_crossing(false, false) && !lasso_crossing(true, false));
         // Too few points select nothing.
-        assert!(lasso_select(&scene, &camera, viewport, &Polygon::new(vec![])).is_empty());
+        assert!(lasso_select(&scene, &camera, viewport, &Polygon::new(vec![]), true).is_empty());
     }
 
     #[test]

@@ -107,7 +107,13 @@ impl App {
         if polygon.points.len() < 3 {
             return;
         }
-        let items = selection::lasso_select(&self.scene, &self.camera, viewport_px, &polygon);
+        let items = selection::lasso_select(
+            &self.scene,
+            &self.camera,
+            viewport_px,
+            &polygon,
+            self.prefs.more.lasso_clockwise_crossing,
+        );
         self.select(device, mode, items);
     }
 
@@ -139,7 +145,10 @@ impl App {
                 f64::from(c.y - rect.min.y) * ppp,
             ));
         }
-        let crossing = Polygon::new(pts.clone()).is_clockwise();
+        let crossing = selection::lasso_crossing(
+            Polygon::new(pts.clone()).is_clockwise(),
+            self.prefs.more.lasso_clockwise_crossing,
+        );
         let mut line: Vec<egui::Pos2> = pts.iter().map(|p| to_pos(*p)).collect();
         if let Some(first) = line.first().copied() {
             line.push(first);

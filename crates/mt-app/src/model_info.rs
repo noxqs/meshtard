@@ -28,6 +28,7 @@ pub(crate) enum Page {
     Dimensions,
     File,
     GeoLocation,
+    Rendering,
     Statistics,
     Text,
     #[default]
@@ -35,13 +36,14 @@ pub(crate) enum Page {
 }
 
 impl Page {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Animation,
         Self::Components,
         Self::Credits,
         Self::Dimensions,
         Self::File,
         Self::GeoLocation,
+        Self::Rendering,
         Self::Statistics,
         Self::Text,
         Self::Units,
@@ -55,6 +57,7 @@ impl Page {
             Self::Dimensions => "Dimensions",
             Self::File => "File",
             Self::GeoLocation => "Geo-location",
+            Self::Rendering => "Rendering",
             Self::Statistics => "Statistics",
             Self::Text => "Text",
             Self::Units => "Units",
@@ -157,6 +160,13 @@ impl App {
         if self.model_info.is_none() {
             self.model_info = Some(ModelInfo::default());
         }
+    }
+
+    /// Opens Model Info on `page` (the status bar's geo-location pin).
+    pub(crate) fn open_model_info_at(&mut self, page: Page) {
+        let info = self.model_info.get_or_insert_with(ModelInfo::default);
+        info.page = page;
+        info.file = None;
     }
 
     pub(crate) fn model_info_ui(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
@@ -529,6 +539,14 @@ impl App {
             Page::Dimensions => self.dimensions_page(ui),
             Page::Text => self.text_page(ui),
             Page::GeoLocation => self.geo_page(ui, info),
+            Page::Rendering => {
+                // SketchUp's Rendering page (help: "Use Anti-Aliased Textures"); its
+                // other options are not built.
+                let r = &mut doc.model.rendering;
+                ui.checkbox(&mut r.antialiased_textures, "Use Anti-Aliased Textures")
+                    .on_hover_text("Smooth textures (on) or sharp texels (off)");
+                false
+            }
         }
     }
 }

@@ -47,6 +47,8 @@ items = [
   { id = "edit.paste_in_place", label = "Paste In Place" },
   { id = "edit.delete", label = "Delete" },
   { id = "edit.delete_guides", label = "Delete Guides" },
+  # SketchUp 2026 release notes: Purge Unused in the Edit menu, shortcut-bindable.
+  { id = "edit.purge_unused", label = "Purge Unused" },
   { separator = true },
   { id = "edit.select_all", label = "Select All" },
   { id = "edit.select_none", label = "Select None" },
@@ -120,6 +122,9 @@ items = [
   { id = "view.scene_tabs", label = "Scene Tabs" },
   { separator = true },
   { id = "view.hidden_geometry", label = "Hidden Geometry" },
+  # Separate from Hidden Geometry (help page "Softening, smoothing and hiding
+  # geometry"): hidden groups, components, section planes and annotations.
+  { id = "view.hidden_objects", label = "Hidden Objects" },
   { id = "view.section_planes", label = "Section Planes" },
   { id = "view.section_cuts", label = "Section Cuts" },
   { id = "view.section_fill", label = "Section Fill" },

@@ -69,6 +69,7 @@ pub(crate) const WARN_FIXED: &str = "problems_fixed";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
     Accessibility,
+    Applications,
     Compatibility,
     Drawing,
     Files,
@@ -80,9 +81,10 @@ enum Page {
 }
 
 impl Page {
-    /// In SketchUp's (alphabetical) order; Applications is not done.
-    const ALL: [(Page, &'static str); 9] = [
+    /// In SketchUp's (alphabetical) order.
+    const ALL: [(Page, &'static str); 10] = [
         (Page::Accessibility, "Accessibility"),
+        (Page::Applications, "Applications"),
         (Page::Compatibility, "Compatibility"),
         (Page::Drawing, "Drawing"),
         (Page::Files, "Files"),
@@ -669,7 +671,11 @@ impl App {
                     });
                     ui.separator();
                     ui.vertical(|ui| match d.page {
-                        Page::Drawing => drawing_page(ui, &mut drawing),
+                        Page::Drawing => {
+                            drawing_page(ui, &mut drawing);
+                            crate::prefs_pages::drawing_more(ui, &mut more);
+                        }
+                        Page::Applications => crate::prefs_pages::applications_page(ui, &mut more),
                         Page::General => general_page(ui, &mut general),
                         Page::Shortcuts => {
                             keymap_changed |= self.shortcuts_page(ui, &mut d);

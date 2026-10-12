@@ -195,8 +195,10 @@ impl App {
                     Ok(()) => {
                         // Not opened during GUI checks (the file-dialog test hook).
                         if std::env::var_os("MESHTARD_TEST_DIALOG").is_none()
-                            && let Err(e) =
-                                crate::presentation::open_with_system(&path.to_string_lossy())
+                            && let Err(e) = crate::graphics::open_image_editor(
+                                self.prefs.more.image_editor.as_deref(),
+                                &path,
+                            )
                         {
                             self.message = Some(format!("Could not open an image editor: {e}"));
                         } else {
