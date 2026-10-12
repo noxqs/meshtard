@@ -14,6 +14,9 @@ on:
       tag:
         description: "Release tag, e.g. v0.1.0"
         required: true
+      sha:
+        description: "Commit to build (optional; default: the branch head)"
+        required: false
 
 permissions:
   contents: write
@@ -38,6 +41,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p mt-app ${{ matrix.features }}
@@ -65,6 +70,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -73,9 +80,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          TARGET: ${{ inputs.sha || github.sha }}
         run: |
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
           pre=""
           case "$TAG" in v0.*|*-*) pre="--prerelease" ;; esac
-          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Meshtard ${TAG#v}" --notes-file "$notes" $pre
+          gh release create "$TAG" dist/* --target "$TARGET" --title "Meshtard ${TAG#v}" --notes-file "$notes" $pre
