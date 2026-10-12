@@ -10,18 +10,22 @@
 //! geometry outside an open group is kept as on screen. Dimension and text labels
 //! (painted over the view by the UI) are not in the image.
 //!
-//! 3D Model writes OBJ (+ MTL and texture images next to it), binary STL or COLLADA
-//! through [`mt_kernel::mesh_export`], glTF / GLB through [`mt_kernel::gltf_io`],
-//! and FBX, PLY, 3MF, VRML or KMZ through
-//! [`mt_kernel::formats`]; the options dialog picks the format and its options
-//! before the file dialog. Per-format option defaults (two-sided faces for COLLADA
-//! and KMZ, Y up for OBJ and VRML) are from memory, unverified.
+//! 3D Model writes OBJ (+ MTL and texture images next to it), binary or ASCII STL or
+//! COLLADA through [`mt_kernel::mesh_export`], glTF / GLB through
+//! [`mt_kernel::gltf_io`], and FBX, PLY (binary or ASCII, texture coordinates), 3MF,
+//! VRML, KMZ, 3DS or USDZ through [`mt_kernel::formats`]; the options dialog picks the
+//! format and its options before the file dialog. Per-format option defaults
+//! (two-sided faces for COLLADA and KMZ, Y up for OBJ, VRML and USDZ) are from memory,
+//! unverified. "Export only current selection" (every format, as in SketchUp's
+//! exporters) writes the selected entities of the open context, in model coordinates,
+//! instead of the whole model.
 
 use eframe::egui;
 use mt_kernel::formats::{self, ExportKind};
 use mt_kernel::mesh_export::{self, Units};
 
 use crate::App;
+use crate::document::Owner;
 
 /// Export 2D Graphic options.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +61,8 @@ pub(crate) enum Format3d {
 }
 
 impl Format3d {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 12] = [
+        Self::Other(ExportKind::ThreeDs),
         Self::Dae,
         Self::Other(ExportKind::Fbx),
         Self::Glb,
@@ -67,6 +72,7 @@ impl Format3d {
         Self::Other(ExportKind::Ply),
         Self::Stl,
         Self::Other(ExportKind::ThreeMf),
+        Self::Other(ExportKind::Usdz),
         Self::Other(ExportKind::Vrml),
     ];
 
@@ -87,6 +93,8 @@ impl Format3d {
             Self::Other(ExportKind::Ply) => "PLY File (*.ply)",
             Self::Other(ExportKind::ThreeMf) => "3MF File (*.3mf)",
             Self::Other(ExportKind::Vrml) => "VRML File (*.wrl)",
+            Self::Other(ExportKind::ThreeDs) => "3DS File (*.3ds)",
+            Self::Other(ExportKind::Usdz) => "USDZ File (*.usdz)",
         }
     }
 
@@ -120,22 +128,37 @@ impl Format3d {
     fn has_y_up(self) -> bool {
         matches!(
             self,
-            Self::Obj | Self::Other(ExportKind::Fbx | ExportKind::Vrml | ExportKind::Ply)
+            Self::Obj
+                | Self::Other(
+                    ExportKind::Fbx | ExportKind::Vrml | ExportKind::Ply | ExportKind::Usdz
+                )
         )
     }
 
     fn has_textures(self) -> bool {
         matches!(
             self,
-            Self::Other(ExportKind::Fbx | ExportKind::Vrml | ExportKind::ThreeMf)
+            Self::Other(
+                ExportKind::Fbx
+                    | ExportKind::Vrml
+                    | ExportKind::ThreeMf
+                    | ExportKind::Ply
+                    | ExportKind::ThreeDs
+                    | ExportKind::Usdz
+            )
         )
+    }
+
+    /// STL and PLY are binary or ASCII.
+    fn has_ascii(self) -> bool {
+        matches!(self, Self::Stl | Self::Other(ExportKind::Ply))
     }
 
     /// The options a format starts with when picked: two-sided faces and Y up.
     fn defaults(self) -> (bool, bool) {
         match self {
             Self::Dae | Self::Other(ExportKind::Kmz) => (true, false),
-            Self::Obj | Self::Other(ExportKind::Vrml) => (false, true),
+            Self::Obj | Self::Other(ExportKind::Vrml | ExportKind::Usdz) => (false, true),
             _ => (false, false),
         }
     }
@@ -149,8 +172,12 @@ pub(crate) struct Export3d {
     pub units: Option<Units>,
     pub two_sided: bool,
     pub y_up: bool,
-    /// Write texture images and coordinates (FBX, VRML, 3MF).
+    /// Write texture images and coordinates (FBX, VRML, 3MF, PLY, 3DS, USDZ).
     pub textures: bool,
+    /// STL and PLY: ASCII instead of binary.
+    pub ascii: bool,
+    /// Export only the selection of the open context.
+    pub selection_only: bool,
 }
 
 impl Default for Export3d {
@@ -164,6 +191,8 @@ impl Default for Export3d {
             two_sided: true,
             y_up: true,
             textures: true,
+            ascii: false,
+            selection_only: false,
         }
     }
 }
@@ -263,6 +292,11 @@ pub(crate) fn export_3d(
             others.extend(files.textures.iter().map(|(n, d)| (n.clone(), &d[..])));
             write_files(path, files.obj.as_bytes(), &others)
         }
+        Format3d::Stl if opts.ascii => write_files(
+            path,
+            mesh_export::to_stl_ascii(model, units, &base).as_bytes(),
+            &[],
+        ),
         Format3d::Stl => write_files(path, &mesh_export::to_stl(model, units), &[]),
         Format3d::Dae => {
             let files = mesh_export::to_dae(
@@ -299,6 +333,7 @@ pub(crate) fn export_3d(
                     y_up: opts.y_up,
                     textures: opts.textures,
                     base_name: base,
+                    ascii: opts.ascii,
                 },
             )?;
             let others: Vec<(String, &[u8])> = files
@@ -308,6 +343,36 @@ pub(crate) fn export_3d(
                 .collect();
             write_files(path, &files.main, &others)
         }
+    }
+}
+
+/// "Export only current selection": the model with only the selected entities of the
+/// open context (`active`, placed by `xf`) at its root.
+pub(crate) fn selection_model(
+    model: &mt_kernel::Model,
+    active: &mt_kernel::Entities,
+    items: &[Owner],
+    xf: glam::DMat4,
+) -> mt_kernel::Model {
+    let sel = crate::kernel_selection(items);
+    let pick = |f: fn(&Owner) -> Option<usize>| items.iter().filter_map(f).collect::<Vec<_>>();
+    let dims = pick(|o| match o {
+        Owner::Dimension(i) => Some(*i),
+        _ => None,
+    });
+    let texts = pick(|o| match o {
+        Owner::Text(i) => Some(*i),
+        _ => None,
+    });
+    let root = mt_kernel::clipboard::copy(active, &sel, &dims, &texts, xf);
+    mt_kernel::Model {
+        root,
+        definitions: model.definitions.clone(),
+        materials: model.materials.clone(),
+        layers: model.layers.clone(),
+        front_color: model.front_color,
+        back_color: model.back_color,
+        ..Default::default()
     }
 }
 
@@ -476,6 +541,7 @@ impl App {
             .document
             .as_ref()
             .map_or(Units::Inches, |doc| kernel_units(doc.units));
+        let has_selection = !self.selection.items().is_empty();
         let r = mt_ui::Dialog::new("export_3d", "Export 3D Model")
             .width(320.0)
             .show(ctx, |ui| {
@@ -513,6 +579,17 @@ impl App {
                         }
                     });
                 ui.add_space(8.0);
+                ui.add_enabled(
+                    has_selection,
+                    egui::Checkbox::new(&mut d.selection_only, "Export only current selection"),
+                );
+                if d.format.has_ascii() {
+                    ui.horizontal(|ui| {
+                        ui.label("File format:");
+                        ui.radio_value(&mut d.ascii, false, "Binary");
+                        ui.radio_value(&mut d.ascii, true, "ASCII");
+                    });
+                }
                 if d.format == Format3d::Other(ExportKind::Vrml) {
                     // SketchUp's VRML wording: the inverse of two-sided faces.
                     let mut ignore = !d.two_sided;
@@ -550,7 +627,19 @@ impl App {
                     return;
                 };
                 let Some(doc) = &self.document else { return };
-                self.message = Some(match export_3d(&doc.model, &d, model_units, &path) {
+                let part;
+                let model = if d.selection_only && has_selection {
+                    part = selection_model(
+                        &doc.model,
+                        doc.active(),
+                        self.selection.items(),
+                        self.ctx_xf,
+                    );
+                    &part
+                } else {
+                    &doc.model
+                };
+                self.message = Some(match export_3d(model, &d, model_units, &path) {
                     Ok(()) => format!("Exported {}.", path.display()),
                     Err(e) => format!("Could not export {}: {e}", path.display()),
                 });
@@ -611,6 +700,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::metadata(&stl).unwrap().len(), 84 + 2 * 50);
+        export_3d(
+            &m,
+            &Export3d {
+                format: Format3d::Stl,
+                ascii: true,
+                ..opts.clone()
+            },
+            Units::Millimeters,
+            &stl,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&stl).unwrap();
+        assert!(text.starts_with("solid square"));
+        assert_eq!(text.matches("facet normal").count(), 2);
         // The other formats write files the importers read back.
         for kind in ExportKind::ALL {
             let path = dir.join(format!("square.{}", kind.extension()));
@@ -630,7 +733,8 @@ mod tests {
                 ExportKind::Fbx => Some(formats::Kind::Fbx),
                 ExportKind::Ply => Some(formats::Kind::Ply),
                 ExportKind::ThreeMf => Some(formats::Kind::ThreeMf),
-                ExportKind::Vrml | ExportKind::Kmz => None,
+                ExportKind::ThreeDs => Some(formats::Kind::ThreeDs),
+                ExportKind::Vrml | ExportKind::Kmz | ExportKind::Usdz => None,
             };
             match back {
                 Some(k) => {
@@ -641,5 +745,37 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn selection_model_keeps_only_the_selection() {
+        let mut m = mt_kernel::Model::default();
+        for x0 in [0.0, 10.0] {
+            let c = [(0., 0.), (1., 0.), (1., 1.), (0., 1.)]
+                .map(|(x, y)| glam::DVec3::new(x0 + x, y, 0.0));
+            for i in 0..4 {
+                mt_kernel::add_line(&mut m.root, c[i], c[(i + 1) % 4]);
+            }
+        }
+        assert_eq!(m.root.faces.len(), 2);
+        let far = m
+            .root
+            .faces
+            .iter()
+            .find(|(_, f)| m.root.loop_points(&f.outer)[0].x > 5.0)
+            .map(|(id, _)| id)
+            .unwrap();
+        let xf = glam::DMat4::from_translation(glam::DVec3::Z);
+        let part = selection_model(&m, &m.root, &[Owner::Face(far)], xf);
+        assert_eq!(part.root.faces.len(), 1);
+        assert_eq!(part.root.edges.len(), 4);
+        // In model coordinates (the open context's transform applied).
+        assert!(
+            part.root
+                .vertices
+                .values()
+                .all(|v| v.pos.x > 5.0 && v.pos.z == 1.0)
+        );
+        assert_eq!(mt_kernel::mesh_export::triangles(&part).len(), 2);
     }
 }

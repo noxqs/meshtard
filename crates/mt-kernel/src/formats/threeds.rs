@@ -1,5 +1,6 @@
-//! 3DS (3D Studio) import, from the public chunk descriptions of the format (Jeff
-//! Lewis's "3D Studio File Format" notes and the `lib3ds` chunk list).
+//! 3DS (3D Studio) import and export ([`to_3ds`]), from the public chunk descriptions
+//! of the format (Jeff Lewis's "3D Studio File Format" notes and the `lib3ds` chunk
+//! list).
 //!
 //! - Chunks: little-endian id (u16) and length (u32, header included). Meshes are
 //!   `0x4000` named objects holding a `0x4100` triangle mesh: `0x4110` vertices,
@@ -276,6 +277,162 @@ pub fn parse(bytes: &[u8], read: ReadFile) -> Result<(Mesh, Hints), String> {
     ))
 }
 
+/// A chunk: id, length (header included) and contents.
+fn put_chunk(id: u16, body: &[u8]) -> Vec<u8> {
+    let mut out = id.to_le_bytes().to_vec();
+    out.extend_from_slice(&((body.len() + 6) as u32).to_le_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+fn put_cstr(out: &mut Vec<u8>, s: &str) {
+    out.extend(s.bytes().filter(|&b| b != 0));
+    out.push(0);
+}
+
+/// A name of at most `max` bytes (ASCII, no spaces) not in `taken`.
+fn short_name(name: &str, max: usize, taken: &mut Vec<String>) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let clean = if clean.is_empty() {
+        "Mat".into()
+    } else {
+        clean
+    };
+    let mut n = 1;
+    let mut out: String = clean.chars().take(max).collect();
+    while taken.contains(&out) {
+        n += 1;
+        let suffix = n.to_string();
+        out = clean.chars().take(max - suffix.len()).collect::<String>() + &suffix;
+    }
+    taken.push(out.clone());
+    out
+}
+
+/// Most vertices (and faces) one 3DS object holds (16-bit counts).
+const MAX_VERTICES: usize = 65_535;
+
+/// Encodes the model as 3DS (File > Export > 3D Model): Z up in `opts.units`, one
+/// object per material (split at 65,535 vertices or faces), materials with their
+/// diffuse color, transparency and texture map (images written next to the file,
+/// with `opts.textures`). Names are cut to 3DS's limits (objects 10 characters,
+/// materials 16). Groups and components are flattened; edges, cameras and the
+/// keyframer section are not written.
+pub fn to_3ds(model: &crate::Model, opts: &super::ExportOptions) -> super::Files {
+    let opts = super::ExportOptions {
+        y_up: false,
+        ..opts.clone()
+    };
+    let (mats, groups) = super::groups(model, &opts);
+    let mut taken = Vec::new();
+    let names: Vec<String> = mats
+        .iter()
+        .map(|m| short_name(&m.name, 16, &mut taken))
+        .collect();
+    let mut edit = put_chunk(0x3D3E, &3u32.to_le_bytes());
+    edit.extend(put_chunk(0x0100, &1.0f32.to_le_bytes()));
+    for (m, name) in mats.iter().zip(&names) {
+        let mut body = Vec::new();
+        let mut n = Vec::new();
+        put_cstr(&mut n, name);
+        body.extend(put_chunk(0xA000, &n));
+        let rgb = put_chunk(0x0011, &m.color);
+        body.extend(put_chunk(0xA010, &rgb));
+        body.extend(put_chunk(0xA020, &rgb));
+        body.extend(put_chunk(0xA030, &put_chunk(0x0011, &[0, 0, 0])));
+        let transparency = ((1.0 - m.opacity.clamp(0.0, 1.0)) * 100.0).round() as u16;
+        body.extend(put_chunk(
+            0xA050,
+            &put_chunk(0x0030, &transparency.to_le_bytes()),
+        ));
+        if let Some((file, _)) = &m.texture {
+            let mut map = put_chunk(0x0030, &100u16.to_le_bytes());
+            let mut f = Vec::new();
+            put_cstr(&mut f, file);
+            map.extend(put_chunk(0xA300, &f));
+            body.extend(put_chunk(0xA200, &map));
+        }
+        edit.extend(put_chunk(0xAFFF, &body));
+    }
+    let mut objects = 0;
+    for (slot, g) in groups.iter().enumerate() {
+        let textured = mats[slot].texture.is_some();
+        let mut tris = g.triangles.iter().peekable();
+        while tris.peek().is_some() {
+            // One object: corners welded on position and texture coordinate.
+            let mut index: std::collections::HashMap<(usize, usize), u16> = Default::default();
+            let mut verts: Vec<(usize, usize)> = Vec::new();
+            let mut faces: Vec<[u16; 3]> = Vec::new();
+            while let Some(t) = tris.peek() {
+                let new = t.iter().filter(|c| !index.contains_key(c)).count();
+                if verts.len() + new > MAX_VERTICES || faces.len() >= MAX_VERTICES {
+                    break;
+                }
+                let t = tris.next().expect("peeked");
+                faces.push(t.map(|c| {
+                    let key = if textured { c } else { (c.0, 0) };
+                    *index.entry(key).or_insert_with(|| {
+                        verts.push(key);
+                        (verts.len() - 1) as u16
+                    })
+                }));
+            }
+            objects += 1;
+            let mut v = (verts.len() as u16).to_le_bytes().to_vec();
+            for &(p, _) in &verts {
+                for x in g.positions[p].to_array() {
+                    v.extend_from_slice(&(x as f32).to_le_bytes());
+                }
+            }
+            let mut mesh = put_chunk(0x4110, &v);
+            if textured {
+                let mut uv = (verts.len() as u16).to_le_bytes().to_vec();
+                for &(_, t) in &verts {
+                    for x in g.uvs[t].to_array() {
+                        uv.extend_from_slice(&(x as f32).to_le_bytes());
+                    }
+                }
+                mesh.extend(put_chunk(0x4140, &uv));
+            }
+            let mut f = (faces.len() as u16).to_le_bytes().to_vec();
+            for t in &faces {
+                for i in t {
+                    f.extend_from_slice(&i.to_le_bytes());
+                }
+                // Edges a-b, b-c and c-a visible.
+                f.extend_from_slice(&7u16.to_le_bytes());
+            }
+            let mut list = Vec::new();
+            put_cstr(&mut list, &names[slot]);
+            list.extend_from_slice(&(faces.len() as u16).to_le_bytes());
+            for i in 0..faces.len() as u16 {
+                list.extend_from_slice(&i.to_le_bytes());
+            }
+            f.extend(put_chunk(0x4130, &list));
+            mesh.extend(put_chunk(0x4120, &f));
+            let mut obj = Vec::new();
+            put_cstr(&mut obj, &format!("Mesh{objects}"));
+            obj.extend(put_chunk(0x4100, &mesh));
+            edit.extend(put_chunk(0x4000, &obj));
+        }
+    }
+    let mut main = put_chunk(0x0002, &3u32.to_le_bytes());
+    main.extend(put_chunk(0x3D3D, &edit));
+    super::Files {
+        main: put_chunk(0x4D4D, &main),
+        others: super::texture_files(&mats),
+    }
+}
+
 /// A texture file, also tried in lower and upper case (3DS stores DOS 8.3 names).
 fn texture(name: &str, read: ReadFile) -> Option<MeshTexture> {
     [name.to_owned(), name.to_lowercase(), name.to_uppercase()]
@@ -334,5 +491,41 @@ mod tests {
         assert!((mesh.materials[0].opacity - 0.75).abs() < 1e-9);
         assert_eq!(mesh.polygons[0].material, Some(0));
         assert!(parse(b"garbage", &none).is_err());
+    }
+
+    #[test]
+    fn export_reads_back() {
+        let mut m = crate::formats::tests::painted_cube();
+        m.materials[0].name = "A very long material name".into();
+        let files = to_3ds(
+            &m,
+            &crate::formats::ExportOptions {
+                units: crate::mesh_export::Units::Millimeters,
+                ..Default::default()
+            },
+        );
+        let none = |_: &str| None;
+        let (mesh, _) = parse(&files.main, &none).unwrap();
+        assert_eq!(mesh.polygons.len(), 12);
+        let red = mesh
+            .materials
+            .iter()
+            .position(|x| x.color == [255, 0, 0])
+            .unwrap();
+        assert_eq!(mesh.materials[red].name, "A_very_long_mate");
+        assert_eq!(
+            mesh.polygons
+                .iter()
+                .filter(|p| p.material == Some(red))
+                .count(),
+            2
+        );
+        let (faces, verts, max) = crate::formats::tests::summary(&mesh, 1.0 / 25.4, false);
+        assert_eq!((faces, verts), (6, 8));
+        assert!((max - DVec3::splat(10.0)).length() < 1e-3);
+        let mut taken = vec!["Mat".to_owned()];
+        assert_eq!(short_name("Mat", 16, &mut taken), "Mat2");
+        assert_eq!(short_name("ab cd", 3, &mut taken), "ab_");
+        assert_eq!(short_name("ab cd", 3, &mut taken), "ab2");
     }
 }

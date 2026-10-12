@@ -1,6 +1,6 @@
 //! Other 3D exchange formats, next to OBJ/STL/COLLADA ([`crate::mesh_import`],
 //! [`crate::mesh_export`]): FBX (import and export), PLY (import and export), 3MF
-//! (import and export), 3DS (import), KMZ and VRML 2.0 (export). See
+//! (import and export), 3DS (import and export), KMZ, VRML 2.0 and USDZ (export). See
 //! `spec/parity/FORMATS.md` for what SketchUp supports and the sources followed.
 //!
 //! - Importers read a file into a [`Mesh`] (file units, the file's axes unless a
@@ -26,8 +26,10 @@ pub mod fbx_export;
 pub mod kmz;
 pub mod obj;
 pub mod ply;
+pub mod scene;
 pub mod threeds;
 pub mod threemf;
+pub mod usdz;
 pub mod vrml;
 mod xml;
 
@@ -138,6 +140,29 @@ pub fn read_mesh(
     }
 }
 
+/// Reads a mesh file with its node hierarchy when the format has one (FBX); other
+/// formats give a scene without nodes (one flat mesh). See [`scene`].
+pub fn read_scene(
+    kind: Kind,
+    bytes: &[u8],
+    read: ReadFile,
+    colors: bool,
+) -> Result<(scene::Scene, Hints), String> {
+    match kind {
+        Kind::Fbx => fbx::parse_scene(bytes, read),
+        _ => {
+            let (mesh, hints) = read_mesh(kind, bytes, read, colors)?;
+            Ok((
+                scene::Scene {
+                    mesh,
+                    nodes: Vec::new(),
+                },
+                hints,
+            ))
+        }
+    }
+}
+
 /// Reads a file named inside a model (relative to the model's folder, or absolute):
 /// its bytes, or `None` when it cannot be read.
 pub type ReadFile<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
@@ -243,6 +268,8 @@ pub struct ExportOptions {
     pub textures: bool,
     /// File stem of the main file: prefixes texture file names.
     pub base_name: String,
+    /// PLY: ASCII instead of binary.
+    pub ascii: bool,
 }
 
 impl Default for ExportOptions {
@@ -253,6 +280,7 @@ impl Default for ExportOptions {
             y_up: false,
             textures: true,
             base_name: "model".into(),
+            ascii: false,
         }
     }
 }
@@ -272,10 +300,20 @@ pub enum ExportKind {
     ThreeMf,
     Vrml,
     Kmz,
+    ThreeDs,
+    Usdz,
 }
 
 impl ExportKind {
-    pub const ALL: [ExportKind; 5] = [Self::Fbx, Self::Ply, Self::ThreeMf, Self::Vrml, Self::Kmz];
+    pub const ALL: [ExportKind; 7] = [
+        Self::Fbx,
+        Self::Ply,
+        Self::ThreeMf,
+        Self::Vrml,
+        Self::Kmz,
+        Self::ThreeDs,
+        Self::Usdz,
+    ];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -284,26 +322,25 @@ impl ExportKind {
             Self::ThreeMf => "3mf",
             Self::Vrml => "wrl",
             Self::Kmz => "kmz",
+            Self::ThreeDs => "3ds",
+            Self::Usdz => "usdz",
         }
     }
 }
 
-/// Encodes the model as `kind` (PLY: binary with vertex colors; KMZ: COLLADA inside,
-/// in inches whatever `opts.units`).
+/// Encodes the model as `kind` (PLY: binary or ASCII with vertex colors; KMZ:
+/// COLLADA inside, in inches whatever `opts.units`).
 pub fn export(kind: ExportKind, model: &Model, opts: &ExportOptions) -> Result<Files, String> {
     Ok(match kind {
         ExportKind::Fbx => fbx_export::to_fbx(model, opts),
-        ExportKind::Ply => Files {
-            main: ply::to_ply(
-                model,
-                &ply::PlyOptions {
-                    common: opts.clone(),
-                    ascii: false,
-                    colors: true,
-                },
-            ),
-            others: Vec::new(),
-        },
+        ExportKind::Ply => ply::to_ply(
+            model,
+            &ply::PlyOptions {
+                common: opts.clone(),
+                ascii: opts.ascii,
+                colors: true,
+            },
+        ),
         ExportKind::ThreeMf => Files {
             main: threemf::to_3mf(model, opts)?,
             others: Vec::new(),
@@ -313,6 +350,8 @@ pub fn export(kind: ExportKind, model: &Model, opts: &ExportOptions) -> Result<F
             main: kmz::to_kmz(model, &opts.base_name, opts.two_sided)?,
             others: Vec::new(),
         },
+        ExportKind::ThreeDs => threeds::to_3ds(model, opts),
+        ExportKind::Usdz => usdz::to_usdz(model, opts)?,
     })
 }
 

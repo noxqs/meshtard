@@ -3,8 +3,9 @@
 //!
 //! Each FILE (OBJ, STL, FBX, PLY, 3MF, 3DS) is imported in its units (as the import
 //! dialog defaults them) with coplanar
-//! faces merged; the result is exported as OBJ, STL, COLLADA, FBX, PLY, 3MF, VRML and
-//! KMZ into `OUT_DIR/<stem>/`, and the readable exports are imported again. Faces,
+//! faces merged; the result is exported as OBJ, STL, COLLADA, FBX, PLY, 3MF, VRML,
+//! KMZ, 3DS and USDZ into `OUT_DIR/<stem>/`, and the readable exports are imported
+//! again. Faces,
 //! vertices, materials and the bounding box are printed for each step; a re-import
 //! whose area, bounding box, material or texture count differs is marked `DIFF`
 //! (merged face counts may differ: triangles of slightly non-planar polygons do not
@@ -244,7 +245,7 @@ fn main() {
             );
             if matches!(
                 kind,
-                ExportKind::Fbx | ExportKind::Ply | ExportKind::ThreeMf
+                ExportKind::Fbx | ExportKind::Ply | ExportKind::ThreeMf | ExportKind::ThreeDs
             ) {
                 back.push((kind.extension(), p));
             }

@@ -1,5 +1,5 @@
 //! File > Export > 3D Model: Wavefront OBJ (with an MTL file and texture images),
-//! binary STL and COLLADA (.dae). Pure functions returning file contents; the app
+//! binary or ASCII STL and COLLADA (.dae). Pure functions returning file contents; the app
 //! writes them.
 //!
 //! - Geometry is flattened: groups and components are expanded with their transforms
@@ -478,6 +478,34 @@ pub fn to_stl(model: &Model, units: Units) -> Vec<u8> {
     out
 }
 
+/// Encodes the model as ASCII STL in `units`: one `solid` named `name` (spaces made
+/// underscores), facets as in [`to_stl`].
+pub fn to_stl_ascii(model: &Model, units: Units, name: &str) -> String {
+    let tris = triangles(model);
+    let scale = units.per_inch();
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect();
+    let name = if name.is_empty() {
+        "model".into()
+    } else {
+        name
+    };
+    let v = |p: DVec3| format!("{:e} {:e} {:e}", p.x as f32, p.y as f32, p.z as f32);
+    let mut out = format!("solid {name}\n");
+    for t in &tris {
+        let _ = writeln!(out, "  facet normal {}", v(t.normal));
+        out.push_str("    outer loop\n");
+        for p in t.points {
+            let _ = writeln!(out, "      vertex {}", v(p * scale));
+        }
+        out.push_str("    endloop\n  endfacet\n");
+    }
+    let _ = writeln!(out, "endsolid {name}");
+    out
+}
+
 /// COLLADA export choices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DaeOptions {
@@ -689,6 +717,22 @@ pub(crate) mod tests {
             .flat_map(|t| (0..9).map(move |k| 84 + t * 50 + 12 + k * 4))
             .map(|o| f32::from_le_bytes(stl[o..o + 4].try_into().unwrap()))
             .fold(0.0f32, f32::max);
+        assert!((max - 254.0).abs() < 1e-3, "{max}");
+    }
+
+    #[test]
+    fn ascii_stl_reads_back() {
+        let m = cube_model();
+        let text = to_stl_ascii(&m, Units::Millimeters, "my cube");
+        assert!(text.starts_with("solid my_cube\n"));
+        assert!(text.trim_end().ends_with("endsolid my_cube"));
+        let back = crate::mesh_import::parse_stl(text.as_bytes()).unwrap();
+        assert_eq!(back.polygons.len(), 12);
+        let max = back
+            .positions
+            .iter()
+            .map(|p| p.max_element())
+            .fold(0.0, f64::max);
         assert!((max - 254.0).abs() < 1e-3, "{max}");
     }
 

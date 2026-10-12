@@ -1,26 +1,49 @@
 //! File > Import of AutoCAD DXF drawings (ASCII and binary, R12 and later).
 //!
-//! - Entities read from the ENTITIES section: LINE, LWPOLYLINE and POLYLINE (2D with
-//!   bulges, 3D polylines, polygon meshes and polyface meshes), ARC, CIRCLE and
-//!   3DFACE. Arcs, circles and bulged polyline segments become arc curves (circles 24
-//!   segments, arcs in proportion, at least 2; SketchUp's own counts are unverified).
-//!   Object coordinate systems (extrusion directions) are honored.
+//! - Entities read from the ENTITIES section and from blocks: LINE, LWPOLYLINE and
+//!   POLYLINE (2D with bulges, 3D polylines, polygon meshes and polyface meshes), ARC,
+//!   CIRCLE, ELLIPSE, SPLINE, 3DFACE, SOLID / TRACE, HATCH, INSERT, TEXT, MTEXT,
+//!   ATTRIB and DIMENSION. Arcs, circles and bulged polyline segments become arc
+//!   curves (circles 24 segments, arcs in proportion, at least 2; SketchUp's own
+//!   counts are unverified); ellipses and splines become curves (ellipses 24 segments
+//!   per turn; splines evaluated from their control points and knots, 8 segments per
+//!   knot span, else through their fit points). Object coordinate systems (extrusion
+//!   directions) are honored.
 //! - Edges are drawn with the kernel's [`crate::add_line`] / [`crate::add_curve`], so
-//!   closed planar loops get faces as when drawing; 3DFACE and mesh faces add their
-//!   outlines the same way (a non-planar quad is split along a diagonal). Invisible
-//!   edges of 3DFACEs and polyface meshes are hidden.
+//!   closed planar loops get faces as when drawing; 3DFACE, SOLID and mesh faces add
+//!   their outlines the same way (a non-planar quad is split along a diagonal).
+//!   Invisible edges of 3DFACEs and polyface meshes are hidden.
+//! - HATCH boundaries (polyline paths and line / arc / elliptic arc / spline edges)
+//!   are drawn first and become faces; faces inside an even number of boundary loops
+//!   (islands' holes) are removed again. Hatch patterns are not drawn.
+//! - Blocks become component definitions (named after the block, only those used),
+//!   INSERTs component instances (scale, rotation, extrusion and column / row arrays;
+//!   one instance per array cell). Nested blocks nest; a block that contains itself
+//!   is left out where it repeats.
+//! - TEXT, MTEXT and visible ATTRIBs become texts at their insertion point with no
+//!   leader (MTEXT formatting codes removed, `%%d` / `%%c` / `%%p` turned into
+//!   symbols); their height, font and rotation are not kept (model texts are screen
+//!   sized).
+//! - DIMENSIONs the model can hold become dimensions: aligned ones, rotated ones
+//!   measured along their own points, radius and diameter, with a text override when
+//!   the drawing has one (`<>` keeps the measured value). Others (angular, ordinate,
+//!   rotated ones measured along another direction) are drawn as the lines and texts
+//!   of their dimension block.
 //! - Layers become groups, one per layer named after it (SketchUp 2026's importer,
-//!   release notes), or tags of one drawing.
+//!   release notes), or tags of one drawing. Inside blocks, entities on layer 0 take
+//!   no tag (they show with the instance's).
 //! - Units: from the header's `$INSUNITS` or as chosen.
-//! - Not read: blocks and INSERTs, text, dimensions, hatches, splines, ellipses,
-//!   solids and ACIS bodies, paper space. DWG is a closed format and not read.
+//! - Not read: solids and ACIS bodies, regions, images, leaders, tables, points,
+//!   hatch patterns, paper space and external references. DWG is a closed format and
+//!   not read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::TAU;
 
-use glam::{DMat4, DVec2, DVec3};
+use glam::{DMat4, DVec2, DVec3, DVec4};
 
-use crate::entities::{Arc, EdgeId, Entities, Instance, LayerId};
+use crate::annotation::{Dimension, DimensionKind};
+use crate::entities::{Arc, DefinitionId, EdgeId, Entities, FaceId, Instance, LayerId};
 use crate::model::{Definition, Layer, Model};
 
 /// One group code and its value as read (`text`; `num` when it is a number).
@@ -58,7 +81,8 @@ impl Default for DxfOptions {
     }
 }
 
-/// A shape read from the drawing, in drawing units and world coordinates.
+/// A shape read from the drawing, in drawing units and the coordinates of the block
+/// (or the drawing) holding it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     /// A straight segment; `hidden` for invisible 3DFACE / mesh edges.
@@ -71,6 +95,34 @@ pub enum Shape {
         corners: Vec<DVec3>,
         hidden: Vec<bool>,
     },
+    /// A polyline drawn as one curve (ellipses, splines); a closed one repeats its
+    /// first point.
+    Curve(Vec<DVec3>),
+    /// A filled area (HATCH): boundary loops in the plane with normal `normal`; by
+    /// the even-odd rule, loops inside loops are holes.
+    Region {
+        loops: Vec<Vec<DVec3>>,
+        normal: DVec3,
+    },
+    /// A block reference: `transform` places the block's coordinates (relative to
+    /// its base point) in the parent's.
+    Insert { block: String, transform: DMat4 },
+    /// A text at a point.
+    Text { point: DVec3, text: String },
+    /// A dimension the model can hold.
+    Dimension(Dimension),
+    /// A dimension the model cannot hold: the block with its drawn lines and texts,
+    /// drawn in place.
+    Exploded(String),
+}
+
+/// A block definition.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Block {
+    /// Base point (block coordinates placed at an INSERT's insertion point).
+    pub base: DVec3,
+    /// Shapes with the index of their layer.
+    pub shapes: Vec<(usize, Shape)>,
 }
 
 /// A parsed drawing.
@@ -78,8 +130,10 @@ pub enum Shape {
 pub struct Drawing {
     /// Layer names in table order, then layers only entities name.
     pub layers: Vec<DxfLayer>,
-    /// Shapes with the index of their layer.
+    /// Model space shapes with the index of their layer.
     pub shapes: Vec<(usize, Shape)>,
+    /// Blocks by name (external references left out).
+    pub blocks: BTreeMap<String, Block>,
     /// `$INSUNITS` as inches per unit, when the header has a known unit.
     pub inches_per_unit: Option<f64>,
 }
@@ -264,8 +318,41 @@ impl Ent<'_> {
             .map_or("", |g| g.text.as_str())
     }
 
+    fn has(&self, code: i32) -> bool {
+        self.groups.iter().any(|g| g.code == code)
+    }
+
     fn point(&self, code: i32) -> DVec3 {
         DVec3::new(self.f(code), self.f(code + 10), self.f(code + 20))
+    }
+
+    /// Every point of codes `code`, `code + 10`, `code + 20`, in order (a new point
+    /// starts at each `code` group).
+    fn points(&self, code: i32) -> Vec<DVec3> {
+        let mut out: Vec<DVec3> = Vec::new();
+        for g in self.groups {
+            if g.code == code {
+                out.push(DVec3::new(g.num, 0.0, 0.0));
+            } else if g.code == code + 10 {
+                if let Some(p) = out.last_mut() {
+                    p.y = g.num;
+                }
+            } else if g.code == code + 20
+                && let Some(p) = out.last_mut()
+            {
+                p.z = g.num;
+            }
+        }
+        out
+    }
+
+    /// Every value of `code`, in order.
+    fn all(&self, code: i32) -> Vec<f64> {
+        self.groups
+            .iter()
+            .filter(|g| g.code == code)
+            .map(|g| g.num)
+            .collect()
     }
 
     /// The extrusion direction (OCS normal).
@@ -276,6 +363,11 @@ impl Ent<'_> {
             self.num(230).unwrap_or(1.0),
         );
         n.try_normalize().unwrap_or(DVec3::Z)
+    }
+
+    /// Object coordinates to world coordinates.
+    fn ocs(&self) -> DMat4 {
+        ocs_matrix(self.extrusion())
     }
 }
 
@@ -288,6 +380,11 @@ fn ocs_axes(n: DVec3) -> (DVec3, DVec3) {
     }
     .normalize();
     (ax, n.cross(ax))
+}
+
+fn ocs_matrix(n: DVec3) -> DMat4 {
+    let (ax, ay) = ocs_axes(n);
+    DMat4::from_cols(ax.extend(0.0), ay.extend(0.0), n.extend(0.0), DVec4::W)
 }
 
 fn arc_segments(sweep: f64) -> usize {
@@ -318,10 +415,7 @@ fn polyline_2d(pts: &[(DVec2, f64)], closed: bool, elevation: f64, n: DVec3) -> 
             });
             continue;
         }
-        let c = p2 - p1;
-        let center = (p1 + p2) / 2.0 + c.perp() * ((1.0 - bulge * bulge) / (4.0 * bulge));
-        let sweep = 4.0 * bulge.atan();
-        let start = (p1 - center).y.atan2((p1 - center).x);
+        let (center, start, sweep) = bulge_arc(p1, p2, bulge);
         out.push(Shape::Arc(Arc {
             center: world(center),
             normal: n,
@@ -335,22 +429,459 @@ fn polyline_2d(pts: &[(DVec2, f64)], closed: bool, elevation: f64, n: DVec3) -> 
     out
 }
 
+/// The arc of a bulged segment: center, start angle and signed sweep.
+fn bulge_arc(p1: DVec2, p2: DVec2, bulge: f64) -> (DVec2, f64, f64) {
+    let c = p2 - p1;
+    let center = (p1 + p2) / 2.0 + c.perp() * ((1.0 - bulge * bulge) / (4.0 * bulge));
+    let sweep = 4.0 * bulge.atan();
+    let start = (p1 - center).y.atan2((p1 - center).x);
+    (center, start, sweep)
+}
+
+/// Points along a bulged segment from `p1` to `p2` (both included).
+fn bulge_points(p1: DVec2, p2: DVec2, bulge: f64) -> Vec<DVec2> {
+    if bulge.abs() < 1e-9 || p1.distance(p2) < 1e-12 {
+        return vec![p1, p2];
+    }
+    let (center, start, sweep) = bulge_arc(p1, p2, bulge);
+    let r = p1.distance(center);
+    let n = arc_segments(sweep);
+    let mut out: Vec<DVec2> = (0..n)
+        .map(|i| {
+            let a = start + sweep * i as f64 / n as f64;
+            center + DVec2::new(a.cos(), a.sin()) * r
+        })
+        .collect();
+    out.push(p2);
+    out
+}
+
+/// Points of an elliptical arc: `center`, major axis vector, minor axis vector, from
+/// parameter `t0` to `t1` (radians, `t1 > t0`), 24 segments per turn.
+fn ellipse_points(center: DVec3, major: DVec3, minor: DVec3, t0: f64, t1: f64) -> Vec<DVec3> {
+    let n = arc_segments(t1 - t0);
+    (0..=n)
+        .map(|i| {
+            let t = t0 + (t1 - t0) * i as f64 / n as f64;
+            center + major * t.cos() + minor * t.sin()
+        })
+        .collect()
+}
+
+/// A point of a NURBS curve of degree `p` at parameter `t` (de Boor).
+fn nurbs_point(p: usize, knots: &[f64], ctrl: &[DVec3], weights: &[f64], t: f64) -> DVec3 {
+    let n = ctrl.len();
+    let mut k = p;
+    while k + 1 < n && knots[k + 1] <= t {
+        k += 1;
+    }
+    let mut d: Vec<DVec4> = (0..=p)
+        .map(|j| {
+            let i = k - p + j;
+            let w = weights.get(i).copied().filter(|w| *w > 0.0).unwrap_or(1.0);
+            (ctrl[i] * w).extend(w)
+        })
+        .collect();
+    for r in 1..=p {
+        for j in (r..=p).rev() {
+            let i = k - p + j;
+            let den = knots[i + p + 1 - r] - knots[i];
+            let a = if den.abs() < 1e-15 {
+                0.0
+            } else {
+                (t - knots[i]) / den
+            };
+            d[j] = d[j - 1] * (1.0 - a) + d[j] * a;
+        }
+    }
+    let h = d[p];
+    if h.w.abs() < 1e-15 {
+        h.truncate()
+    } else {
+        h.truncate() / h.w
+    }
+}
+
+/// Points along a spline: from its control points and knots when they agree, else
+/// through its fit points, else along its control polygon.
+fn spline_points(
+    degree: usize,
+    knots: &[f64],
+    ctrl: &[DVec3],
+    weights: &[f64],
+    fit: &[DVec3],
+) -> Vec<DVec3> {
+    let n = ctrl.len();
+    if degree >= 1 && n > degree && knots.len() == n + degree + 1 {
+        let mut out = Vec::new();
+        for k in degree..n {
+            let (a, b) = (knots[k], knots[k + 1]);
+            if b - a <= 1e-12 {
+                continue;
+            }
+            for s in 0..8 {
+                out.push(nurbs_point(
+                    degree,
+                    knots,
+                    ctrl,
+                    weights,
+                    a + (b - a) * f64::from(s) / 8.0,
+                ));
+            }
+        }
+        out.push(nurbs_point(degree, knots, ctrl, weights, knots[n]));
+        if out.len() >= 2 {
+            return out;
+        }
+    }
+    if fit.len() >= 2 {
+        fit.to_vec()
+    } else {
+        ctrl.to_vec()
+    }
+}
+
+/// TEXT special codes: `%%d` degree, `%%c` diameter, `%%p` plus-minus, `%%%`
+/// percent; `%%u` / `%%o` (underline / overline toggles) dropped.
+fn text_codes(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("%%") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let mut chars = after.chars();
+        match chars.next().map(|c| c.to_ascii_lowercase()) {
+            Some('d') => out.push('°'),
+            Some('c') => out.push('Ø'),
+            Some('p') => out.push('±'),
+            Some('%') => out.push('%'),
+            Some('u' | 'o' | 'k') => {}
+            Some(c) => {
+                out.push_str("%%");
+                out.push(c);
+            }
+            None => out.push_str("%%"),
+        }
+        rest = chars.as_str();
+    }
+    out.push_str(rest);
+    out
+}
+
+/// MTEXT with its formatting codes removed: `\P` line breaks, `\~` spaces, stacked
+/// fractions as `a/b`, `\U+XXXX` characters; font, height, color, width and other
+/// codes and `{}` grouping dropped.
+fn mtext_plain(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '{' | '}' => {}
+            '\\' => match it.next() {
+                Some('P' | 'n') => out.push('\n'),
+                Some('~') => out.push(' '),
+                Some(c @ ('\\' | '{' | '}')) => out.push(c),
+                Some('S') => {
+                    for c in it.by_ref() {
+                        match c {
+                            ';' => break,
+                            '^' | '#' => out.push('/'),
+                            c => out.push(c),
+                        }
+                    }
+                }
+                Some('U') if it.peek() == Some(&'+') => {
+                    it.next();
+                    let hex: String = (0..4).filter_map(|_| it.next()).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                Some('L' | 'l' | 'O' | 'o' | 'K' | 'k' | 'X' | 'N') => {}
+                Some(_) => {
+                    // A code with a value up to `;`.
+                    for c in it.by_ref() {
+                        if c == ';' {
+                            break;
+                        }
+                    }
+                }
+                None => {}
+            },
+            c => out.push(c),
+        }
+    }
+    text_codes(&out).trim().to_owned()
+}
+
+/// Reads the groups of a HATCH from `i` on.
+struct Cursor<'a> {
+    g: &'a [Group],
+    i: usize,
+}
+
+impl Cursor<'_> {
+    /// The next group with `code` (skipping others).
+    fn take(&mut self, code: i32) -> Option<f64> {
+        while self.i < self.g.len() {
+            let g = &self.g[self.i];
+            self.i += 1;
+            if g.code == code {
+                return Some(g.num);
+            }
+        }
+        None
+    }
+
+    /// The next group's value when its code is `code`.
+    fn take_if(&mut self, code: i32) -> Option<f64> {
+        let g = self.g.get(self.i).filter(|g| g.code == code)?;
+        self.i += 1;
+        Some(g.num)
+    }
+
+    fn take2(&mut self, code: i32) -> Option<DVec2> {
+        Some(DVec2::new(self.take(code)?, self.take(code + 10)?))
+    }
+}
+
+/// Points of an arc (`ccw` false: AutoCAD stores clockwise hatch arcs with their
+/// angles mirrored) from `start` to `end` degrees.
+fn hatch_arc(
+    center: DVec2,
+    major: DVec2,
+    ratio: f64,
+    start: f64,
+    end: f64,
+    ccw: bool,
+) -> Vec<DVec2> {
+    // Elliptic edges store angles, not parameters.
+    let param = |a: f64| {
+        if (ratio - 1.0).abs() < 1e-12 || ratio <= 0.0 {
+            a
+        } else {
+            let p = (a.sin() / ratio).atan2(a.cos());
+            p + ((a - p) / TAU).round() * TAU
+        }
+    };
+    let (mut s, mut e) = (param(start.to_radians()), param(end.to_radians()));
+    if !ccw {
+        (s, e) = (-s, -e);
+    }
+    let minor = major.perp() * ratio;
+    let sweep = if ccw {
+        let mut t = e - s;
+        while t <= 1e-12 {
+            t += TAU;
+        }
+        t
+    } else {
+        let mut t = e - s;
+        while t >= -1e-12 {
+            t -= TAU;
+        }
+        t
+    };
+    let n = arc_segments(sweep);
+    (0..=n)
+        .map(|i| {
+            let t = s + sweep * i as f64 / n as f64;
+            center + major * t.cos() + minor * t.sin()
+        })
+        .collect()
+}
+
+/// The boundary loops of a HATCH (in its OCS), or `None` when it has none.
+fn hatch_loops(e: &Ent) -> Option<Vec<Vec<DVec2>>> {
+    let start = e.groups.iter().position(|g| g.code == 91)?;
+    let paths = e.groups[start].num as usize;
+    let mut c = Cursor {
+        g: e.groups,
+        i: start + 1,
+    };
+    let mut loops = Vec::new();
+    for _ in 0..paths.min(10_000) {
+        let flags = c.take(92)? as i64;
+        let mut pts: Vec<DVec2> = Vec::new();
+        let push = |pts: &mut Vec<DVec2>, more: Vec<DVec2>| {
+            for p in more {
+                if pts.last().is_none_or(|l| l.distance(p) > 1e-12) {
+                    pts.push(p);
+                }
+            }
+        };
+        if flags & 2 != 0 {
+            let bulges = c.take(72)? != 0.0;
+            let closed = c.take(73)? != 0.0;
+            let n = c.take(93)? as usize;
+            let mut verts: Vec<(DVec2, f64)> = Vec::new();
+            for _ in 0..n.min(1_000_000) {
+                let p = c.take2(10)?;
+                let b = if bulges {
+                    c.take_if(42).unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                verts.push((p, b));
+            }
+            let count = if closed {
+                verts.len()
+            } else {
+                verts.len().saturating_sub(1)
+            };
+            for i in 0..count {
+                let (p1, b) = verts[i];
+                let p2 = verts[(i + 1) % verts.len()].0;
+                push(&mut pts, bulge_points(p1, p2, b));
+            }
+            if !closed && let Some(&(p, _)) = verts.last() {
+                push(&mut pts, vec![p]);
+            }
+        } else {
+            let n = c.take(93)? as usize;
+            for _ in 0..n.min(1_000_000) {
+                let kind = c.take(72)? as i64;
+                match kind {
+                    1 => {
+                        let a = c.take2(10)?;
+                        let b = c.take2(11)?;
+                        push(&mut pts, vec![a, b]);
+                    }
+                    2 => {
+                        let center = c.take2(10)?;
+                        let r = c.take(40)?;
+                        let (s, t) = (c.take(50)?, c.take(51)?);
+                        let ccw = c.take(73)? != 0.0;
+                        push(&mut pts, hatch_arc(center, DVec2::X * r, 1.0, s, t, ccw));
+                    }
+                    3 => {
+                        let center = c.take2(10)?;
+                        let major = c.take2(11)?;
+                        let ratio = c.take(40)?;
+                        let (s, t) = (c.take(50)?, c.take(51)?);
+                        let ccw = c.take(73)? != 0.0;
+                        push(&mut pts, hatch_arc(center, major, ratio, s, t, ccw));
+                    }
+                    4 => {
+                        let degree = c.take(94)? as usize;
+                        let rational = c.take(73)? != 0.0;
+                        c.take(74)?;
+                        let nk = c.take(95)? as usize;
+                        let nc = c.take(96)? as usize;
+                        let knots: Vec<f64> =
+                            (0..nk.min(100_000)).map_while(|_| c.take(40)).collect();
+                        let mut ctrl = Vec::new();
+                        let mut weights = Vec::new();
+                        for _ in 0..nc.min(100_000) {
+                            ctrl.push(c.take2(10)?.extend(0.0));
+                            if rational {
+                                weights.push(c.take_if(42).unwrap_or(1.0));
+                            }
+                        }
+                        let mut fit = Vec::new();
+                        if let Some(nf) = c.take_if(97) {
+                            for _ in 0..(nf as usize).min(100_000) {
+                                fit.push(c.take2(11)?.extend(0.0));
+                            }
+                        }
+                        let p = spline_points(degree, &knots, &ctrl, &weights, &fit);
+                        push(&mut pts, p.iter().map(|p| p.truncate()).collect());
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        // Source boundary objects.
+        if let Some(n) = c.take_if(97) {
+            for _ in 0..(n as usize).min(1_000_000) {
+                c.take_if(330);
+            }
+        }
+        if pts.len() >= 2 && pts[0].distance(pts[pts.len() - 1]) < 1e-9 {
+            pts.pop();
+        }
+        if pts.len() >= 3 {
+            loops.push(pts);
+        }
+    }
+    Some(loops)
+}
+
+/// A dimension's text override: `None` for the measured value (empty, or containing
+/// `<>`).
+fn dimension_text(s: &str) -> Option<String> {
+    let s = mtext_plain(s);
+    (!s.is_empty() && !s.contains("<>")).then_some(s)
+}
+
+/// The dimension the model holds for a DIMENSION entity, if any.
+fn dimension(e: &Ent) -> Option<Dimension> {
+    let ocs = e.ocs();
+    let label = e.has(11).then(|| ocs.transform_point3(e.point(11)));
+    let mut d = match e.int(70) & 7 {
+        kind @ (0 | 1) => {
+            let (a, b) = (e.point(13), e.point(14));
+            let dir = (b - a).try_normalize()?;
+            if kind == 0 {
+                let r = e.f(50).to_radians();
+                let along = ocs.transform_vector3(DVec3::new(r.cos(), r.sin(), 0.0));
+                if dir.cross(along).length() > 1e-6 {
+                    return None;
+                }
+            }
+            Dimension::linear(a, b, Dimension::offset_towards(a, b, e.point(10)))
+        }
+        kind @ (3 | 4) => {
+            let (a, b) = if kind == 4 {
+                (e.point(10), e.point(15))
+            } else {
+                (e.point(15), e.point(10))
+            };
+            if a.distance(b) < 1e-12 {
+                return None;
+            }
+            let mut d = Dimension::linear(a, b, label.map_or(DVec3::ZERO, |l| l - b));
+            d.kind = if kind == 4 {
+                DimensionKind::Radius
+            } else {
+                DimensionKind::Diameter
+            };
+            d
+        }
+        _ => return None,
+    };
+    d.text = dimension_text(e.text(1));
+    Some(d)
+}
+
+/// Layer names to indices, in the order met.
+#[derive(Default)]
+struct Layers {
+    list: Vec<DxfLayer>,
+    index: HashMap<String, usize>,
+}
+
+impl Layers {
+    fn get(&mut self, name: &str) -> usize {
+        let name = if name.is_empty() { "0" } else { name };
+        if let Some(&i) = self.index.get(name) {
+            return i;
+        }
+        self.list.push(DxfLayer {
+            name: name.to_owned(),
+            color: [255, 255, 255],
+            hidden: false,
+        });
+        self.index.insert(name.to_owned(), self.list.len() - 1);
+        self.list.len() - 1
+    }
+}
+
 /// Reads a DXF file.
 pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
     let groups = read_groups(bytes)?;
     let mut d = Drawing::default();
-    let mut layer_index: HashMap<String, usize> = HashMap::new();
-    let mut layer = |d: &mut Drawing, name: &str| -> usize {
-        let name = if name.is_empty() { "0" } else { name };
-        *layer_index.entry(name.to_owned()).or_insert_with(|| {
-            d.layers.push(DxfLayer {
-                name: name.to_owned(),
-                color: [255, 255, 255],
-                hidden: false,
-            });
-            d.layers.len() - 1
-        })
-    };
+    let mut layers = Layers::default();
     // Split into entities at code 0, remembering sections.
     let mut section = String::new();
     let mut i = 0;
@@ -391,19 +922,58 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
     let mut k = 0;
     while k < ents.len() {
         let (sec, e) = &ents[k];
+        match (sec.as_str(), e.kind) {
+            ("TABLES", "LAYER") => {
+                let l = layers.get(e.text(2));
+                let color = e.int(62);
+                layers.list[l].color = aci_color(color);
+                layers.list[l].hidden = color < 0 || e.int(70) & 1 != 0;
+                k += 1;
+            }
+            ("BLOCKS", "BLOCK") => {
+                let mut end = k + 1;
+                while end < ents.len() && ents[end].0 == "BLOCKS" && ents[end].1.kind != "ENDBLK" {
+                    end += 1;
+                }
+                let shapes = read_entities(&ents[k + 1..end], &mut layers, false);
+                // External references (4) and overlays (8) are not in the file.
+                if e.int(70) & 12 == 0 {
+                    d.blocks.insert(
+                        e.text(2).to_owned(),
+                        Block {
+                            base: e.point(10),
+                            shapes,
+                        },
+                    );
+                }
+                k = end + 1;
+            }
+            ("ENTITIES", _) => {
+                let mut end = k;
+                while end < ents.len() && ents[end].0 == "ENTITIES" {
+                    end += 1;
+                }
+                let shapes = read_entities(&ents[k..end], &mut layers, true);
+                d.shapes.extend(shapes);
+                k = end;
+            }
+            _ => k += 1,
+        }
+    }
+    d.layers = layers.list;
+    Ok(d)
+}
+
+/// The shapes of a run of entities (a block's or the ENTITIES section's); `model`
+/// skips paper space entities.
+fn read_entities(ents: &[(String, Ent)], layers: &mut Layers, model: bool) -> Vec<(usize, Shape)> {
+    let mut out: Vec<(usize, Shape)> = Vec::new();
+    let mut k = 0;
+    while k < ents.len() {
+        let e = &ents[k].1;
         k += 1;
-        if sec == "TABLES" && e.kind == "LAYER" {
-            let l = layer(&mut d, e.text(2));
-            let color = e.int(62);
-            d.layers[l].color = aci_color(color);
-            d.layers[l].hidden = color < 0 || e.int(70) & 1 != 0;
-            continue;
-        }
-        if sec != "ENTITIES" {
-            continue;
-        }
         // Paper space entities are skipped.
-        if e.int(67) == 1 {
+        if model && e.int(67) == 1 {
             if e.kind == "POLYLINE" {
                 while k < ents.len() && ents[k].1.kind != "SEQEND" {
                     k += 1;
@@ -411,16 +981,14 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
             }
             continue;
         }
-        let l = layer(&mut d, e.text(8));
+        let l = layers.get(e.text(8));
+        let mut push = |s: Shape| out.push((l, s));
         match e.kind {
-            "LINE" => d.shapes.push((
-                l,
-                Shape::Line {
-                    a: e.point(10),
-                    b: e.point(11),
-                    hidden: false,
-                },
-            )),
+            "LINE" => push(Shape::Line {
+                a: e.point(10),
+                b: e.point(11),
+                hidden: false,
+            }),
             "3DFACE" => {
                 let mut corners = vec![e.point(10), e.point(11), e.point(12), e.point(13)];
                 let flags = e.int(70);
@@ -429,7 +997,22 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                     corners.pop();
                     hidden.pop();
                 }
-                d.shapes.push((l, Shape::Face { corners, hidden }));
+                push(Shape::Face { corners, hidden });
+            }
+            "SOLID" | "TRACE" => {
+                // Corners in the order 1, 2, 4, 3 (OCS).
+                let ocs = e.ocs();
+                let mut corners: Vec<DVec3> = [10, 11, 13, 12]
+                    .map(|c| ocs.transform_point3(e.point(c)))
+                    .to_vec();
+                corners.dedup_by(|a, b| a.distance(*b) < 1e-12);
+                if corners.len() > 3 && corners[0].distance(corners[corners.len() - 1]) < 1e-12 {
+                    corners.pop();
+                }
+                if corners.len() >= 3 {
+                    let hidden = vec![false; corners.len()];
+                    push(Shape::Face { corners, hidden });
+                }
             }
             "CIRCLE" | "ARC" => {
                 let n = e.extrusion();
@@ -447,20 +1030,141 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                 };
                 let radius = e.f(40);
                 if radius > 0.0 {
-                    d.shapes.push((
-                        l,
-                        Shape::Arc(Arc {
-                            center: ax * c.x + ay * c.y + n * c.z,
-                            normal: n,
-                            x_axis: ax,
-                            radius,
-                            start_angle: start,
-                            end_angle: end,
-                            segments: arc_segments(end - start),
-                        }),
-                    ));
+                    push(Shape::Arc(Arc {
+                        center: ax * c.x + ay * c.y + n * c.z,
+                        normal: n,
+                        x_axis: ax,
+                        radius,
+                        start_angle: start,
+                        end_angle: end,
+                        segments: arc_segments(end - start),
+                    }));
                 }
             }
+            "ELLIPSE" => {
+                let n = e.extrusion();
+                let major = e.point(11);
+                let minor = n.cross(major) * e.f(40);
+                let t0 = e.f(41);
+                let mut t1 = e.num(42).unwrap_or(TAU);
+                while t1 <= t0 + 1e-12 {
+                    t1 += TAU;
+                }
+                if major.length() > 1e-12 && minor.length() > 1e-12 {
+                    let mut pts = ellipse_points(e.point(10), major, minor, t0, t1);
+                    if t1 - t0 >= TAU - 1e-9 {
+                        let first = pts[0];
+                        if let Some(last) = pts.last_mut() {
+                            *last = first;
+                        }
+                    }
+                    push(Shape::Curve(pts));
+                }
+            }
+            "SPLINE" => {
+                let mut pts = spline_points(
+                    e.int(71).max(0) as usize,
+                    &e.all(40),
+                    &e.points(10),
+                    &e.all(41),
+                    &e.points(11),
+                );
+                // Closed (1) or periodic (2): join the ends.
+                if e.int(70) & 3 != 0
+                    && pts.len() > 2
+                    && let Some(&first) = pts.first()
+                {
+                    let last = pts[pts.len() - 1];
+                    if last.distance(first) < 1e-9 {
+                        let n = pts.len();
+                        pts[n - 1] = first;
+                    } else {
+                        pts.push(first);
+                    }
+                }
+                if pts.len() >= 2 {
+                    push(Shape::Curve(pts));
+                }
+            }
+            "HATCH" => {
+                let n = e.extrusion();
+                let ocs = ocs_matrix(n);
+                let elevation = e.f(30);
+                if let Some(loops) = hatch_loops(e).filter(|l| !l.is_empty()) {
+                    let loops = loops
+                        .iter()
+                        .map(|l| {
+                            l.iter()
+                                .map(|p| ocs.transform_point3(p.extend(elevation)))
+                                .collect()
+                        })
+                        .collect();
+                    push(Shape::Region { loops, normal: n });
+                }
+            }
+            "INSERT" => {
+                let n = e.extrusion();
+                let ocs = ocs_matrix(n);
+                let scale = DVec3::new(
+                    e.num(41).unwrap_or(1.0),
+                    e.num(42).unwrap_or(1.0),
+                    e.num(43).unwrap_or(1.0),
+                );
+                if scale.x * scale.y * scale.z == 0.0 {
+                    continue;
+                }
+                let place = ocs
+                    * DMat4::from_translation(e.point(10))
+                    * DMat4::from_rotation_z(e.f(50).to_radians());
+                let (cols, rows) = (e.int(70).max(1), e.int(71).max(1));
+                let (dx, dy) = (e.f(44), e.f(45));
+                for r in 0..rows.min(1000) {
+                    for c in 0..cols.min(1000) {
+                        let cell =
+                            DMat4::from_translation(DVec3::new(c as f64 * dx, r as f64 * dy, 0.0));
+                        push(Shape::Insert {
+                            block: e.text(2).to_owned(),
+                            transform: place * cell * DMat4::from_scale(scale),
+                        });
+                    }
+                }
+            }
+            "TEXT" | "ATTRIB" => {
+                // Invisible attributes (1) are left out.
+                if e.kind == "ATTRIB" && e.int(70) & 1 != 0 {
+                    continue;
+                }
+                let aligned = (e.int(72) != 0 || e.int(73) != 0) && e.has(11);
+                let p = e.point(if aligned { 11 } else { 10 });
+                let text = text_codes(e.text(1)).trim().to_owned();
+                if !text.is_empty() {
+                    push(Shape::Text {
+                        point: e.ocs().transform_point3(p),
+                        text,
+                    });
+                }
+            }
+            "MTEXT" => {
+                let mut raw: String = e
+                    .groups
+                    .iter()
+                    .filter(|g| g.code == 3)
+                    .map(|g| g.text.as_str())
+                    .collect();
+                raw.push_str(e.text(1));
+                let text = mtext_plain(&raw);
+                if !text.is_empty() {
+                    push(Shape::Text {
+                        point: e.point(10),
+                        text,
+                    });
+                }
+            }
+            "DIMENSION" => match dimension(e) {
+                Some(d) => push(Shape::Dimension(d)),
+                None if !e.text(2).is_empty() => push(Shape::Exploded(e.text(2).to_owned())),
+                None => {}
+            },
             "LWPOLYLINE" => {
                 let mut pts: Vec<(DVec2, f64)> = Vec::new();
                 for g in e.groups {
@@ -481,7 +1185,7 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                 }
                 let closed = e.int(70) & 1 != 0;
                 for s in polyline_2d(&pts, closed, e.f(38), e.extrusion()) {
-                    d.shapes.push((l, s));
+                    push(s);
                 }
             }
             "POLYLINE" => {
@@ -510,7 +1214,7 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                             .collect();
                         if let Some(corners) = corners.filter(|c| c.len() >= 3) {
                             let hidden = idx.iter().map(|&i| i < 0).collect();
-                            d.shapes.push((l, Shape::Face { corners, hidden }));
+                            push(Shape::Face { corners, hidden });
                         }
                     }
                 } else if flags & 16 != 0 {
@@ -524,18 +1228,15 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                         for a in 0..mi {
                             for b in 0..ni {
                                 let p = |a: usize, b: usize| pos[(a % m) * n + (b % n)];
-                                d.shapes.push((
-                                    l,
-                                    Shape::Face {
-                                        corners: vec![
-                                            p(a, b),
-                                            p(a + 1, b),
-                                            p(a + 1, b + 1),
-                                            p(a, b + 1),
-                                        ],
-                                        hidden: vec![false; 4],
-                                    },
-                                ));
+                                push(Shape::Face {
+                                    corners: vec![
+                                        p(a, b),
+                                        p(a + 1, b),
+                                        p(a + 1, b + 1),
+                                        p(a, b + 1),
+                                    ],
+                                    hidden: vec![false; 4],
+                                });
                             }
                         }
                     }
@@ -549,14 +1250,11 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                         pts.len().saturating_sub(1)
                     };
                     for i in 0..count {
-                        d.shapes.push((
-                            l,
-                            Shape::Line {
-                                a: pts[i],
-                                b: pts[(i + 1) % pts.len()],
-                                hidden: false,
-                            },
-                        ));
+                        push(Shape::Line {
+                            a: pts[i],
+                            b: pts[(i + 1) % pts.len()],
+                            hidden: false,
+                        });
                     }
                 } else {
                     let pts: Vec<(DVec2, f64)> = verts
@@ -564,17 +1262,41 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                         .map(|v| (v.point(10).truncate(), v.f(42)))
                         .collect();
                     for s in polyline_2d(&pts, flags & 1 != 0, e.f(30), e.extrusion()) {
-                        d.shapes.push((l, s));
+                        push(s);
                     }
                 }
             }
             _ => {}
         }
     }
-    Ok(d)
+    out
 }
 
-/// Adds `shape` scaled by `scale` to `ents`; returns the edges it covers.
+/// Points scaled with repeats closer than the tolerance dropped (a closed list keeps
+/// its first point as its last).
+fn clean_points(points: &[DVec3], scale: f64) -> Vec<DVec3> {
+    let closed = points.len() > 2 && points[0].distance(points[points.len() - 1]) < 1e-12;
+    let mut out: Vec<DVec3> = Vec::new();
+    for p in points {
+        let q = *p * scale;
+        if out.last().is_none_or(|l| l.distance(q) >= crate::TOL) {
+            out.push(q);
+        }
+    }
+    if closed && out.len() > 2 {
+        let first = out[0];
+        let n = out.len();
+        if out[n - 1].distance(first) < crate::TOL {
+            out[n - 1] = first;
+        } else {
+            out.push(first);
+        }
+    }
+    out
+}
+
+/// Adds `shape` (a geometric one) scaled by `scale` to `ents`; returns the edges it
+/// covers.
 fn draw(ents: &mut Entities, shape: &Shape, scale: f64) -> Vec<EdgeId> {
     let mut hide = Vec::new();
     let edges = match shape {
@@ -599,6 +1321,14 @@ fn draw(ents: &mut Entities, shape: &Shape, scale: f64) -> Vec<EdgeId> {
             }
             crate::add_curve(ents, &arc.points(), Some(arc))
         }
+        Shape::Curve(points) => {
+            let pts = clean_points(points, scale);
+            if pts.len() < 2 {
+                return Vec::new();
+            }
+            crate::add_curve(ents, &pts, None)
+        }
+        Shape::Region { loops, normal } => draw_region(ents, loops, *normal, scale),
         Shape::Face { corners, hidden } => {
             let pts: Vec<DVec3> = corners.iter().map(|p| *p * scale).collect();
             let mut out = Vec::new();
@@ -627,6 +1357,7 @@ fn draw(ents: &mut Entities, shape: &Shape, scale: f64) -> Vec<EdgeId> {
             }
             out
         }
+        _ => Vec::new(),
     };
     for e in hide {
         if let Some(edge) = ents.edges.get_mut(e) {
@@ -636,38 +1367,252 @@ fn draw(ents: &mut Entities, shape: &Shape, scale: f64) -> Vec<EdgeId> {
     edges
 }
 
+/// Whether `p` is inside polygon `poly` (crossing count).
+fn inside(poly: &[DVec2], p: DVec2) -> bool {
+    let mut c = false;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            c = !c;
+        }
+    }
+    c
+}
+
+/// Draws a hatch's boundary loops; of the faces they make, those not inside an odd
+/// number of loops (holes) are removed.
+fn draw_region(
+    ents: &mut Entities,
+    loops: &[Vec<DVec3>],
+    normal: DVec3,
+    scale: f64,
+) -> Vec<EdgeId> {
+    let before: BTreeSet<FaceId> = ents.faces.keys().collect();
+    let loops: Vec<Vec<DVec3>> = loops
+        .iter()
+        .map(|l| {
+            let mut c = clean_points(l, scale);
+            if c.len() > 1 && c[0].distance(c[c.len() - 1]) < crate::TOL {
+                c.pop();
+            }
+            c
+        })
+        .filter(|l| l.len() >= 3)
+        .collect();
+    let mut edges = Vec::new();
+    for l in &loops {
+        for i in 0..l.len() {
+            let (a, b) = (l[i], l[(i + 1) % l.len()]);
+            if a.distance(b) >= crate::TOL {
+                edges.extend(crate::add_line(ents, a, b));
+            }
+        }
+    }
+    let (ax, ay) = ocs_axes(normal);
+    let flat = |p: DVec3| DVec2::new(p.dot(ax), p.dot(ay));
+    let polys: Vec<Vec<DVec2>> = loops
+        .iter()
+        .map(|l| l.iter().map(|&p| flat(p)).collect())
+        .collect();
+    let new: Vec<FaceId> = ents.faces.keys().filter(|f| !before.contains(f)).collect();
+    for f in new {
+        if ents.faces[f].normal.cross(normal).length() > 1e-6 {
+            continue;
+        }
+        let tris = crate::tessellate::triangulate(ents, f);
+        let Some(t) = tris.iter().max_by(|a, b| {
+            let area = |t: &[DVec3; 3]| (t[1] - t[0]).cross(t[2] - t[0]).length();
+            area(a).total_cmp(&area(b))
+        }) else {
+            continue;
+        };
+        let c = flat((t[0] + t[1] + t[2]) / 3.0);
+        if polys.iter().filter(|p| inside(p, c)).count() % 2 == 0 {
+            ents.remove_face(f);
+        }
+    }
+    edges.retain(|e| ents.edges.contains_key(*e));
+    edges
+}
+
+fn instance(definition: DefinitionId, transform: DMat4, name: String) -> Instance {
+    Instance {
+        definition,
+        transform,
+        name,
+        hidden: false,
+        locked: false,
+        layer: None,
+        material: None,
+        attrs: Default::default(),
+    }
+}
+
+fn is_empty(ents: &Entities) -> bool {
+    ents.edges.is_empty()
+        && ents.instances.is_empty()
+        && ents.texts.is_empty()
+        && ents.dimensions.is_empty()
+}
+
+/// Builds the model: blocks as definitions on first use.
+struct Builder<'a> {
+    d: &'a Drawing,
+    scale: f64,
+    /// The tag of each DXF layer (tags mode).
+    tags: Option<Vec<Option<LayerId>>>,
+    model: Model,
+    /// Definitions made for blocks; `None` while being built (a block containing
+    /// itself) or when empty.
+    defs: HashMap<String, Option<DefinitionId>>,
+}
+
+impl<'a> Builder<'a> {
+    fn tag(&self, layer: usize) -> Option<LayerId> {
+        self.tags
+            .as_ref()
+            .and_then(|t| t.get(layer).copied().flatten())
+    }
+
+    /// Adds `shapes` to `ents`: hatches first (their faces are sorted out before
+    /// other lines split them), then the rest in order.
+    fn add(&mut self, ents: &mut Entities, shapes: &[&'a (usize, Shape)], depth: usize) {
+        let region = |x: &&(usize, Shape)| matches!(x.1, Shape::Region { .. });
+        let ordered: Vec<&'a (usize, Shape)> = shapes
+            .iter()
+            .copied()
+            .filter(region)
+            .chain(shapes.iter().copied().filter(|x| !region(x)))
+            .collect();
+        for (l, s) in ordered {
+            let l = *l;
+            let tag = self.tag(l);
+            let scale = self.scale;
+            match s {
+                Shape::Insert { block, transform } => {
+                    let Some(def) = self.definition(block, depth) else {
+                        continue;
+                    };
+                    let base = self.d.blocks[block].base;
+                    let xf = DMat4::from_scale(DVec3::splat(scale))
+                        * *transform
+                        * DMat4::from_translation(-base)
+                        * DMat4::from_scale(DVec3::splat(1.0 / scale));
+                    let mut inst = instance(def, xf, String::new());
+                    inst.layer = tag;
+                    ents.instances.push(inst);
+                }
+                Shape::Text { point, text } => {
+                    let mut t =
+                        crate::annotation::Text::leader(*point * scale, DVec3::ZERO, text.clone());
+                    t.style = Some(crate::model_data::TextStyle {
+                        leader: crate::model_data::LeaderKind::Hidden,
+                        ..Default::default()
+                    });
+                    ents.texts.push(t);
+                }
+                Shape::Dimension(d) => {
+                    let mut d = d.clone();
+                    d.a *= scale;
+                    d.b *= scale;
+                    d.offset *= scale;
+                    ents.dimensions.push(d);
+                }
+                Shape::Exploded(block) => {
+                    let d = self.d;
+                    if depth < 32
+                        && let Some(b) = d.blocks.get(block)
+                    {
+                        let items: Vec<&(usize, Shape)> = b.shapes.iter().collect();
+                        self.add(ents, &items, depth + 1);
+                    }
+                }
+                _ => {
+                    for e in draw(ents, s, scale) {
+                        if let Some(edge) = ents.edges.get_mut(e) {
+                            edge.attrs.layer = tag;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Faces take the tag of their first edge (tags mode).
+    fn finish(&self, ents: &mut Entities) {
+        if self.tags.is_none() {
+            return;
+        }
+        let faces: Vec<_> = ents.faces.keys().collect();
+        for f in faces {
+            let first = ents.faces[f].outer.coedges.first().map(|c| c.edge);
+            ents.faces[f].attrs.layer = first.and_then(|e| ents.edges[e].attrs.layer);
+        }
+    }
+
+    /// The definition of block `name`, made on first use.
+    fn definition(&mut self, name: &str, depth: usize) -> Option<DefinitionId> {
+        if let Some(&d) = self.defs.get(name) {
+            return d;
+        }
+        let d = self.d;
+        let block = d.blocks.get(name)?;
+        if depth > 32 {
+            return None;
+        }
+        self.defs.insert(name.to_owned(), None);
+        let mut ents = Entities::new();
+        let items: Vec<&(usize, Shape)> = block.shapes.iter().collect();
+        self.add(&mut ents, &items, depth + 1);
+        self.finish(&mut ents);
+        if is_empty(&ents) {
+            return None;
+        }
+        let def_name = self.model.unique_definition_name(name);
+        let id = self.model.definitions.insert(Definition {
+            name: def_name,
+            entities: ents,
+            ..Default::default()
+        });
+        self.defs.insert(name.to_owned(), Some(id));
+        Some(id)
+    }
+}
+
 /// Builds a model from a parsed drawing: per layer a group in the root, or one
 /// drawing with a tag per layer.
 pub fn to_model(d: &Drawing, opts: &DxfOptions) -> Model {
     let scale = opts.inches_per_unit.or(d.inches_per_unit).unwrap_or(1.0);
-    let mut model = Model::default();
+    let mut b = Builder {
+        d,
+        scale,
+        tags: None,
+        model: Model::default(),
+        defs: HashMap::new(),
+    };
     match opts.layers {
         LayerMode::Groups => {
             for (l, layer) in d.layers.iter().enumerate() {
-                let mut ents = Entities::new();
-                for (_, s) in d.shapes.iter().filter(|(x, _)| *x == l) {
-                    draw(&mut ents, s, scale);
-                }
-                if ents.edges.is_empty() {
+                let items: Vec<&(usize, Shape)> =
+                    d.shapes.iter().filter(|(x, _)| *x == l).collect();
+                if items.is_empty() {
                     continue;
                 }
-                let name = model.unique_definition_name("Group#1");
-                let def = model.definitions.insert(Definition {
+                let mut ents = Entities::new();
+                b.add(&mut ents, &items, 0);
+                if is_empty(&ents) {
+                    continue;
+                }
+                let name = b.model.unique_definition_name("Group#1");
+                let def = b.model.definitions.insert(Definition {
                     name,
                     entities: ents,
                     is_group: true,
                     ..Default::default()
                 });
-                model.root.instances.push(Instance {
-                    definition: def,
-                    transform: DMat4::IDENTITY,
-                    name: layer.name.clone(),
-                    hidden: layer.hidden,
-                    locked: false,
-                    layer: None,
-                    material: None,
-                    attrs: Default::default(),
-                });
+                let mut inst = instance(def, DMat4::IDENTITY, layer.name.clone());
+                inst.hidden = layer.hidden;
+                b.model.root.instances.push(inst);
             }
         }
         LayerMode::Tags => {
@@ -677,32 +1622,23 @@ pub fn to_model(d: &Drawing, opts: &DxfOptions) -> Model {
                     tags.push(None);
                     continue;
                 }
-                model.layers.push(Layer {
+                b.model.layers.push(Layer {
                     name: layer.name.clone(),
                     color: layer.color,
                     visible: !layer.hidden,
                     ..Layer::default()
                 });
-                tags.push(Some(model.layers.len() - 1));
+                tags.push(Some(b.model.layers.len() - 1));
             }
-            let ents = &mut model.root;
-            for (l, s) in &d.shapes {
-                let tag = tags.get(*l).copied().flatten();
-                for e in draw(ents, s, scale) {
-                    if let Some(edge) = ents.edges.get_mut(e) {
-                        edge.attrs.layer = tag;
-                    }
-                }
-            }
-            // Faces take the tag of their first edge.
-            let faces: Vec<_> = ents.faces.keys().collect();
-            for f in faces {
-                let first = ents.faces[f].outer.coedges.first().map(|c| c.edge);
-                ents.faces[f].attrs.layer = first.and_then(|e| ents.edges[e].attrs.layer);
-            }
+            b.tags = Some(tags);
+            let mut root = Entities::new();
+            let items: Vec<&(usize, Shape)> = d.shapes.iter().collect();
+            b.add(&mut root, &items, 0);
+            b.finish(&mut root);
+            b.model.root = root;
         }
     }
-    model
+    b.model
 }
 
 #[cfg(test)]
@@ -992,5 +1928,270 @@ mod tests {
             1
         );
         assert!(parse(b"hello").is_err());
+    }
+
+    fn line(
+        layer: &'static str,
+        a: (&'static str, &'static str),
+        b: (&'static str, &'static str),
+    ) -> Vec<(i32, &'static str)> {
+        vec![
+            (0, "LINE"),
+            (8, layer),
+            (10, a.0),
+            (20, a.1),
+            (30, "0"),
+            (11, b.0),
+            (21, b.1),
+            (31, "0"),
+        ]
+    }
+
+    /// A drawing with a BLOCKS section.
+    fn with_blocks(blocks: &[(i32, &str)], entities: &[(i32, &str)]) -> String {
+        let mut g = vec![(0, "SECTION"), (2, "BLOCKS")];
+        g.extend_from_slice(blocks);
+        g.extend([(0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES")]);
+        g.extend_from_slice(entities);
+        g.extend([(0, "ENDSEC"), (0, "EOF")]);
+        ascii(&g)
+    }
+
+    #[test]
+    fn blocks_become_components_with_arrays_and_nesting() {
+        let mut blocks = vec![
+            (0, "BLOCK"),
+            (8, "0"),
+            (2, "Sq"),
+            (70, "0"),
+            (10, "1"),
+            (20, "1"),
+            (30, "0"),
+        ];
+        let c = [("1", "1"), ("3", "1"), ("3", "3"), ("1", "3")];
+        for i in 0..4 {
+            blocks.extend(line("0", c[i], c[(i + 1) % 4]));
+        }
+        blocks.push((0, "ENDBLK"));
+        blocks.extend([(0, "BLOCK"), (8, "0"), (2, "Pair"), (70, "0")]);
+        blocks.extend([(10, "0"), (20, "0"), (30, "0")]);
+        blocks.extend([(0, "INSERT"), (8, "0"), (2, "Sq"), (10, "0"), (20, "0")]);
+        blocks.extend([(0, "INSERT"), (8, "0"), (2, "Sq"), (10, "10"), (20, "0")]);
+        blocks.push((50, "90"));
+        // A block containing itself is left out where it repeats.
+        blocks.extend([(0, "INSERT"), (8, "0"), (2, "Pair"), (10, "5"), (20, "5")]);
+        blocks.push((0, "ENDBLK"));
+        let ents = [
+            (0, "INSERT"),
+            (8, "Walls"),
+            (2, "Pair"),
+            (10, "100"),
+            (20, "0"),
+            (30, "0"),
+            // 2 columns, 3 rows, scaled 2.
+            (0, "INSERT"),
+            (8, "Walls"),
+            (2, "Sq"),
+            (10, "0"),
+            (20, "50"),
+            (30, "0"),
+            (41, "2"),
+            (42, "2"),
+            (43, "2"),
+            (70, "2"),
+            (71, "3"),
+            (44, "5"),
+            (45, "6"),
+            // Unknown blocks are skipped.
+            (0, "INSERT"),
+            (8, "Walls"),
+            (2, "Nope"),
+        ];
+        let d = parse(with_blocks(&blocks, &ents).as_bytes()).unwrap();
+        assert_eq!(d.blocks.len(), 2);
+        let m = to_model(&d, &DxfOptions::default());
+        assert_eq!(m.root.instances.len(), 1);
+        let walls = &m.definitions[m.root.instances[0].definition];
+        assert_eq!(walls.entities.instances.len(), 1 + 6);
+        let def = |name: &str| {
+            m.definitions
+                .iter()
+                .find(|(_, d)| d.name == name)
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        let (sq, pair) = (def("Sq"), def("Pair"));
+        assert!(!m.definitions[sq].is_group);
+        assert_eq!(m.definitions[sq].entities.faces.len(), 1);
+        assert_eq!(m.definitions[pair].entities.instances.len(), 2);
+        for d in m.definitions.values() {
+            assert!(crate::validate(&d.entities, crate::Checks::ALL).is_empty());
+        }
+        // The base point lands on the insertion point; the rotated copy turns.
+        let rotated = &m.definitions[pair].entities.instances[1];
+        let p = rotated
+            .transform
+            .transform_point3(DVec3::new(3.0, 1.0, 0.0));
+        assert!(p.abs_diff_eq(DVec3::new(10.0, 2.0, 0.0), 1e-9), "{p}");
+        // Array cell (column 1, row 2): spacing unscaled, contents scaled by 2.
+        let cell = walls.entities.instances.iter().any(|i| {
+            let a = i.transform.transform_point3(DVec3::new(1.0, 1.0, 0.0));
+            let b = i.transform.transform_point3(DVec3::new(3.0, 1.0, 0.0));
+            i.definition == sq
+                && a.abs_diff_eq(DVec3::new(5.0, 62.0, 0.0), 1e-9)
+                && b.abs_diff_eq(DVec3::new(9.0, 62.0, 0.0), 1e-9)
+        });
+        assert!(cell);
+    }
+
+    #[test]
+    fn texts_dimensions_hatches_splines_and_ellipses() {
+        let mut ents: Vec<(i32, &str)> = vec![
+            (0, "TEXT"),
+            (8, "T"),
+            (10, "1"),
+            (20, "2"),
+            (30, "0"),
+            (40, "1"),
+            (1, "%%c10"),
+            (0, "MTEXT"),
+            (8, "T"),
+            (10, "5"),
+            (20, "5"),
+            (30, "0"),
+            (1, "{\\fArial|b1;Big}\\PLine 2"),
+            // Aligned dimension.
+            (0, "DIMENSION"),
+            (8, "D"),
+            (2, "*D1"),
+            (10, "10"),
+            (20, "3"),
+            (30, "0"),
+            (70, "1"),
+            (1, ""),
+            (13, "0"),
+            (23, "0"),
+            (33, "0"),
+            (14, "10"),
+            (24, "0"),
+            (34, "0"),
+            // Angular: drawn from its block.
+            (0, "DIMENSION"),
+            (8, "D"),
+            (2, "*D1"),
+            (70, "2"),
+            // A square with a square hole (polyline paths).
+            (0, "HATCH"),
+            (8, "H"),
+            (10, "0"),
+            (20, "0"),
+            (30, "0"),
+            (2, "SOLID"),
+            (70, "1"),
+            (91, "2"),
+        ];
+        for (lo, hi, b, t) in [("20", "30", "0", "10"), ("23", "27", "3", "7")] {
+            ents.extend([(92, "2"), (72, "0"), (73, "1"), (93, "4")]);
+            for (x, y) in [(lo, b), (hi, b), (hi, t), (lo, t)] {
+                ents.extend([(10, x), (20, y)]);
+            }
+            ents.push((97, "0"));
+        }
+        ents.extend([(75, "0"), (76, "1"), (98, "0")]);
+        // A triangle from line edges.
+        ents.extend([
+            (0, "HATCH"),
+            (8, "H"),
+            (70, "1"),
+            (91, "1"),
+            (92, "1"),
+            (93, "3"),
+        ]);
+        let tri = [("40", "0"), ("44", "0"), ("40", "4")];
+        for i in 0..3 {
+            let (a, b) = (tri[i], tri[(i + 1) % 3]);
+            ents.extend([(72, "1"), (10, a.0), (20, a.1), (11, b.0), (21, b.1)]);
+        }
+        ents.push((97, "0"));
+        // A quadratic spline over one knot span.
+        ents.extend([
+            (0, "SPLINE"),
+            (8, "S"),
+            (70, "8"),
+            (71, "2"),
+            (72, "6"),
+            (73, "3"),
+        ]);
+        for k in ["0", "0", "0", "1", "1", "1"] {
+            ents.push((40, k));
+        }
+        for (x, y) in [("0", "-20"), ("5", "-10"), ("10", "-20")] {
+            ents.extend([(10, x), (20, y), (30, "0")]);
+        }
+        // A full ellipse.
+        ents.extend([
+            (0, "ELLIPSE"),
+            (8, "E"),
+            (10, "60"),
+            (20, "0"),
+            (30, "0"),
+            (11, "4"),
+            (21, "0"),
+            (31, "0"),
+            (40, "0.5"),
+            (41, "0"),
+            (42, "6.283185307179586"),
+        ]);
+        let mut blocks = vec![(0, "BLOCK"), (8, "0"), (2, "*D1"), (70, "1")];
+        blocks.extend([(10, "0"), (20, "0"), (30, "0")]);
+        blocks.extend(line("0", ("0", "-50"), ("5", "-50")));
+        blocks.push((0, "ENDBLK"));
+        let d = parse(with_blocks(&blocks, &ents).as_bytes()).unwrap();
+        let m = to_model(
+            &d,
+            &DxfOptions {
+                inches_per_unit: Some(1.0),
+                layers: LayerMode::Tags,
+            },
+        );
+        let r = &m.root;
+        assert!(crate::validate(r, crate::Checks::ALL).is_empty());
+        let texts: Vec<&str> = r.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["Ø10", "Big\nLine 2"]);
+        assert_eq!(r.texts[0].point, DVec3::new(1.0, 2.0, 0.0));
+        assert_eq!(r.dimensions.len(), 1);
+        let dim = &r.dimensions[0];
+        assert_eq!(dim.kind, DimensionKind::Linear);
+        assert!(dim.offset.abs_diff_eq(DVec3::new(0.0, 3.0, 0.0), 1e-9));
+        assert_eq!(dim.text, None);
+        // The hatch ring, the triangle and the ellipse.
+        assert_eq!(r.faces.len(), 3);
+        let ring = r.faces.values().find(|f| !f.holes.is_empty()).unwrap();
+        assert_eq!(ring.holes.len(), 1);
+        // Edges: exploded dimension 1, hatches 8 + 3, spline 8, ellipse 24.
+        assert_eq!(r.edges.len(), 1 + 8 + 3 + 8 + 24);
+        assert_eq!(r.curves.len(), 2);
+        // The spline's middle point: the quadratic's peak at y = -15.
+        let top = r
+            .vertices
+            .values()
+            .filter(|v| v.pos.y < -12.0)
+            .map(|v| v.pos.y)
+            .fold(f64::MIN, f64::max);
+        assert!((top + 15.0).abs() < 1e-9, "{top}");
+        // Faces take their edges' tags.
+        let h = m.layers.iter().position(|l| l.name == "H");
+        assert!(r.faces.values().filter(|f| f.attrs.layer == h).count() == 2);
+    }
+
+    #[test]
+    fn mtext_codes_and_dimension_overrides() {
+        assert_eq!(
+            mtext_plain("\\A1;{\\C1;Red} \\S1^2; \\U+00B0x\\~y\\\\z %%p1"),
+            "Red 1/2 °x y\\z ±1"
+        );
+        assert_eq!(dimension_text("<> TYP"), None);
+        assert_eq!(dimension_text("Wall"), Some("Wall".into()));
+        assert_eq!(text_codes("50%%%"), "50%");
     }
 }

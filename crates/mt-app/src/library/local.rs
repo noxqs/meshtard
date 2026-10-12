@@ -97,11 +97,9 @@ pub(crate) fn load_model(path: &Path) -> Result<mt_kernel::Model, String> {
                 y_up,
                 merge_coplanar: true,
             };
-            let (materials, ents) = crate::import::read_mesh(path, kind, &opts, 0, true)?;
-            if ents.faces.is_empty() {
-                return Err(format!("No faces in {}.", path.display()));
-            }
-            Ok(mt_kernel::Model {
+            let (materials, scene) = crate::import::read_mesh(path, kind, true)?;
+            let ids: Vec<usize> = (0..materials.len()).collect();
+            let mut model = mt_kernel::Model {
                 materials: materials
                     .into_iter()
                     .map(|x| mt_kernel::Material {
@@ -111,9 +109,13 @@ pub(crate) fn load_model(path: &Path) -> Result<mt_kernel::Model, String> {
                         texture: None,
                     })
                     .collect(),
-                root: ents,
                 ..Default::default()
-            })
+            };
+            model.root = mt_kernel::formats::scene::to_entities(&mut model, &scene, &opts, &ids);
+            if crate::import::count_faces(&model, &model.root) == 0 {
+                return Err(format!("No faces in {}.", path.display()));
+            }
+            Ok(model)
         }
     }
 }

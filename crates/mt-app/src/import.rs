@@ -7,8 +7,9 @@
 //!   with it, as SketchUp does. Adding the definition is one undo step, each placement
 //!   another.
 //! - glTF / GLB ([`mt_kernel::gltf_io`]) ask whether to merge coplanar faces, then come
-//!   in the same way as a `.skp`: one component (its meshes as groups and components
-//!   inside, materials with base color textures) placed with Place Component.
+//!   in the same way as a `.skp`: one component (its node hierarchy as nested groups
+//!   and components inside, materials with base color textures) placed with Place
+//!   Component.
 //! - DXF ([`mt_kernel::dxf`]) asks for units (from the file by default) and whether
 //!   layers become groups (default, as SketchUp 2026's importer does) or tags, then
 //!   becomes one component instance at the origin of the open context (drawings are
@@ -16,7 +17,8 @@
 //!   is not read; PDF import is not done.
 //! - Mesh files (OBJ, STL, FBX, PLY, 3MF, 3DS) ask for options (units, Y up, merge
 //!   coplanar faces; PLY: colors as materials), then become one group at the open
-//!   context's origin, in one undo step, selected. Units and axes default to what the
+//!   context's origin, in one undo step, selected; an FBX file's models become groups
+//!   nested inside it ([`formats::scene`]). Units and axes default to what the
 //!   file records (FBX, 3MF), else to per-format guesses
 //!   ([`formats::Kind::default_hints`], unverified). Materials come with their colors
 //!   and PNG/JPEG textures (OBJ `map_Kd`, FBX, PLY, 3MF, 3DS); a textured material's
@@ -116,7 +118,7 @@ fn read_file(
     path: &Path,
     kind: formats::Kind,
     colors: bool,
-) -> Result<(mesh_import::Mesh, formats::Hints), String> {
+) -> Result<(formats::scene::Scene, formats::Hints), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let read = move |name: &str| {
@@ -128,24 +130,19 @@ fn read_file(
         };
         std::fs::read(p).ok()
     };
-    formats::read_mesh(kind, &bytes, &read, colors)
+    formats::read_scene(kind, &bytes, &read, colors)
 }
 
-/// Reads and converts a mesh file. Returns the model materials and the faces built
-/// with `first_material` as the model index of the first mesh material.
+/// Reads a mesh file: the model materials for its materials and the mesh (with its
+/// node hierarchy, FBX) to build with [`formats::scene::to_entities`].
 pub(crate) fn read_mesh(
     path: &Path,
     kind: formats::Kind,
-    opts: &mesh_import::MeshOptions,
-    first_material: usize,
     colors: bool,
-) -> Result<(Vec<mt_kernel::Material>, mt_kernel::Entities), String> {
-    let (mesh, _) = read_file(path, kind, colors)?;
-    let ids: Vec<usize> = (0..mesh.materials.len())
-        .map(|i| first_material + i)
-        .collect();
-    let ents = mesh_import::to_entities(&mesh, opts, &ids);
-    let materials = mesh
+) -> Result<(Vec<mt_kernel::Material>, formats::scene::Scene), String> {
+    let (scene, _) = read_file(path, kind, colors)?;
+    let materials = scene
+        .mesh
         .materials
         .iter()
         .map(|m| {
@@ -161,7 +158,7 @@ pub(crate) fn read_mesh(
             mat
         })
         .collect();
-    Ok((materials, ents))
+    Ok((materials, scene))
 }
 
 /// Reads a `.gltf` / `.glb` file (buffers and images next to it) into a model, with
@@ -461,22 +458,26 @@ impl App {
         let Kind::Mesh(kind) = d.kind else {
             return;
         };
-        let first = doc.model.materials.len();
-        let (materials, ents) = match read_mesh(&d.path, kind, &opts, first, d.colors) {
+        let (materials, scene) = match read_mesh(&d.path, kind, d.colors) {
             Ok(x) => x,
             Err(e) => {
                 self.file_error("import", &d.path, e);
                 return;
             }
         };
-        if ents.faces.is_empty() {
-            self.message = Some(format!("No faces in {}.", d.path.display()));
-            return;
-        }
-        let faces = ents.faces.len();
+        let mut faces = 0;
         let mut placed = None;
         doc.edit_model(|m, active| {
+            let first = m.materials.len();
+            let ids: Vec<usize> = (first..first + materials.len()).collect();
             m.materials.extend(materials);
+            // FBX models become groups inside the import's group.
+            let ents = formats::scene::to_entities(m, &scene, &opts, &ids);
+            faces = count_faces(m, &ents);
+            if faces == 0 {
+                m.materials.truncate(first);
+                return false;
+            }
             let name = m.unique_definition_name("Group#1");
             let def = m.definitions.insert(mt_kernel::Definition {
                 name,
@@ -497,6 +498,10 @@ impl App {
             placed = Some(active.instances.len() - 1);
             true
         });
+        if faces == 0 {
+            self.message = Some(format!("No faces in {}.", d.path.display()));
+            return;
+        }
         if let Some(i) = placed {
             self.selection.clear();
             self.selection.apply(Mode::Replace, [Owner::Instance(i)]);
@@ -504,6 +509,24 @@ impl App {
         self.rebuild(device);
         self.message = Some(format!("Imported {} ({faces} faces).", d.path.display()));
     }
+}
+
+/// Faces of `ents` and of the groups and components in it (each definition once).
+pub(crate) fn count_faces(model: &mt_kernel::Model, ents: &mt_kernel::Entities) -> usize {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<&mt_kernel::Entities> = vec![ents];
+    let mut n = 0;
+    while let Some(e) = stack.pop() {
+        n += e.faces.len();
+        for i in &e.instances {
+            if seen.insert(i.definition)
+                && let Some(d) = model.definitions.get(i.definition)
+            {
+                stack.push(&d.entities);
+            }
+        }
+    }
+    n
 }
 
 /// The Units row of an import dialog; with `from_file`, a "From file" choice first.
@@ -561,8 +584,9 @@ mod tests {
             y_up: false,
             merge_coplanar: true,
         };
-        let (mats, ents) =
-            read_mesh(&dir.join("t.obj"), formats::Kind::Obj, &opts, 3, true).unwrap();
+        let (mats, scene) = read_mesh(&dir.join("t.obj"), formats::Kind::Obj, true).unwrap();
+        let mut model = mt_kernel::Model::default();
+        let ents = formats::scene::to_entities(&mut model, &scene, &opts, &[3]);
         assert_eq!(mats.len(), 1);
         assert_eq!(mats[0].color, [0, 0, 255]);
         assert_eq!(ents.faces.len(), 1);
