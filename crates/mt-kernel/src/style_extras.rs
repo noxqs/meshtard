@@ -186,6 +186,27 @@ pub struct Watermark {
     /// The panel's Blend: 0 invisible .. 1 opaque.
     pub opacity: f32,
     pub mode: WatermarkMode,
+    /// Create Mask: the image's brightness becomes the opacity of the style's
+    /// background color (white opaque, black clear; from memory of SketchUp's help,
+    /// unverified).
+    pub mask: bool,
+}
+
+impl Watermark {
+    /// Moves watermark `i` of `list` (bottom first) one place up (drawn later, over
+    /// the next one) or down, past the next watermark of its own kind (overlays and
+    /// backgrounds are ordered among themselves). Returns the new index, `None` when it
+    /// cannot move.
+    pub fn reorder(list: &mut [Watermark], i: usize, up: bool) -> Option<usize> {
+        let overlay = list.get(i)?.overlay;
+        let j = if up {
+            (i + 1..list.len()).find(|&j| list[j].overlay == overlay)?
+        } else {
+            (0..i).rev().find(|&j| list[j].overlay == overlay)?
+        };
+        list.swap(i, j);
+        Some(j)
+    }
 }
 
 /// Modeling Settings colors (sRGB).
@@ -213,6 +234,47 @@ impl Default for ModelingColors {
     }
 }
 
+/// Inference marker colors of Modeling Settings (the point inferences; the axis,
+/// parallel and tangent colors are Preferences > Accessibility's).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InferenceColors {
+    pub endpoint: [u8; 3],
+    pub midpoint: [u8; 3],
+    pub on_edge: [u8; 3],
+    pub on_face: [u8; 3],
+}
+
+impl Default for InferenceColors {
+    fn default() -> Self {
+        // The inference engine's colors (`mt_infer::Kind::color`).
+        Self {
+            endpoint: [0, 200, 0],
+            midpoint: [0, 200, 220],
+            on_edge: [230, 0, 0],
+            on_face: [0, 0, 230],
+        }
+    }
+}
+
+/// Modeling Settings colors beyond [`ModelingColors`]: hidden geometry and the
+/// inference markers. Model-only (their style items are not known); SketchUp's
+/// panel and defaults for these are unverified.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelingExtras {
+    /// Hidden edges and the mesh of hidden faces under View > Hidden Geometry.
+    pub hidden_geometry: [u8; 3],
+    pub inference: InferenceColors,
+}
+
+impl Default for ModelingExtras {
+    fn default() -> Self {
+        Self {
+            hidden_geometry: [115, 115, 115],
+            inference: InferenceColors::default(),
+        }
+    }
+}
+
 /// A style item color: signed int32 ABGR (R in the low byte), as SketchUp stores them.
 pub fn color_item(c: [u8; 3]) -> i32 {
     i32::from_le_bytes([c[0], c[1], c[2], 0xff])
@@ -222,4 +284,39 @@ pub fn color_item(c: [u8; 3]) -> i32 {
 pub fn item_color(v: i64) -> [u8; 3] {
     let [r, g, b, _] = (v as i32).to_le_bytes();
     [r, g, b]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wm(name: &str) -> Watermark {
+        Watermark {
+            name: name.into(),
+            image: Arc::from(&b""[..]),
+            overlay: false,
+            opacity: 1.0,
+            mode: WatermarkMode::Stretched { lock_aspect: true },
+            mask: false,
+        }
+    }
+
+    #[test]
+    fn reorder_moves_one_place_and_stops_at_the_ends() {
+        let mut l = vec![wm("a"), wm("b"), wm("c")];
+        assert_eq!(Watermark::reorder(&mut l, 0, true), Some(1));
+        assert_eq!(l[1].name, "a");
+        assert_eq!(Watermark::reorder(&mut l, 2, true), None);
+        assert_eq!(Watermark::reorder(&mut l, 0, false), None);
+        assert_eq!(Watermark::reorder(&mut l, 5, false), None);
+        assert_eq!(Watermark::reorder(&mut l, 2, false), Some(1));
+        let names: Vec<_> = l.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["b", "c", "a"]);
+        // An overlay between two backgrounds is skipped over.
+        l[1].overlay = true;
+        assert_eq!(Watermark::reorder(&mut l, 0, true), Some(2));
+        let names: Vec<_> = l.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["a", "c", "b"]);
+        assert_eq!(Watermark::reorder(&mut l, 1, true), None);
+    }
 }

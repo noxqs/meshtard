@@ -1707,6 +1707,7 @@ fn watermarks_under_and_over(samples: u32) {
         overlay,
         opacity,
         placement: mt_render::WatermarkPlacement::Stretched { lock_aspect: false },
+        mask: None,
     };
     let mut style = plain_style();
     style.watermarks = vec![mark(false, 1.0)];
@@ -1744,6 +1745,28 @@ fn watermarks_under_and_over(samples: u32) {
     let face = pixel_at(&img, &camera, DVec3::ZERO);
     assert!(face[0] > face[1] + 50, "red half over the face: {face:?}");
     assert!(img.get_pixel(5, 5)[1] > 100, "half over white");
+}
+
+#[test]
+fn masked_watermark_shows_the_mask_color() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mut style = plain_style();
+    // The red picture's brightness (about a third) is the opacity of blue.
+    style.watermarks = vec![mt_render::Watermark {
+        image: red_png().into(),
+        overlay: true,
+        opacity: 1.0,
+        placement: mt_render::WatermarkPlacement::Stretched { lock_aspect: false },
+        mask: Some([0, 0, 255]),
+    }];
+    let mut viewport = Viewport::new(&device, style);
+    let camera = top_down();
+    let img = render(&device, &queue, &mut viewport, &camera, "watermark_mask");
+    let p = *img.get_pixel(5, 5);
+    assert!(p[2] > p[0] + 50 && p[0] > 120, "light blue: {p:?}");
 }
 
 #[test]

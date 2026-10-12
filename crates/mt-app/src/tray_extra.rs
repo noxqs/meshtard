@@ -230,6 +230,7 @@ pub(crate) fn mix_style(dst: &mut StyleSettings, src: &StyleSettings, part: usiz
         3 => dst.watermarks.clone_from(&src.watermarks),
         4 => {
             dst.modeling_colors = src.modeling_colors;
+            dst.modeling_extras = src.modeling_extras;
             dst.section_cut_width = src.section_cut_width;
             dst.section_fill = src.section_fill;
             dst.section_fill_color = src.section_fill_color;
@@ -295,6 +296,17 @@ pub(crate) fn style_file_text(style: &NamedStyle) -> String {
     let f = &s.fog;
     let [r, g, b] = f.color;
     let [ar, ag, ab] = s.ambient_occlusion.color;
+    let me = &s.modeling_extras;
+    let rgb = |c: [u8; 3]| format!("{},{},{}", c[0], c[1], c[2]);
+    out.push_str(&format!(
+        "modeling.hidden={}\nmodeling.endpoint={}\nmodeling.midpoint={}\n\
+         modeling.on_edge={}\nmodeling.on_face={}\n",
+        rgb(me.hidden_geometry),
+        rgb(me.inference.endpoint),
+        rgb(me.inference.midpoint),
+        rgb(me.inference.on_edge),
+        rgb(me.inference.on_face),
+    ));
     out.push_str(&format!(
         "fog.enabled={}\nfog.start={}\nfog.end={}\nfog.use_background={}\nfog.color={r},{g},{b}\n\
          hidden_objects={}\nao.use_color={}\nao.color={ar},{ag},{ab}\nface_style={}\n\
@@ -367,6 +379,18 @@ pub(crate) fn parse_style_file(text: &str) -> Result<NamedStyle, String> {
                 s.background.horizon_blend = v.parse().unwrap_or(s.background.horizon_blend);
             }
             "ao.use_color" => s.ambient_occlusion.use_color = flag,
+            "modeling.hidden" | "modeling.endpoint" | "modeling.midpoint" | "modeling.on_edge"
+            | "modeling.on_face" => {
+                let me = &mut s.modeling_extras;
+                let c = match k.as_str() {
+                    "modeling.hidden" => &mut me.hidden_geometry,
+                    "modeling.endpoint" => &mut me.inference.endpoint,
+                    "modeling.midpoint" => &mut me.inference.midpoint,
+                    "modeling.on_edge" => &mut me.inference.on_edge,
+                    _ => &mut me.inference.on_face,
+                };
+                *c = parse_rgb(&v).unwrap_or(*c);
+            }
             "ao.color" => {
                 s.ambient_occlusion.color = parse_rgb(&v).unwrap_or(s.ambient_occlusion.color);
             }
@@ -1369,6 +1393,8 @@ mod tests {
         s.settings.fog.start = 0.25;
         s.settings.background.color = [10, 20, 30];
         s.settings.face_style = mt_kernel::FaceStyle::HiddenLine;
+        s.settings.modeling_extras.hidden_geometry = [4, 5, 6];
+        s.settings.modeling_extras.inference.on_face = [7, 8, 9];
         let text = style_file_text(&s);
         let back = parse_style_file(&text).unwrap();
         assert_eq!(back.name, s.name);
@@ -1447,6 +1473,8 @@ mod tests {
             crate::annot::collect(doc, &mut scene);
             scene
         };
+        // Not on geometry: the dimension would be highlighted.
+        doc.model.dimension_expert.highlight_non_associated = false;
         let plain = collect(&doc);
         assert_eq!(plain.annotations.len(), 2);
         assert_eq!(plain.annotations[0].color, [0, 0, 0]);

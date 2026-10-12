@@ -143,7 +143,8 @@ pub use dock::{DockEdge, ToolbarLayout, ToolbarPlace, ToolbarPosition};
 pub use env_panel::{EXPOSURE_RANGE, EnvSettings, EnvironmentData, EnvironmentRow};
 pub use menu::menu_list;
 pub use style_panel::{
-    EDGE_COLOR_MODES, StyleExtras, WATERMARK_ANCHORS, WATERMARK_MODES, WatermarkRow,
+    EDGE_COLOR_MODES, INFERENCE_COLORS, StyleExtras, WATERMARK_ANCHORS, WATERMARK_MODES,
+    WatermarkRow,
 };
 pub use theme::apply as apply_theme;
 pub use tray_data::{
@@ -346,6 +347,9 @@ pub enum Event {
     WatermarkRemove(usize),
     /// Styles > Watermark: this watermark's settings changed.
     WatermarkChanged(usize, WatermarkRow),
+    /// Styles > Watermark: move this watermark up (drawn later) or down, past the
+    /// next one of its kind (overlay or background).
+    WatermarkMove(usize, bool),
     /// Shadows: any setting changed; the complete new settings.
     ShadowsChanged(ShadowSettings),
     /// Fog: any setting changed; the complete new settings.

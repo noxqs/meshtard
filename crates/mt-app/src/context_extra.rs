@@ -745,7 +745,7 @@ impl App {
                     _ => None,
                 };
                 // The text's own style, starting from the model's (Model Info > Text).
-                let default_style = doc.model.text_style;
+                let default_style = doc.model.text_style.clone();
                 doc.edit(|ents| {
                     let mut any = false;
                     for &i in &f.texts {
@@ -753,14 +753,14 @@ impl App {
                         if t.screen {
                             continue;
                         }
-                        let mut style = t.style.unwrap_or(default_style);
+                        let mut style = t.style.clone().unwrap_or_else(|| default_style.clone());
                         if let Some(a) = arrow {
                             style.endpoint = a;
                         }
                         if let Some(l) = leader {
                             style.leader = l;
                         }
-                        any |= t.style != Some(style);
+                        any |= t.style.as_ref() != Some(&style);
                         t.style = Some(style);
                     }
                     any

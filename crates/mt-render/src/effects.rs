@@ -43,6 +43,8 @@ pub struct Watermark {
     /// 0..1.
     pub opacity: f32,
     pub placement: WatermarkPlacement,
+    /// Create Mask: drawn in this sRGB color with the image's brightness as opacity.
+    pub mask: Option<[u8; 3]>,
 }
 
 /// The quad of a watermark of `image` pixels on a `viewport` of physical pixels:
@@ -261,14 +263,18 @@ struct WmTexture {
     size: [f32; 2],
 }
 
+/// A decoded watermark: its image allocation, mask color and texture (`None`:
+/// undecodable).
+type WmEntry = (Arc<[u8]>, Option<[u8; 3]>, Option<WmTexture>);
+
 /// Watermark images and the pipeline that draws them.
 pub(crate) struct Watermarks {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     list: Vec<Watermark>,
-    /// Decoded textures by image allocation (`None`: undecodable).
-    textures: Vec<(Arc<[u8]>, Option<WmTexture>)>,
+    /// Decoded textures by image allocation and mask color (`None`: undecodable).
+    textures: Vec<WmEntry>,
     /// Quads of the last [`Watermarks::prepare`]: buffer and per watermark its
     /// vertex range and texture index, under and over the model.
     vertices: Option<wgpu::Buffer>,
@@ -366,8 +372,10 @@ impl Watermarks {
     pub(crate) fn set(&mut self, list: &[Watermark]) {
         self.list = list.to_vec();
         // Drop textures no longer used.
-        self.textures
-            .retain(|(data, _)| list.iter().any(|w| Arc::ptr_eq(&w.image, data)));
+        self.textures.retain(|(data, mask, _)| {
+            list.iter()
+                .any(|w| Arc::ptr_eq(&w.image, data) && w.mask == *mask)
+        });
     }
 
     /// Decodes and uploads new images, then builds the quads for a viewport of `size`
@@ -386,12 +394,16 @@ impl Watermarks {
             return;
         }
         for w in &self.list {
-            if self.textures.iter().any(|(d, _)| Arc::ptr_eq(d, &w.image)) {
+            if (self.textures.iter()).any(|(d, m, _)| Arc::ptr_eq(d, &w.image) && *m == w.mask) {
                 continue;
             }
-            let tex = crate::texture::TextureImage::decode(&w.image)
-                .map(|img| self.upload(device, queue, &img));
-            self.textures.push((w.image.clone(), tex));
+            let tex = crate::texture::TextureImage::decode(&w.image).map(|mut img| {
+                if let Some(c) = w.mask {
+                    img.mask(c);
+                }
+                self.upload(device, queue, &img)
+            });
+            self.textures.push((w.image.clone(), w.mask, tex));
         }
         let mut verts: Vec<WmVertex> = Vec::new();
         let viewport = [size[0] as f32, size[1] as f32];
@@ -399,11 +411,11 @@ impl Watermarks {
             let Some(index) = self
                 .textures
                 .iter()
-                .position(|(d, t)| Arc::ptr_eq(d, &w.image) && t.is_some())
+                .position(|(d, m, t)| Arc::ptr_eq(d, &w.image) && *m == w.mask && t.is_some())
             else {
                 continue;
             };
-            let tex = self.textures[index].1.as_ref().expect("checked");
+            let tex = self.textures[index].2.as_ref().expect("checked");
             let ([x0, y0, x1, y1], [u0, v0, u1, v1]) =
                 watermark_rect(w.placement, tex.size, viewport, pixels_per_point);
             let ndc = |x: f32, y: f32| [x / viewport[0] * 2.0 - 1.0, 1.0 - y / viewport[1] * 2.0];
@@ -495,7 +507,7 @@ impl Watermarks {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, buffer.slice(..));
         for (range, index) in list {
-            if let Some(t) = &self.textures[*index].1 {
+            if let Some(t) = &self.textures[*index].2 {
                 pass.set_bind_group(0, &t.bind_group, &[]);
                 pass.draw(range.clone(), 0..1);
             }

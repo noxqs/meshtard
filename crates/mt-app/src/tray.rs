@@ -200,7 +200,8 @@ impl App {
             e @ (Event::StyleExtrasChanged(_)
             | Event::WatermarkAdd
             | Event::WatermarkRemove(_)
-            | Event::WatermarkChanged(..)) => return self.style_extras_event(e),
+            | Event::WatermarkChanged(..)
+            | Event::WatermarkMove(..)) => return self.style_extras_event(e),
             e @ (Event::OutlinerSelect { .. }
             | Event::OutlinerRename { .. }
             | Event::OutlinerVisible { .. }) => match self.outliner_section_event(e) {

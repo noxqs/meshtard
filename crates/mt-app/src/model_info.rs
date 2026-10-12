@@ -10,9 +10,11 @@
 //! Components (fades, show component axes), Dimensions, Text and Geo-location
 //! (FEATURES.md 61) are model data that is not saved in .skp files yet. Dimensions
 //! and Text set the style of new labels; Update Selected gives the selected ones
-//! the current style. Label fonts are the UI font at the chosen size (no font
-//! choice). Geo-location's latitude and longitude are the Shadows settings'; the
-//! north angle turns the sun.
+//! the current style. Label fonts are system fonts (`label_fonts`) or the UI font.
+//! Dimensions > Expert Settings highlight dimensions not on geometry and hide ones
+//! seen end-on or too small (`annot`). Geo-location's latitude and longitude are the
+//! Shadows settings'; the north angle turns the sun; Add Location imports a map
+//! snapshot (`geo_map`).
 
 use eframe::egui;
 use mt_infer::units::{LengthFormat, LengthUnit, UnitsOptions, parse_length};
@@ -509,6 +511,18 @@ impl App {
                 ui.label(format!(
                     "{n} component definitions; no author credits are stored."
                 ));
+                // Add Location's map snapshot must be credited.
+                if (doc.model.materials.iter())
+                    .any(|m| m.name.contains(crate::geo_map::ATTRIBUTION))
+                {
+                    ui.add_space(6.0);
+                    ui.strong("Map Data");
+                    ui.label(format!(
+                        "{}: map data {}.",
+                        crate::geo_map::SNAPSHOT,
+                        crate::geo_map::ATTRIBUTION
+                    ));
+                }
                 false
             }
             Page::Animation => {
@@ -628,9 +642,11 @@ impl App {
         let Some(doc) = self.document.as_mut() else {
             return false;
         };
-        let mut s = doc.model.dimension_style;
+        let mut s = doc.model.dimension_style.clone();
         ui.strong("Text");
         ui.horizontal(|ui| {
+            ui.label("Font");
+            crate::label_fonts::combo(ui, "mt_mi_dim_family", &mut s.font);
             ui.label("Size");
             s.font_size = font_size_combo(ui, "mt_mi_dim_font", s.font_size);
         });
@@ -664,11 +680,14 @@ impl App {
         });
         let mut rebuild = false;
         if s != doc.model.dimension_style {
+            let s = s.clone();
             rebuild |= doc.edit_model(|m, _| {
                 m.dimension_style = s;
                 true
             });
         }
+        ui.add_space(6.0);
+        rebuild |= expert_settings(ui, doc);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Select All Dimensions").clicked() {
@@ -690,8 +709,8 @@ impl App {
                     let mut any = false;
                     for &i in &selected {
                         if let Some(d) = ents.dimensions.get_mut(i) {
-                            any |= d.style != Some(s);
-                            d.style = Some(s);
+                            any |= d.style.as_ref() != Some(&s);
+                            d.style = Some(s.clone());
                         }
                     }
                     any
@@ -717,8 +736,12 @@ impl App {
         let Some(doc) = self.document.as_mut() else {
             return false;
         };
-        let mut s = doc.model.text_style;
+        let mut s = doc.model.text_style.clone();
         ui.strong("Text");
+        ui.horizontal(|ui| {
+            ui.label("Font");
+            crate::label_fonts::combo(ui, "mt_mi_text_family", &mut s.font);
+        });
         ui.horizontal(|ui| {
             ui.label("Size");
             s.font_size = font_size_combo(ui, "mt_mi_text_font", s.font_size);
@@ -745,6 +768,7 @@ impl App {
             });
         let mut rebuild = false;
         if s != doc.model.text_style {
+            let s = s.clone();
             rebuild |= doc.edit_model(|m, _| {
                 m.text_style = s;
                 true
@@ -771,8 +795,8 @@ impl App {
                     let mut any = false;
                     for &i in &selected {
                         if let Some(t) = ents.texts.get_mut(i) {
-                            any |= t.style != Some(s);
-                            t.style = Some(s);
+                            any |= t.style.as_ref() != Some(&s);
+                            t.style = Some(s.clone());
                         }
                     }
                     any
@@ -871,16 +895,73 @@ impl App {
         ui.label(
             egui::RichText::new(
                 "The location and north angle place the sun for shadows. Kept in the \
-                 model, not saved in the .skp file; no map import.",
+                 model, not saved in the .skp file.",
             )
             .small()
             .weak(),
         );
+        ui.add_space(6.0);
+        ui.strong("Map");
+        ui.horizontal(|ui| {
+            if ui
+                .button("Add Location...")
+                .on_hover_text("Import an OpenStreetMap snapshot of the location")
+                .clicked()
+            {
+                let (la, lo) = (m.shadows.latitude, m.shadows.longitude);
+                self.geo_map
+                    .get_or_insert_with(|| crate::geo_map::GeoMap::new(la, lo));
+            }
+        });
         if changed {
             self.apply_shadows();
         }
         false
     }
+}
+
+/// Model Info > Dimensions > Expert Settings (a group on the page; SketchUp opens a
+/// dialog from an "Expert dimension settings" button, unverified). Returns whether
+/// the scene must be rebuilt. One undo step per change.
+fn expert_settings(ui: &mut egui::Ui, doc: &mut crate::document::Document) -> bool {
+    let mut x = doc.model.dimension_expert;
+    egui::CollapsingHeader::new("Expert Settings")
+        .id_salt("mt_mi_dim_expert")
+        .show(ui, |ui| {
+            ui.checkbox(&mut x.radial_prefix, "Show radius / diameter prefix");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut x.hide_foreshortened, "Hide when foreshortened");
+                ui.add_enabled(
+                    x.hide_foreshortened,
+                    egui::Slider::new(&mut x.foreshortened_limit, 0.0..=0.9).show_value(false),
+                )
+                .on_hover_text("Hide dimensions whose length shows less than this share");
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut x.hide_small, "Hide when too small");
+                ui.add_enabled(
+                    x.hide_small,
+                    egui::Slider::new(&mut x.small_limit, 0.0..=100.0).show_value(false),
+                )
+                .on_hover_text("Hide dimensions shorter than this on screen");
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut x.highlight_non_associated,
+                    "Highlight non-associated dimensions",
+                );
+                ui.add_enabled_ui(x.highlight_non_associated, |ui| {
+                    ui.color_edit_button_srgb(&mut x.highlight_color)
+                });
+            });
+        });
+    if x == doc.model.dimension_expert {
+        return false;
+    }
+    doc.edit_model(|m, _| {
+        m.dimension_expert = x;
+        true
+    })
 }
 
 #[cfg(test)]

@@ -56,6 +56,8 @@ items = [
   { id = "extensions.warehouse", tooltip = "Extension Warehouse" },
   { id = "file.send_to_layout", tooltip = "Send to LayOut" },
   { id = "extensions.manager", tooltip = "Extension Manager" },
+  { separator = true },
+  { id = "help.search", tooltip = "Search" },
 ]
 
 [[toolbar]]

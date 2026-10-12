@@ -24,10 +24,12 @@ mod extensions;
 mod filedialog;
 mod fix_problems;
 mod flip;
+mod geo_map;
 mod graphics;
 mod grips;
 mod image_entity;
 mod import;
+mod label_fonts;
 mod lasso;
 mod library;
 mod locks;
@@ -499,6 +501,10 @@ struct App {
     extensions: extensions::Extensions,
     /// Tray panel collections and thumbnails.
     tray_lib: tray_extra::TrayLib,
+    /// Label fonts of dimensions and texts loaded into egui.
+    label_fonts: label_fonts::LabelFonts,
+    /// Model Info > Geo-location > Add Location (map import).
+    geo_map: Option<geo_map::GeoMap>,
 }
 
 impl App {
@@ -617,6 +623,8 @@ impl App {
             match_photo: Default::default(),
             extensions: Default::default(),
             tray_lib: Default::default(),
+            label_fonts: Default::default(),
+            geo_map: None,
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -1690,6 +1698,11 @@ impl App {
         self.orbit_double_click(ui, &response, rect, viewport_px);
         self.tool_cursor(ui, &response, rect, viewport_px);
         self.update_facing(&render_state.device);
+        let points = f64::from(ui.ctx().pixels_per_point());
+        self.update_dimension_view(&render_state.device, viewport_px, points);
+        overlay::set_model_colors(
+            (self.document.as_ref()).map(|d| d.model.style.modeling_extras.inference),
+        );
         self.update_live(&render_state.device);
 
         let photo_behind = self.match_photo_behind();
@@ -1810,12 +1823,15 @@ impl App {
                 .map(|q| rect.min + egui::vec2(q.x as f32, q.y as f32) / ppp)
         };
         let selection = &self.selection;
+        let fonts = &mut self.label_fonts;
+        let ctx = ui.ctx().clone();
         annot::paint(
             &ui.painter().with_clip_rect(rect),
             &to_screen,
             rect,
             &self.scene.annotations,
             &|o| selection.contains(o),
+            &mut |font| fonts.family(&ctx, font),
         );
         match (self.draw.as_mut(), self.document.as_mut()) {
             (Some(draw), Some(doc)) => {
@@ -2741,6 +2757,7 @@ impl eframe::App for App {
         self.text3d_ui(ui.ctx(), frame);
         self.animation_ui(ui.ctx(), frame);
         self.model_info_ui(ui.ctx(), frame);
+        self.geo_map_ui(ui.ctx(), frame);
         self.preferences_ui(ui.ctx(), frame);
         self.presentation_ui(ui.ctx(), frame);
         self.context_extra_ui(ui.ctx(), frame);

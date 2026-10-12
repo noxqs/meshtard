@@ -216,8 +216,10 @@ impl DimensionAlign {
 }
 
 /// A dimension's text and end style.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DimensionStyle {
+    /// Font name (a system font's full name); `None` = the application font.
+    pub font: Option<String>,
     /// Points.
     pub font_size: f32,
     pub align: DimensionAlign,
@@ -227,10 +229,63 @@ pub struct DimensionStyle {
 impl Default for DimensionStyle {
     fn default() -> Self {
         Self {
+            font: None,
             font_size: 13.0,
             align: DimensionAlign::Screen,
             endpoint: Endpoint::ClosedArrow,
         }
+    }
+}
+
+/// Model Info > Dimensions > Expert Settings. The help documents "Highlight
+/// non-associated dimensions"; the radial prefix, the two hiding options, their
+/// limits and every default are from memory of SketchUp (unverified).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DimensionExpert {
+    /// `R` / `DIA` before radial dimensions' values.
+    pub radial_prefix: bool,
+    /// Hide a dimension whose measured segment is seen nearly end-on.
+    pub hide_foreshortened: bool,
+    /// Hidden below this apparent / true length ratio (0..1).
+    pub foreshortened_limit: f32,
+    /// Hide a dimension whose dimension line is short on screen.
+    pub hide_small: bool,
+    /// Hidden below this on-screen length, in points.
+    pub small_limit: f32,
+    /// Draw dimensions not attached to geometry in `highlight_color`.
+    pub highlight_non_associated: bool,
+    /// sRGB.
+    pub highlight_color: [u8; 3],
+}
+
+impl Default for DimensionExpert {
+    fn default() -> Self {
+        Self {
+            radial_prefix: true,
+            hide_foreshortened: true,
+            foreshortened_limit: 0.2,
+            hide_small: true,
+            small_limit: 12.0,
+            highlight_non_associated: true,
+            highlight_color: [255, 0, 0],
+        }
+    }
+}
+
+impl DimensionExpert {
+    /// Whether a dimension measuring `a`-`b` is hidden for this view: `view` is the
+    /// unit direction the camera looks along at the dimension, `screen_length` the
+    /// dimension line's length on screen in points (`None` when not projected).
+    pub fn hidden(
+        &self,
+        a: glam::DVec3,
+        b: glam::DVec3,
+        view: glam::DVec3,
+        screen_length: Option<f64>,
+    ) -> bool {
+        (self.hide_foreshortened
+            && crate::annotation::foreshortening(a, b, view) < f64::from(self.foreshortened_limit))
+            || (self.hide_small && screen_length.is_some_and(|l| l < f64::from(self.small_limit)))
     }
 }
 
@@ -257,9 +312,11 @@ impl LeaderKind {
     }
 }
 
-/// A text's font size, color and leader style.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A text's font, size, color and leader style.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
+    /// Font name (a system font's full name); `None` = the application font.
+    pub font: Option<String>,
     /// Points.
     pub font_size: f32,
     /// sRGB.
@@ -271,6 +328,7 @@ pub struct TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
+            font: None,
             font_size: 13.0,
             color: [0, 0, 0],
             leader: LeaderKind::ViewBased,

@@ -52,6 +52,10 @@ pub struct Document {
     /// for their shadows). Not part of the model: the app sets it before building
     /// the scene; `None` draws them as placed.
     pub view: Option<crate::component_behavior::Facing>,
+    /// Dimensions hidden for the current view by Model Info > Dimensions > Expert
+    /// Settings, as sorted (open context or not, index) keys (see `annot`). Set by the
+    /// app before the scene is built; not part of the model.
+    pub dims_hidden: Vec<(bool, usize)>,
 }
 
 /// A state Undo and Redo go back to: the model, the edit context, the state id and
@@ -196,8 +200,8 @@ fn rgba(c: [u8; 3]) -> [f32; 4] {
 }
 
 /// How View > Hidden Geometry draws hidden entities (drafts: SketchUp shows hidden
-/// edges dashed and hidden faces as a faded mesh; colors and dash lengths unverified).
-const HIDDEN_EDGE: [f32; 4] = [0.45, 0.45, 0.45, 1.0];
+/// edges dashed and hidden faces as a faded mesh; dash lengths unverified). Their
+/// color is the style's Modeling Settings > Hidden geometry.
 const HIDDEN_DASH: f32 = 4.0;
 const HIDDEN_MESH_DASH: f32 = 2.0;
 const HIDDEN_FACE_ALPHA: f32 = 0.35;
@@ -351,6 +355,7 @@ impl Document {
             redo_names: Vec::new(),
             operation: String::new(),
             view: None,
+            dims_hidden: Vec::new(),
         })
     }
 
@@ -380,6 +385,7 @@ impl Document {
             redo_names: Vec::new(),
             operation: String::new(),
             view: None,
+            dims_hidden: Vec::new(),
         }
     }
 
@@ -870,6 +876,7 @@ impl Document {
         out: &mut Scene,
     ) {
         let show_hidden = self.model.style.hidden_geometry;
+        let hidden_color = rgba(self.model.style.modeling_extras.hidden_geometry);
         // View > Hidden Objects: hidden groups and components (drawn as hidden).
         let show_objects = self.model.style.hidden_objects;
         // View > Component Edit > Hide Rest Of Model: only the open context's path is
@@ -954,7 +961,7 @@ impl Document {
             let mut seg = Segment::line(
                 world(ents.pos(e.start)),
                 world(ents.pos(e.end)),
-                if hidden { HIDDEN_EDGE } else { color },
+                if hidden { hidden_color } else { color },
                 [
                     EDGE_WIDTH,
                     if hidden {
@@ -1077,7 +1084,7 @@ impl Document {
                         let seg = Segment::line(
                             f32x3(tri[k]),
                             f32x3(tri[(k + 1) % 3]),
-                            HIDDEN_EDGE,
+                            hidden_color,
                             [EDGE_WIDTH, HIDDEN_MESH_DASH],
                         );
                         out.hidden_edges.insert(out.edges.len());

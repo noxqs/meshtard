@@ -7,11 +7,20 @@
 //! alignment (to the screen, or along the dimension line above, centered or outside
 //! it), the endpoints (none, slash, dot, closed or open arrow), the text color and
 //! leader (FEATURES.md 61). Drafts: SketchUp's label font, the endpoint sizes and the
-//! leader dot are unverified.
+//! leader dot are unverified. Labels use the style's font (a system font loaded by
+//! `label_fonts`), else the application font.
+//!
+//! Model Info > Dimensions > Expert Settings: dimensions whose points are not on
+//! geometry are drawn in the highlight color; dimensions seen end-on or too small on
+//! screen are hidden. Hiding depends on the view, so the app keeps the hidden set in
+//! the document ([`Document::dims_hidden`]) and rebuilds the scene when it changes
+//! (`App::update_dimension_view`).
 
 use glam::{DMat4, DVec2, DVec3};
 use mt_infer::units::LengthUnit;
-use mt_kernel::model_data::{DimensionAlign, DimensionStyle, Endpoint, LeaderKind, TextStyle};
+use mt_kernel::model_data::{
+    DimensionAlign, DimensionExpert, DimensionStyle, Endpoint, LeaderKind, TextStyle,
+};
 use mt_kernel::{Dimension, DimensionKind, Entities};
 use mt_render::Segment;
 
@@ -51,6 +60,47 @@ pub struct Annotation {
     pub color: [u8; 3],
     /// A dimension's line and how its text is aligned to it.
     pub along: Option<([DVec3; 2], DimensionAlign)>,
+    /// The style's font name (`None`: the application font).
+    pub font: Option<String>,
+    /// A dimension's key and points, to hide it by view (Expert Settings).
+    pub dim: Option<DimView>,
+    /// Hidden for the current view: not painted or picked (its lines are left out).
+    pub view_hidden: bool,
+}
+
+/// What hiding a dimension by view needs: its key in [`Document::dims_hidden`] (open
+/// context or not, index) and, in world space, the measured points and the
+/// dimension line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DimView {
+    pub key: (bool, usize),
+    pub a: DVec3,
+    pub b: DVec3,
+    pub line: [DVec3; 2],
+}
+
+impl DimView {
+    /// Whether `expert` hides this dimension seen from `camera` on a viewport of
+    /// `viewport` physical pixels at `ppp` pixels per point.
+    pub fn hidden(
+        &self,
+        expert: &DimensionExpert,
+        camera: &mt_render::Camera,
+        viewport: DVec2,
+        ppp: f64,
+    ) -> bool {
+        let view = if camera.perspective {
+            ((self.a + self.b) / 2.0 - camera.eye).normalize_or_zero()
+        } else {
+            camera.forward()
+        };
+        let [p, q] = self.line;
+        let screen = camera
+            .project(p, viewport)
+            .zip(camera.project(q, viewport))
+            .map(|(p, q)| p.distance(q) / ppp.max(1e-6));
+        expert.hidden(self.a, self.b, view, screen)
+    }
 }
 
 fn trim_number(v: f64) -> String {
@@ -61,14 +111,19 @@ fn trim_number(v: f64) -> String {
 /// A dimension's label: its text, or the measured value (`R` and `DIA` prefixes for
 /// radial ones, unverified).
 pub fn dimension_label(d: &Dimension, units: LengthUnit) -> String {
+    dimension_label_with(d, units, true)
+}
+
+/// [`dimension_label`] with or without the radial prefixes (Expert Settings).
+pub fn dimension_label_with(d: &Dimension, units: LengthUnit, prefix: bool) -> String {
     if let Some(t) = &d.text {
         return t.clone();
     }
     let v = units.format(d.value());
     match d.kind {
-        DimensionKind::Linear => v,
-        DimensionKind::Radius => format!("R{v}"),
-        DimensionKind::Diameter => format!("DIA {v}"),
+        DimensionKind::Radius if prefix => format!("R{v}"),
+        DimensionKind::Diameter if prefix => format!("DIA {v}"),
+        _ => v,
     }
 }
 
@@ -103,11 +158,14 @@ pub fn point_label(p: DVec3, units: LengthUnit) -> String {
 pub fn collect(doc: &Document, scene: &mut Scene) {
     let root = doc.context.is_empty();
     let o = Options {
+        model: &doc.model,
         units: doc.units,
         // Dimensions and texts are objects: View > Hidden Objects shows them.
         show_hidden: doc.model.style.hidden_objects,
-        dimension: doc.model.dimension_style,
-        text: doc.model.text_style,
+        dimension: &doc.model.dimension_style,
+        text: &doc.model.text_style,
+        expert: doc.model.dimension_expert,
+        view_hidden: &doc.dims_hidden,
         tags: (0..doc.model.layers.len())
             .map(|l| (doc.model.layer_shown(l), doc.model.layers[l].color))
             .collect(),
@@ -121,18 +179,22 @@ pub fn collect(doc: &Document, scene: &mut Scene) {
 
 /// What labels are drawn with: units, View > Hidden Geometry and the model's
 /// default dimension and text styles.
-struct Options {
+struct Options<'a> {
+    model: &'a mt_kernel::Model,
     units: LengthUnit,
     show_hidden: bool,
-    dimension: DimensionStyle,
-    text: TextStyle,
+    dimension: &'a DimensionStyle,
+    text: &'a TextStyle,
+    expert: DimensionExpert,
+    /// Dimensions hidden for the current view (sorted keys).
+    view_hidden: &'a [(bool, usize)],
     /// Per tag: shown (tag and folders visible) and color.
     tags: Vec<(bool, [u8; 3])>,
     /// Tags panel Color by Tag: labels and lines in their tag's color.
     color_by_tag: bool,
 }
 
-impl Options {
+impl Options<'_> {
     /// Whether an annotation on `layer` is drawn (its tag is shown).
     fn shown(&self, layer: Option<usize>) -> bool {
         layer.is_none_or(|l| self.tags.get(l).is_none_or(|t| t.0))
@@ -170,10 +232,22 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
             continue;
         }
         let owner = owned.then_some(Owner::Dimension(i));
-        let tag_color = o.tag_color(d.layer);
+        // Expert Settings: dimensions off geometry in the highlight color (over
+        // Color by Tag).
+        let loose = o.expert.highlight_non_associated
+            && !mt_kernel::annotation::dimension_associated(o.model, ents, d);
+        let tag_color = if loose {
+            Some(o.expert.highlight_color)
+        } else {
+            o.tag_color(d.layer)
+        };
+        let key = (owned, i);
+        let view_hidden = o.view_hidden.binary_search(&key).is_ok();
         // Extension lines overshoot by a tenth of the offset (unverified).
-        for [a, b] in d.segments(d.offset.length() * 0.1) {
-            line(a, b, owner, tag_color);
+        if !view_hidden {
+            for [a, b] in d.segments(d.offset.length() * 0.1) {
+                line(a, b, owner, tag_color);
+            }
         }
         let [p, q] = d.line();
         let arrows = match d.kind {
@@ -182,10 +256,10 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
                 vec![[w(p), w(q)], [w(q), w(p)]]
             }
         };
-        let style = d.style.unwrap_or(o.dimension);
+        let style = d.style.as_ref().unwrap_or(o.dimension);
         labels.push(Annotation {
             owner,
-            text: dimension_label(d, units),
+            text: dimension_label_with(d, units, o.expert.radial_prefix),
             at: Anchor::World(w(d.label_point())),
             arrows,
             endpoint: style.endpoint,
@@ -193,6 +267,14 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
             color: tag_color.unwrap_or([0, 0, 0]),
             // Radial dimensions keep their text on the leader, facing the screen.
             along: (d.kind == DimensionKind::Linear).then_some(([w(p), w(q)], style.align)),
+            font: style.font.clone(),
+            dim: Some(DimView {
+                key,
+                a: w(d.a),
+                b: w(d.b),
+                line: [w(p), w(q)],
+            }),
+            view_hidden,
         });
     }
     for (i, t) in ents.texts.iter().enumerate() {
@@ -201,7 +283,7 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
         }
         let tag_color = o.tag_color(t.layer);
         let owner = owned.then_some(Owner::Text(i));
-        let style = t.style.unwrap_or(o.text);
+        let style = t.style.as_ref().unwrap_or(o.text);
         let leader = !t.screen && style.leader != LeaderKind::Hidden;
         let at = if t.screen {
             Anchor::Screen(t.point.truncate())
@@ -224,6 +306,9 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
             font_size: style.font_size,
             color: tag_color.unwrap_or(style.color),
             along: None,
+            font: style.font.clone(),
+            dim: None,
+            view_hidden: false,
         });
     }
     scene.annotations.extend(labels);
@@ -355,7 +440,7 @@ pub fn pick(
     viewport: DVec2,
 ) -> Option<Owner> {
     scene.annotations.iter().rev().find_map(|a| {
-        let owner = a.owner?;
+        let owner = a.owner.filter(|_| !a.view_hidden)?;
         let c = label_pos(a, &project, viewport)?;
         let k = f64::from(a.font_size / FONT_SIZE);
         let half = DVec2::new(
@@ -376,19 +461,22 @@ pub fn label_points(
     scene
         .annotations
         .iter()
+        .filter(|a| !a.view_hidden)
         .filter_map(|a| Some((a.owner?, label_pos(a, &project, viewport))))
         .collect()
 }
 
-/// Paints labels, arrowheads and leader dots.
+/// Paints labels, arrowheads and leader dots. `family` gives the egui font family of
+/// a style's font (the proportional one while it is not loaded).
 pub fn paint(
     painter: &egui::Painter,
     to_screen: &impl Fn(DVec3) -> Option<egui::Pos2>,
     rect: egui::Rect,
     annotations: &[Annotation],
     selected: &impl Fn(&Owner) -> bool,
+    family: &mut dyn FnMut(Option<&str>) -> egui::FontFamily,
 ) {
-    for a in annotations {
+    for a in annotations.iter().filter(|a| !a.view_hidden) {
         let color = if a.owner.as_ref().is_some_and(selected) {
             SELECTED
         } else {
@@ -410,7 +498,7 @@ pub fn paint(
         }
         let galley = painter.layout_no_wrap(
             a.text.clone(),
-            egui::FontId::proportional(a.font_size.clamp(4.0, 96.0)),
+            egui::FontId::new(a.font_size.clamp(4.0, 96.0), family(a.font.as_deref())),
             color,
         );
         let size = galley.size() + egui::vec2(6.0, 2.0);
@@ -498,6 +586,57 @@ fn endpoint(
             painter.line_segment([tip, base + side * 1.3], stroke);
             painter.line_segment([tip, base - side * 1.3], stroke);
         }
+    }
+}
+
+/// The sorted keys of the dimensions among `annotations` that `expert` hides for this
+/// view (none when neither hiding option is on).
+pub fn hidden_by_view(
+    annotations: &[Annotation],
+    expert: &DimensionExpert,
+    camera: &mt_render::Camera,
+    viewport: DVec2,
+    ppp: f64,
+) -> Vec<(bool, usize)> {
+    if !expert.hide_foreshortened && !expert.hide_small {
+        return Vec::new();
+    }
+    let mut keys: Vec<_> = annotations
+        .iter()
+        .filter_map(|a| a.dim)
+        .filter(|d| d.hidden(expert, camera, viewport, ppp))
+        .map(|d| d.key)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+impl crate::App {
+    /// Rebuilds the scene when the dimensions hidden by view (Expert Settings) change
+    /// as the view moves. Waits while a tool shows a live preview.
+    pub(crate) fn update_dimension_view(
+        &mut self,
+        device: &egui_wgpu::wgpu::Device,
+        viewport: DVec2,
+        ppp: f64,
+    ) {
+        let Some(doc) = self.document.as_ref() else {
+            return;
+        };
+        let want = hidden_by_view(
+            &self.scene.annotations,
+            &doc.model.dimension_expert,
+            &self.camera,
+            viewport,
+            ppp,
+        );
+        if want == doc.dims_hidden || self.live.is_some() {
+            return;
+        }
+        if let Some(doc) = self.document.as_mut() {
+            doc.dims_hidden = want;
+        }
+        self.rebuild(device);
     }
 }
 
@@ -609,13 +748,23 @@ mod tests {
             font_size: 13.0,
             color: [0, 0, 0],
             along: Some(([DVec3::ZERO, DVec3::new(100.0, 0.0, 0.0)], align)),
+            font: None,
+            dim: None,
+            view_hidden: false,
         };
         let ctx = egui::Context::default();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
             let p = ui.ctx().layer_painter(egui::LayerId::background());
             let to_screen = |q: DVec3| Some(egui::pos2(q.x as f32 + 100.0, 150.0 - q.y as f32));
-            paint(&p, &to_screen, rect, std::slice::from_ref(&a), &|_| false);
+            paint(
+                &p,
+                &to_screen,
+                rect,
+                std::slice::from_ref(&a),
+                &|_| false,
+                &mut |_| egui::FontFamily::Proportional,
+            );
         });
         out.textures_delta.clear();
         out.shapes.len()
@@ -670,6 +819,85 @@ mod tests {
         assert_eq!(e.dimensions.len(), 1);
         assert_eq!(e.dimensions[0].b, DVec3::new(2.0, 0.0, 5.0));
         assert_eq!(e.texts.len(), 2);
+    }
+
+    #[test]
+    fn expert_settings_highlight_prefix_and_hide_by_view() {
+        let mut doc = Document::untitled();
+        doc.edit(|e| {
+            mt_kernel::add_line(e, DVec3::ZERO, DVec3::X * 10.0);
+            // On the edge, then off any geometry.
+            e.dimensions.push(Dimension::linear(
+                DVec3::ZERO,
+                DVec3::X * 10.0,
+                DVec3::Y * 2.0,
+            ));
+            e.dimensions.push(Dimension {
+                kind: DimensionKind::Diameter,
+                ..Dimension::linear(DVec3::Y * 50.0, DVec3::new(10.0, 50.0, 0.0), DVec3::Y)
+            });
+            true
+        });
+        let red = doc.model.dimension_expert.highlight_color;
+        let scene = doc.scene();
+        assert_eq!(scene.annotations[0].color, [0, 0, 0]);
+        assert_eq!(scene.annotations[1].color, red);
+        assert!(scene.annotations[1].text.starts_with("DIA "));
+        doc.model.dimension_expert.radial_prefix = false;
+        doc.model.dimension_expert.highlight_non_associated = false;
+        let scene = doc.scene();
+        assert_eq!(scene.annotations[1].color, [0, 0, 0]);
+        assert_eq!(scene.annotations[1].text, "10\"");
+
+        // Seen from the top both show; looking along red, both are end-on.
+        let ex = doc.model.dimension_expert;
+        let viewport = DVec2::new(800.0, 600.0);
+        let top = mt_render::Camera {
+            eye: DVec3::new(5.0, 20.0, 100.0),
+            target: DVec3::new(5.0, 20.0, 0.0),
+            fov_deg: 35.0,
+            perspective: true,
+            two_point: false,
+        };
+        assert!(hidden_by_view(&scene.annotations, &ex, &top, viewport, 1.0).is_empty());
+        let along = mt_render::Camera {
+            eye: DVec3::new(-200.0, 20.0, 1.0),
+            target: DVec3::new(5.0, 20.0, 1.0),
+            ..top
+        };
+        let keys = hidden_by_view(&scene.annotations, &ex, &along, viewport, 1.0);
+        assert_eq!(keys, [(true, 0), (true, 1)]);
+        // Far away they are too small.
+        let far = mt_render::Camera {
+            eye: DVec3::new(5.0, 20.0, 1e5),
+            ..top
+        };
+        assert_eq!(
+            hidden_by_view(&scene.annotations, &ex, &far, viewport, 1.0).len(),
+            2
+        );
+        // Hidden ones lose their lines and labels, and do not pick.
+        doc.dims_hidden = keys;
+        let scene = doc.scene();
+        assert!(
+            scene
+                .edge_owner
+                .iter()
+                .all(|o| !matches!(o, Some(Owner::Dimension(_))))
+        );
+        assert!(scene.annotations.iter().all(|a| a.view_hidden));
+        let project = |p: DVec3| Some(p.truncate() * 10.0);
+        assert_eq!(
+            pick(&scene, project, DVec2::new(50.0, 20.0), viewport),
+            None
+        );
+        // Both options off: nothing is hidden.
+        let off = DimensionExpert {
+            hide_foreshortened: false,
+            hide_small: false,
+            ..ex
+        };
+        assert!(hidden_by_view(&scene.annotations, &off, &along, viewport, 1.0).is_empty());
     }
 
     #[test]

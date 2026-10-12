@@ -2,11 +2,41 @@
 
 use glam::DVec3;
 use mt_infer::{Inference, Kind};
+use mt_kernel::style_extras::InferenceColors;
 
 /// An inference color, with Preferences > Accessibility's colors.
 fn color32(c: [u8; 3]) -> egui::Color32 {
     let c = crate::prefs_pages::remap(c);
     egui::Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// The open model's Styles > Modeling inference colors (set every frame).
+static MODEL_COLORS: std::sync::RwLock<Option<InferenceColors>> = std::sync::RwLock::new(None);
+
+/// Sets the inference marker colors of the open model's style.
+pub fn set_model_colors(c: Option<InferenceColors>) {
+    if let Ok(mut g) = MODEL_COLORS.write() {
+        *g = c;
+    }
+}
+
+/// A marker's fill: magenta inside groups and components, the style's colors for
+/// endpoints, midpoints and points on edges or faces, the inference color (with
+/// Preferences > Accessibility's colors) otherwise.
+fn marker_color(inf: &Inference, style: Option<InferenceColors>) -> egui::Color32 {
+    let own = style.filter(|_| inf.container.is_none()).and_then(|s| {
+        Some(match inf.kind {
+            Kind::Endpoint => s.endpoint,
+            Kind::Midpoint | Kind::ArcMidpoint => s.midpoint,
+            Kind::OnEdge => s.on_edge,
+            Kind::OnFace => s.on_face,
+            _ => return None,
+        })
+    });
+    match own {
+        Some(c) => egui::Color32::from_rgb(c[0], c[1], c[2]),
+        None => color32(inf.color()),
+    }
 }
 
 /// Draws the tool's preview polylines, the guide line, the inference marker and its
@@ -50,7 +80,7 @@ pub fn paint(
 
     // Marker: dot for points, square for "on" inferences, diamond on faces; magenta
     // inside a group or component.
-    let fill = color32(inf.color());
+    let fill = marker_color(inf, MODEL_COLORS.read().ok().and_then(|g| *g));
     let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
     match inf.kind {
         Kind::Endpoint
@@ -182,5 +212,50 @@ pub fn planes(
             egui::Color32::from_rgba_unmultiplied(r, g, b, if p.hot { 255 } else { 140 }),
         );
         painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inf(kind: Kind) -> Inference {
+        Inference {
+            point: DVec3::ZERO,
+            kind,
+            edge: None,
+            guide: None,
+            locked: false,
+            normal: None,
+            segment: None,
+            container: None,
+        }
+    }
+
+    #[test]
+    fn style_colors_replace_the_point_markers() {
+        let rgb = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+        // The defaults are the inference engine's colors.
+        let d = InferenceColors::default();
+        for (k, c) in [
+            (Kind::Endpoint, d.endpoint),
+            (Kind::Midpoint, d.midpoint),
+            (Kind::OnEdge, d.on_edge),
+            (Kind::OnFace, d.on_face),
+        ] {
+            assert_eq!(c, k.color(), "{k:?}");
+        }
+        let s = InferenceColors {
+            endpoint: [1, 2, 3],
+            ..d
+        };
+        assert_eq!(marker_color(&inf(Kind::Endpoint), Some(s)), rgb([1, 2, 3]));
+        assert_eq!(
+            marker_color(&inf(Kind::Endpoint), None),
+            color32(Kind::Endpoint.color())
+        );
+        // Axis colors stay Accessibility's.
+        let axis = inf(Kind::OnAxis(mt_infer::Axis::Red));
+        assert_eq!(marker_color(&axis, Some(s)), color32(axis.color()));
     }
 }
