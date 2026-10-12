@@ -1,0 +1,74 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the release binaries and publishes a GitHub
+# release with them, using docs/releases/<tag>.md as the notes. Tags with a
+# hyphen (v0.2.0-rc1) and 0.x versions are marked as pre-releases.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: meshtard-windows-x64
+            features: --features cuda
+          - os: macos-latest
+            name: meshtard-macos-arm64
+            features: ""
+          - os: ubuntu-24.04
+            name: meshtard-linux-x64
+            features: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p mt-app ${{ matrix.features }}
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/${{ matrix.name }} | Out-Null
+          Copy-Item target/release/meshtard.exe, LICENSE*, README* dist/${{ matrix.name }}/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/${{ matrix.name }} -DestinationPath ${{ matrix.name }}.zip
+      - name: Package (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+          cp target/release/meshtard dist/${{ matrix.name }}/
+          cp LICENSE* README* dist/${{ matrix.name }}/ 2>/dev/null || true
+          tar -C dist -czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="docs/releases/$TAG.md"
+          [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
+          pre=""
+          case "$TAG" in v0.*|*-*) pre="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --title "Meshtard ${TAG#v}" --notes-file "$notes" $pre
