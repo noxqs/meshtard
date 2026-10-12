@@ -116,7 +116,7 @@ pub(crate) struct Prefs {
     /// The pointer between frames, for the click style.
     pub pointer: crate::click_style::Pointer,
     /// The built-in keymap (Reset All goes back to it).
-    defaults: BTreeMap<String, String>,
+    pub(crate) defaults: BTreeMap<String, String>,
     /// The spec's axis colors (Accessibility's defaults for the drawn axes).
     spec_axes: [[f32; 3]; 3],
     dialog: Option<Dialog>,
@@ -491,7 +491,7 @@ impl App {
     /// Applies a changed keymap: the shortcut table, menus (they read the spec) and
     /// the saved file.
     fn keymap_changed(&mut self) {
-        self.shortcuts = shortcut_table(&self.spec, crate::IMPLEMENTED);
+        self.add_extension_shortcuts();
         let overrides = diff(&self.prefs.defaults, &self.spec.keymap.bindings);
         write_config("shortcuts.toml", &overrides_text(&overrides));
     }

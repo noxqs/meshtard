@@ -1,0 +1,9 @@
+id = "meshtard.selection_info"
+name = "Selection Info"
+version = "1.0.0"
+author = "Meshtard examples"
+description = "Shows what is selected (faces with their area, edges, groups and components) in the status bar as the selection changes, and in a message from its menu item."
+license = "MIT"
+min_meshtard = "0.1.0"
+permissions = ["model.read", "ui.menu"]
+homepage = "https://github.com/noxqs/meshtard/tree/main/extensions/examples/selection_info"

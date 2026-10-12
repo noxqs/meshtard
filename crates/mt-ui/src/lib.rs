@@ -499,6 +499,8 @@ pub struct Shell {
     last_tray_rects: Vec<(usize, egui::Rect)>,
     /// A panel header being dragged: panel id and the tray it is in.
     panel_drag: Option<(String, usize)>,
+    /// Toolbar icons given by the app (extension PNGs), by command id.
+    custom_icons: HashMap<String, egui::TextureId>,
 }
 
 #[derive(Debug, Clone)]
@@ -565,6 +567,7 @@ impl Shell {
             tray_rects: Vec::new(),
             last_tray_rects: Vec::new(),
             panel_drag: None,
+            custom_icons: HashMap::new(),
         }
     }
 
@@ -584,6 +587,25 @@ impl Shell {
                 self.menu_labels.remove(id);
             }
         }
+    }
+
+    /// Takes toolbars added to or removed from `spec` after the shell was made (the
+    /// app's extension toolbar): new ones get their default place, the others keep
+    /// theirs.
+    pub fn sync_toolbars(&mut self, spec: &Spec) {
+        self.toolbar_defaults = ToolbarLayout::from_spec(&spec.toolbars.toolbar);
+        self.toolbar_names = (spec.toolbars.toolbar.iter())
+            .map(|t| (t.id.clone(), t.name.clone()))
+            .collect();
+        self.labels = spec.commands();
+        self.toolbar_layout = ToolbarLayout::merged(&self.toolbar_defaults, &self.toolbar_layout);
+        self.toolbar_drag = None;
+    }
+
+    /// Images drawn instead of the built-in icons for these command ids (toolbar
+    /// buttons of extensions).
+    pub fn set_custom_icons(&mut self, icons: HashMap<String, egui::TextureId>) {
+        self.custom_icons = icons;
     }
 
     /// Lays out the whole window in `ui` (normally the root ui of `eframe::App::ui`);

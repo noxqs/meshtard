@@ -1,0 +1,10 @@
+id = "meshtard.stair_maker"
+name = "Stair Maker"
+version = "1.0.0"
+author = "Meshtard examples"
+description = "Asks for width, rise, run and the number of steps, then makes a straight stair as a group."
+license = "MIT"
+min_meshtard = "0.1.0"
+permissions = ["model.read", "model.write", "ui.menu", "ui.toolbar"]
+icon = "icon.png"
+homepage = "https://github.com/noxqs/meshtard/tree/main/extensions/examples/stair_maker"

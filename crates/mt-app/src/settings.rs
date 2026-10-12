@@ -1,10 +1,15 @@
 //! Settings kept between runs, in the user's config directory: `meshtard/` under
 //! `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `%APPDATA%` on Windows and
-//! `~/Library/Application Support` on macOS.
+//! `~/Library/Application Support` on macOS. `MESHTARD_CONFIG_DIR` and
+//! `MESHTARD_DATA_DIR` name other folders (used as is).
 
 use std::path::PathBuf;
 
 pub(crate) fn config_dir() -> Option<PathBuf> {
+    // A folder of its own (portable installs, GUI checks), used as is.
+    if let Some(d) = std::env::var_os("MESHTARD_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(d));
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -83,6 +88,9 @@ pub fn save_tray_layout(layout: &mt_ui::TrayLayout) {
 /// `meshtard/` under `$XDG_DATA_HOME` (or `~/.local/share`) on Linux, `%LOCALAPPDATA%`
 /// on Windows and `~/Library/Application Support` on macOS.
 pub(crate) fn data_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("MESHTARD_DATA_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(d));
+    }
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("APPDATA"))

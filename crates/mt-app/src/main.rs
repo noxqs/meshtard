@@ -19,6 +19,7 @@ mod entity_info;
 mod environments;
 mod errors;
 mod export;
+mod extensions;
 mod filedialog;
 mod fix_problems;
 mod flip;
@@ -312,6 +313,10 @@ const IMPLEMENTED: &[&str] = &[
     "help.search",
     "window.3d_warehouse",
     "camera.match_new_photo",
+    // Extensions (extensions/): Extension Manager, Warehouse, Console.
+    "extensions.manager",
+    "extensions.warehouse",
+    "window.extension_console",
 ];
 
 fn main() -> eframe::Result {
@@ -482,6 +487,8 @@ struct App {
     small: small_items::State,
     /// Camera > Match New Photo / Edit Matched Photo and the scene photo shown.
     match_photo: match_photo::MatchPhoto,
+    /// Extensions: Rhai scripts, the Extension Manager and Warehouse.
+    extensions: extensions::Extensions,
 }
 
 impl App {
@@ -598,10 +605,12 @@ impl App {
             envs: Default::default(),
             small: Default::default(),
             match_photo: Default::default(),
+            extensions: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
         app.rebuild(&render_state.device);
+        app.load_extensions();
         app
     }
 
@@ -1114,6 +1123,7 @@ impl App {
             || self.texture_command(frame, id)
             || self.library_command(ctx, id)
             || self.match_photo_command(id)
+            || self.extensions_command(ctx, frame, id)
         {
         } else if id == "window.model_info" {
             self.open_model_info();
@@ -2647,6 +2657,7 @@ impl eframe::App for App {
             .iter()
             .map(|id| (*id, self.small_enabled(id).unwrap_or(true)))
             .collect();
+        let ext_ids = self.extensions.command_ids();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
             active_tool: self.tool.command(),
@@ -2662,10 +2673,10 @@ impl eframe::App for App {
                 "camera.next" => can_go_forward,
                 "camera.edit_matched_photo" => can_edit_photo,
                 "file.revert" => has_file,
-                _ => small_on
-                    .iter()
-                    .find(|(c, _)| *c == id)
-                    .map_or_else(|| IMPLEMENTED.contains(&id), |x| x.1),
+                _ => small_on.iter().find(|(c, _)| *c == id).map_or_else(
+                    || IMPLEMENTED.contains(&id) || ext_ids.iter().any(|x| x == id),
+                    |x| x.1,
+                ),
             },
             is_checked: &|id| {
                 camera_cmd::is_checked(&camera, id)
@@ -2706,6 +2717,7 @@ impl eframe::App for App {
         self.search_ui(ui.ctx(), frame);
         self.library_ui(ui.ctx(), frame);
         self.match_photo_ui(ui.ctx(), frame);
+        self.extensions_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),
