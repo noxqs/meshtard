@@ -185,6 +185,8 @@ pub(crate) struct Export3d {
     pub ascii: bool,
     /// Export only the selection of the open context.
     pub selection_only: bool,
+    /// FBX: one mesh per connected part ("Separate disconnected faces").
+    pub separate: bool,
 }
 
 impl Default for Export3d {
@@ -200,6 +202,7 @@ impl Default for Export3d {
             textures: true,
             ascii: false,
             selection_only: false,
+            separate: false,
         }
     }
 }
@@ -341,6 +344,7 @@ pub(crate) fn export_3d(
                     textures: opts.textures,
                     base_name: base,
                     ascii: opts.ascii,
+                    separate: opts.separate,
                 },
             )?;
             let others: Vec<(String, &[u8])> = files
@@ -612,6 +616,9 @@ impl App {
                     ui.checkbox(&mut d.y_up, "Use VRML standard orientation");
                 } else if d.format.has_y_up() {
                     ui.checkbox(&mut d.y_up, "Swap YZ coordinates (Y is up)");
+                }
+                if d.format == Format3d::Other(ExportKind::Fbx) {
+                    ui.checkbox(&mut d.separate, "Separate disconnected faces");
                 }
                 ui.add_space(8.0);
                 ui.weak(if d.format.keeps_hierarchy() {

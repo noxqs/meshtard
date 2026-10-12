@@ -878,7 +878,8 @@ impl App {
         let Some(model) = definition_model(&doc.model, def) else {
             return;
         };
-        let Some(path) = crate::filedialog::save(
+        let Some(path) = crate::filedialog::save_in(
+            crate::filedialog::Folder::Components,
             &[("Meshtard Models (*.skp)", &["skp"])],
             &format!("{name}.skp"),
         ) else {
@@ -893,7 +894,10 @@ impl App {
 
     fn component_reload(&mut self, f: &ExtraFacts, device: &wgpu::Device) {
         let Some(i) = f.one_component else { return };
-        let Some(path) = crate::filedialog::open(&[("Meshtard Models (*.skp)", &["skp"])]) else {
+        let Some(path) = crate::filedialog::open_in(
+            crate::filedialog::Folder::Components,
+            &[("Meshtard Models (*.skp)", &["skp"])],
+        ) else {
             return;
         };
         let src = match mt_skp::read(&path) {

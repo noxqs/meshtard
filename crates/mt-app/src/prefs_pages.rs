@@ -620,8 +620,11 @@ pub(crate) fn files_page(
         });
     ui.label(
         egui::RichText::new(
-            "File dialogs start here: Models (open, save, import), Texture Images, Export, \
-             Templates (the templates list). The other folders are kept for later.",
+            "File dialogs start here: Models (open, save, import), Components (component \
+             Save As / Reload), Styles (.style files), Texture Images, Watermark Images, \
+             Export. Materials, Components and Styles are also listed as collections in \
+             the trays; Templates is the templates list. Classifications: kept for a \
+             future Classifier.",
         )
         .small()
         .weak(),

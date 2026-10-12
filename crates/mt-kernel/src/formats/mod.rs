@@ -274,6 +274,8 @@ pub struct ExportOptions {
     pub base_name: String,
     /// PLY: ASCII instead of binary.
     pub ascii: bool,
+    /// FBX: one mesh per connected part ("Separate Disconnected Faces").
+    pub separate: bool,
 }
 
 impl Default for ExportOptions {
@@ -285,6 +287,7 @@ impl Default for ExportOptions {
             textures: true,
             base_name: "model".into(),
             ascii: false,
+            separate: false,
         }
     }
 }

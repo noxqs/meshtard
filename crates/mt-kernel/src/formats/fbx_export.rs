@@ -6,15 +6,18 @@
 //!
 //! - Options after SketchUp's FBX exporter (help.sketchup.com, "Exporting FBX
 //!   files"): "Export Two-Sided Faces", "Export Texture Maps", "Swap YZ Coordinates
-//!   (Y Is Up)" and "Units"; faces are always triangulated; "Export Only Current
-//!   Selection" and "Separate Disconnected Faces" are not offered.
+//!   (Y Is Up)", "Units" and "Separate Disconnected Faces"; faces are always
+//!   triangulated ("Export Only Current Selection" is done by the app).
 //! - One mesh model with one geometry (welded vertices, per-corner normals, one UV
-//!   layer, a material index per triangle) and one material per used model material
+//!   layer, a material index per triangle), or with "Separate Disconnected Faces" one
+//!   per connected part (triangles sharing a corner, named `<name>_1`, `<name>_2`, ...
+//!   in the order of their first triangle), and one material per used model material
 //!   (diffuse color, opacity, diffuse texture file written next to the `.fbx`). The
 //!   group and component hierarchy is flattened.
 //! - `GlobalSettings` records the axes (Z up, or Y up with the swap) and the unit as
 //!   `UnitScaleFactor` (centimeters per unit).
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
 
 use glam::DVec3;
@@ -175,12 +178,68 @@ fn object_name(name: &str, class: &str) -> P {
     P::Str(format!("{name}\u{0}\u{1}{class}"))
 }
 
-/// Encodes the model as binary FBX 7.4.
-pub fn to_fbx(model: &Model, opts: &ExportOptions) -> Files {
-    let (mats, groups) = groups(model, opts);
+/// A triangle to write: material slot, corners, texture coordinates.
+type Tri = (usize, [DVec3; 3], [[f64; 2]; 3]);
 
-    // One geometry: welded positions, triangles with per-corner normals and UVs.
-    let mut index = std::collections::HashMap::<[u64; 3], i32>::new();
+fn find(parent: &mut [usize], mut a: usize) -> usize {
+    while parent[a] != a {
+        parent[a] = parent[parent[a]];
+        a = parent[a];
+    }
+    a
+}
+
+/// "Separate Disconnected Faces": the triangles grouped by shared corners (welded
+/// positions), each group's triangles in order, groups ordered by their first one.
+fn connected_parts(tris: &[Tri]) -> Vec<Vec<usize>> {
+    let mut index = HashMap::<[u64; 3], usize>::new();
+    let mut parent: Vec<usize> = Vec::new();
+    let corners: Vec<[usize; 3]> = tris
+        .iter()
+        .map(|(_, pts, _)| {
+            pts.map(|p| {
+                let next = parent.len();
+                let v = *index.entry(p.to_array().map(f64::to_bits)).or_insert(next);
+                if v == next {
+                    parent.push(next);
+                }
+                v
+            })
+        })
+        .collect();
+    for c in &corners {
+        for &v in &c[1..] {
+            let (a, b) = (find(&mut parent, c[0]), find(&mut parent, v));
+            if a != b {
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut parts: Vec<Vec<usize>> = Vec::new();
+    let mut of_root = BTreeMap::<usize, usize>::new();
+    for (t, c) in corners.iter().enumerate() {
+        let root = find(&mut parent, c[0]);
+        let k = *of_root.entry(root).or_insert_with(|| {
+            parts.push(Vec::new());
+            parts.len() - 1
+        });
+        parts[k].push(t);
+    }
+    parts
+}
+
+/// The `Geometry` and `Model` nodes of one mesh: welded positions, triangles with
+/// per-corner normals and UVs, a material index (`local`) per triangle.
+fn part_nodes(
+    tris: &[Tri],
+    part: &[usize],
+    local: &BTreeMap<usize, i32>,
+    name: &str,
+    geom_id: i64,
+    model_id: i64,
+) -> (N, N) {
+    let mut index = HashMap::<[u64; 3], i32>::new();
+    let mut uv_at = HashMap::<[u64; 2], i32>::new();
     let (mut vertices, mut polys, mut normals, mut uvs, mut uv_index, mut mat_index) = (
         Vec::new(),
         Vec::new(),
@@ -189,42 +248,28 @@ pub fn to_fbx(model: &Model, opts: &ExportOptions) -> Files {
         Vec::new(),
         Vec::new(),
     );
-    for (slot, g) in groups.iter().enumerate() {
-        let uv_base = (uvs.len() / 2) as i32;
-        for t in &g.uvs {
-            uvs.extend_from_slice(&[t.x, t.y]);
+    for &t in part {
+        let (slot, pts, uv) = &tris[t];
+        let normal = (pts[1] - pts[0]).cross(pts[2] - pts[0]).normalize_or_zero();
+        for (k, (pos, uv)) in pts.iter().zip(uv).enumerate() {
+            let next = (vertices.len() / 3) as i32;
+            let vi = *index
+                .entry(pos.to_array().map(f64::to_bits))
+                .or_insert_with(|| {
+                    vertices.extend_from_slice(&pos.to_array());
+                    next
+                });
+            polys.push(if k == 2 { !vi } else { vi });
+            normals.extend_from_slice(&normal.to_array());
+            let next_uv = (uvs.len() / 2) as i32;
+            let ui = *uv_at.entry(uv.map(f64::to_bits)).or_insert_with(|| {
+                uvs.extend_from_slice(uv);
+                next_uv
+            });
+            uv_index.push(ui);
         }
-        for t in &g.triangles {
-            let pts = t.map(|(p, _)| g.positions[p]);
-            let normal = (pts[1] - pts[0]).cross(pts[2] - pts[0]).normalize_or_zero();
-            for (k, &(p, uv)) in t.iter().enumerate() {
-                let pos: DVec3 = g.positions[p];
-                let next = (vertices.len() / 3) as i32;
-                let vi = *index
-                    .entry(pos.to_array().map(f64::to_bits))
-                    .or_insert_with(|| {
-                        vertices.extend_from_slice(&pos.to_array());
-                        next
-                    });
-                polys.push(if k == 2 { !vi } else { vi });
-                normals.extend_from_slice(&normal.to_array());
-                uv_index.push(uv_base + uv as i32);
-            }
-            mat_index.push(slot as i32);
-        }
+        mat_index.push(local.get(slot).copied().unwrap_or(0));
     }
-
-    let mut next_id = 1_000_000i64;
-    let mut id = || {
-        next_id += 1;
-        next_id
-    };
-    let (model_id, geom_id) = (id(), id());
-    let name = if opts.base_name.is_empty() {
-        "model"
-    } else {
-        opts.base_name.as_str()
-    };
     let layer_element = |ty: &str| {
         nc(
             "LayerElement",
@@ -309,14 +354,70 @@ pub fn to_fbx(model: &Model, opts: &ExportOptions) -> Files {
         ],
     );
 
-    let mut objects = vec![geometry, model_node];
-    let mut links = vec![
-        n("C", vec![s("OO"), P::I64(model_id), P::I64(0)]),
-        n("C", vec![s("OO"), P::I64(geom_id), P::I64(model_id)]),
-    ];
+    (geometry, model_node)
+}
+
+/// Encodes the model as binary FBX 7.4.
+pub fn to_fbx(model: &Model, opts: &ExportOptions) -> Files {
+    let (mats, groups) = groups(model, opts);
+
+    // Triangles: material slot, corners, texture coordinates.
+    let mut tris: Vec<Tri> = Vec::new();
+    for (slot, g) in groups.iter().enumerate() {
+        for t in &g.triangles {
+            let pts = t.map(|(p, _)| g.positions[p]);
+            let uv = t.map(|(_, uv)| g.uvs.get(uv).map_or([0.0; 2], |t| [t.x, t.y]));
+            tris.push((slot, pts, uv));
+        }
+    }
+    let parts = if opts.separate {
+        connected_parts(&tris)
+    } else {
+        vec![(0..tris.len()).collect()]
+    };
+
+    let mut next_id = 1_000_000i64;
+    let mut id = || {
+        next_id += 1;
+        next_id
+    };
+    let name = if opts.base_name.is_empty() {
+        "model"
+    } else {
+        opts.base_name.as_str()
+    };
+    let mat_ids: Vec<i64> = mats.iter().map(|_| id()).collect();
+    let mut objects = Vec::new();
+    let mut links = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        let (model_id, geom_id) = (id(), id());
+        let part_name = if parts.len() == 1 {
+            name.to_owned()
+        } else {
+            format!("{name}_{}", k + 1)
+        };
+        // The part's materials, in slot order: the geometry's material indices
+        // follow the order of the model's material connections.
+        let used: BTreeSet<usize> = part.iter().map(|&t| tris[t].0).collect();
+        let local: BTreeMap<usize, i32> = used
+            .iter()
+            .enumerate()
+            .map(|(i, &slot)| (slot, i as i32))
+            .collect();
+        let (geometry, model_node) = part_nodes(&tris, part, &local, &part_name, geom_id, model_id);
+        objects.push(geometry);
+        objects.push(model_node);
+        links.push(n("C", vec![s("OO"), P::I64(model_id), P::I64(0)]));
+        links.push(n("C", vec![s("OO"), P::I64(geom_id), P::I64(model_id)]));
+        for &slot in &used {
+            links.push(n(
+                "C",
+                vec![s("OO"), P::I64(mat_ids[slot]), P::I64(model_id)],
+            ));
+        }
+    }
     let mut textures = 0;
-    for m in &mats {
-        let mid = id();
+    for (m, &mid) in mats.iter().zip(&mat_ids) {
         let c = m.color.map(|x| f64::from(x) / 255.0);
         objects.push(nc(
             "Material",
@@ -345,7 +446,6 @@ pub fn to_fbx(model: &Model, opts: &ExportOptions) -> Files {
                 ),
             ],
         ));
-        links.push(n("C", vec![s("OO"), P::I64(mid), P::I64(model_id)]));
         if let Some((file, _)) = &m.texture {
             textures += 1;
             let (tid, vid) = (id(), id());
@@ -444,15 +544,19 @@ pub fn to_fbx(model: &Model, opts: &ExportOptions) -> Files {
     );
     let count = |ty: &str, k: i32| nc("ObjectType", vec![s(ty)], vec![n("Count", vec![P::I32(k)])]);
     let n_mats = mats.len() as i32;
+    let n_parts = parts.len() as i32;
     let definitions = nc(
         "Definitions",
         vec![],
         vec![
             n("Version", vec![P::I32(100)]),
-            n("Count", vec![P::I32(3 + n_mats + 2 * textures)]),
+            n(
+                "Count",
+                vec![P::I32(1 + 2 * n_parts + n_mats + 2 * textures)],
+            ),
             count("GlobalSettings", 1),
-            count("Model", 1),
-            count("Geometry", 1),
+            count("Model", n_parts),
+            count("Geometry", n_parts),
             count("Material", n_mats),
             count("Texture", textures),
             count("Video", textures),
@@ -551,6 +655,44 @@ mod tests {
     use crate::formats::fbx;
     use crate::formats::tests::{painted_cube, summary};
     use crate::mesh_export::Units;
+
+    #[test]
+    fn separate_disconnected_faces() {
+        let mut m = painted_cube();
+        // A loose square away from the cube.
+        let p = |x: f64, y: f64| DVec3::new(x, y, 0.0);
+        let sq = [p(50., 0.), p(60., 0.), p(60., 10.), p(50., 10.)];
+        for i in 0..4 {
+            crate::add_line(&mut m.root, sq[i], sq[(i + 1) % 4]);
+        }
+        let count = |bytes: &[u8], name: &str| {
+            let (_, nodes) = fbx::parse_tree(bytes).unwrap();
+            let objects = nodes.iter().find(|n| n.name == "Objects").unwrap();
+            objects.children_named(name).count()
+        };
+        let none = |_: &str| None;
+        for separate in [false, true] {
+            let opts = ExportOptions {
+                separate,
+                ..Default::default()
+            };
+            let files = to_fbx(&m, &opts);
+            let parts = if separate { 2 } else { 1 };
+            assert_eq!(count(&files.main, "Model"), parts);
+            assert_eq!(count(&files.main, "Geometry"), parts);
+            let (mesh, _) = fbx::parse(&files.main, &none).unwrap();
+            assert_eq!(mesh.polygons.len(), 14, "separate {separate}");
+            let red = mesh.materials.iter().position(|x| x.name == "Red").unwrap();
+            let on_red = mesh
+                .polygons
+                .iter()
+                .filter(|p| p.material == Some(red))
+                .count();
+            assert_eq!(on_red, 2, "separate {separate}");
+            // Deterministic output.
+            assert_eq!(files.main, to_fbx(&m, &opts).main);
+        }
+    }
 
     #[test]
     fn binary_round_trip() {

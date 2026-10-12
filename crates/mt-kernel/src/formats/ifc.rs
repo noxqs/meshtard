@@ -20,8 +20,9 @@
 //!   curves of polylines and trimmed circles, derived profiles), `IfcSweptDiskSolid`
 //!   (tube along a polyline, mitered), `IfcMappedItem` (a component per
 //!   `IfcRepresentationMap`, named after the type that owns it) and
-//!   `IfcBooleanResult` (the first operand only: openings and clippings are not
-//!   cut; unions keep both). Curves are 24 segments per full circle.
+//!   `IfcBooleanResult` / `IfcBooleanClippingResult` (unions keep both operands;
+//!   differences are cut, see below; intersections keep the first operand). Curves are
+//!   24 segments per full circle.
 //! - Colors: `IfcStyledItem` surface styles (shading or rendering color and
 //!   transparency) on items, `IfcIndexedColourMap` per-face colors, and the color of
 //!   the product's (or its type's) material through `IfcRelAssociatesMaterial` and
@@ -29,8 +30,19 @@
 //!   style of their own).
 //! - Units: the project's `IfcUnitAssignment` length unit (SI prefixes and conversion
 //!   based units such as feet), and its plane angle unit for trimmed circles.
-//! - Openings (`IfcOpeningElement`) are not imported. Everything else that is not
-//!   read is counted by class in [`IfcReport::skipped`].
+//! - Cutting, with the Solid Tools' [`solid::subtract`]: the openings of an element
+//!   (`IfcRelVoidsElement` to an `IfcOpeningElement`, placed by its own placement) are
+//!   cut out of the element's body, and a boolean `.DIFFERENCE.` cuts its second
+//!   operand out of its first. Second operands may be solids or half spaces
+//!   (`IfcHalfSpaceSolid`, `IfcBoxedHalfSpace`: a box on the material side of the
+//!   plane, larger than the first operand; `IfcPolygonalBoundedHalfSpace`: that box
+//!   intersected with the boundary's prism). A cut happens only when both operands are
+//!   closed solids ([`solid::is_solid`]: an element with mapped items is not) and the
+//!   result passes the topology checks; otherwise the first operand is kept whole as
+//!   before and the opening or second operand is counted in [`IfcReport::skipped`].
+//!   Cuts made are counted by class in [`IfcReport::cut`]. Openings are not imported
+//!   as objects. Everything else that is not read is counted by class in
+//!   [`IfcReport::skipped`].
 //! - Faces become kernel faces as in mesh import ([`mesh_import::to_entities`]):
 //!   welded, coplanar neighbors merged when asked. Faces with holes are triangulated
 //!   first; merging joins them again.
@@ -47,6 +59,8 @@ use super::step::{self, Entity, File, Value};
 use crate::entities::{DefinitionId, Entities, Instance};
 use crate::mesh_import::{self, Mesh, MeshOptions, Polygon};
 use crate::model::{Definition, Material, Model};
+use crate::solid::{self, SolidInput};
+use crate::validate::{Checks, validate};
 
 /// Segments of a full circle.
 const CIRCLE_SEGMENTS: usize = 24;
@@ -82,8 +96,10 @@ pub struct IfcReport {
     /// Representation items read, by IFC class.
     pub items: BTreeMap<String, usize>,
     /// Entities not read, by IFC class (representation items, profiles, curves,
-    /// placements, boolean second operands, openings).
+    /// placements, boolean second operands and openings that were not cut).
     pub skipped: BTreeMap<String, usize>,
+    /// Openings and boolean difference operands cut out, by IFC class.
+    pub cut: BTreeMap<String, usize>,
 }
 
 impl IfcReport {
@@ -93,6 +109,10 @@ impl IfcReport {
             "{} of {} objects with geometry",
             self.with_geometry, self.products
         );
+        let cut: usize = self.cut.values().sum();
+        if cut > 0 {
+            s += &format!("; {cut} openings and booleans cut");
+        }
         if !self.skipped.is_empty() {
             let mut list: Vec<(&String, &usize)> = self.skipped.iter().collect();
             list.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -463,6 +483,73 @@ impl Geo {
         }
     }
 
+    /// Adds `other`'s polygons and placements.
+    fn append(&mut self, other: Geo) {
+        let base = self.mesh.positions.len();
+        self.mesh.positions.extend(other.mesh.positions);
+        self.mesh
+            .polygons
+            .extend(other.mesh.polygons.into_iter().map(|mut p| {
+                for v in &mut p.vertices {
+                    *v += base;
+                }
+                p
+            }));
+        self.instances.extend(other.instances);
+    }
+
+    /// Bounding box of the polygons' corners.
+    fn bounds(&self) -> Option<(DVec3, DVec3)> {
+        let mut it = self.mesh.positions.iter().copied();
+        let first = it.next()?;
+        Some(it.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
+    }
+
+    /// A box, faces outward: `m` maps the unit-free box `lo..hi` into place.
+    fn cuboid(&mut self, m: DMat4, lo: DVec3, hi: DVec3) {
+        let c = |i: usize| {
+            m.transform_point3(DVec3::new(
+                if i & 1 == 0 { lo.x } else { hi.x },
+                if i & 2 == 0 { lo.y } else { hi.y },
+                if i & 4 == 0 { lo.z } else { hi.z },
+            ))
+        };
+        let flip = m.determinant() < 0.0;
+        for q in [
+            [0, 2, 3, 1],
+            [4, 5, 7, 6],
+            [0, 1, 5, 4],
+            [1, 3, 7, 5],
+            [3, 2, 6, 7],
+            [2, 0, 4, 6],
+        ] {
+            let mut pts = q.map(c).to_vec();
+            if flip {
+                pts.reverse();
+            }
+            self.polygon(&pts, None);
+        }
+    }
+
+    /// The prism of the counter-clockwise loop `l` from `z0` to `z1` (`z0 < z1`),
+    /// faces outward, placed by `m`.
+    fn prism(&mut self, m: DMat4, l: &[DVec2], z0: f64, z1: f64) {
+        let flip = m.determinant() < 0.0;
+        let put = |p: DVec2, z: f64| m.transform_point3(p.extend(z));
+        let add = |mut pts: Vec<DVec3>, geo: &mut Geo| {
+            if flip {
+                pts.reverse();
+            }
+            geo.face(&pts, &[], None);
+        };
+        add(l.iter().rev().map(|&p| put(p, z0)).collect(), self);
+        add(l.iter().map(|&p| put(p, z1)).collect(), self);
+        for k in 0..l.len() {
+            let (a, b) = (l[k], l[(k + 1) % l.len()]);
+            add(vec![put(a, z0), put(b, z0), put(b, z1), put(a, z1)], self);
+        }
+    }
+
     fn polygon(&mut self, points: &[DVec3], material: Option<usize>) {
         let first = self.mesh.positions.len();
         self.mesh.positions.extend_from_slice(points);
@@ -613,6 +700,8 @@ struct Reader<'a> {
     map_names: HashMap<u64, String>,
     maps: HashMap<u64, Option<DefinitionId>>,
     placements: HashMap<u64, DMat4>,
+    /// Element -> its openings (`IfcRelVoidsElement`), in number order.
+    voids: BTreeMap<u64, BTreeSet<u64>>,
     groups: usize,
 }
 
@@ -641,6 +730,7 @@ impl<'a> Reader<'a> {
             map_names: HashMap::new(),
             maps: HashMap::new(),
             placements: HashMap::new(),
+            voids: BTreeMap::new(),
             groups: 0,
         };
         r.units();
@@ -754,6 +844,11 @@ impl<'a> Reader<'a> {
                         for o in e.arg(4).refs() {
                             self.product_material.entry(o).or_insert(m);
                         }
+                    }
+                }
+                "IFCRELVOIDSELEMENT" => {
+                    if let (Some(el), Some(op)) = (e.arg(4).as_ref_id(), e.arg(5).as_ref_id()) {
+                        self.voids.entry(el).or_default().insert(op);
                     }
                 }
                 "IFCRELDEFINESBYTYPE" => {
@@ -1420,6 +1515,12 @@ impl<'a> Reader<'a> {
             }
             "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => self.tube(e, xf, style, geo),
             "IFCMAPPEDITEM" => self.mapped(e, xf, style, geo, depth),
+            "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT"
+                if e.arg(0).as_enum() == Some("DIFFERENCE") =>
+            {
+                self.difference(e, xf, style, geo, depth);
+                true
+            }
             "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => {
                 let union = e.arg(0).as_enum() == Some("UNION");
                 let mut ops = vec![e.arg(1)];
@@ -1442,6 +1543,178 @@ impl<'a> Reader<'a> {
             self.read(class);
         } else {
             self.skip(class);
+        }
+    }
+
+    // ---- cutting ----
+
+    /// `geo` as kernel entities (model units, coplanar faces merged) when it is a
+    /// closed solid.
+    fn solid_ents(&self, geo: &Geo) -> Option<Entities> {
+        if !geo.instances.is_empty() || geo.mesh.polygons.is_empty() {
+            return None;
+        }
+        let opts = MeshOptions {
+            merge_coplanar: true,
+            ..self.opts
+        };
+        let ids: Vec<usize> = (0..self.model.materials.len()).collect();
+        let ents = mesh_import::to_entities(&geo.mesh, &opts, &ids);
+        solid::is_solid(&ents).then_some(ents)
+    }
+
+    /// `body - cutter`, when it comes out sound.
+    fn subtract(body: &Entities, cutter: &Entities) -> Option<Entities> {
+        let out = solid::subtract(
+            SolidInput::new(cutter, DMat4::IDENTITY),
+            SolidInput::new(body, DMat4::IDENTITY),
+        )
+        .ok()?;
+        validate(&out, Checks::TOPOLOGY).is_empty().then_some(out)
+    }
+
+    /// Adds the faces of `ents` (model units) to `geo` (file units).
+    fn add_ents(&self, geo: &mut Geo, ents: &Entities) {
+        let k = 1.0 / self.opts.inches_per_unit;
+        for f in ents.faces.values() {
+            let outer: Vec<DVec3> = ents.loop_points(&f.outer).iter().map(|p| *p * k).collect();
+            let holes: Vec<Vec<DVec3>> = f
+                .holes
+                .iter()
+                .map(|h| ents.loop_points(h).iter().map(|p| *p * k).collect())
+                .collect();
+            geo.face(&outer, &holes, f.attrs.material);
+        }
+    }
+
+    /// A half space as a closed solid (file units) covering `lo..hi` (the first
+    /// operand's bounds, group coordinates): `None` when `e` is not a half space.
+    fn half_space(&mut self, e: &Entity, xf: DMat4, lo: DVec3, hi: DVec3) -> Option<Entities> {
+        let class = e.class.as_str();
+        if !matches!(
+            class,
+            "IFCHALFSPACESOLID" | "IFCBOXEDHALFSPACE" | "IFCPOLYGONALBOUNDEDHALFSPACE"
+        ) {
+            return None;
+        }
+        let (_, plane) = self.get(e.arg(0))?;
+        if plane.class != "IFCPLANE" {
+            return None;
+        }
+        let pm = xf * self.axis2(plane.arg(0));
+        // The agreement flag is true when the plane's normal points away from the
+        // material (ISO 16739).
+        let agree = e.arg(1).as_enum() != Some("F");
+        let size = (hi - lo).length() + 1.0;
+        let reach = |m: DMat4| {
+            let c = m.inverse().transform_point3((lo + hi) / 2.0);
+            (c, 2.0 * size + c.length())
+        };
+        let (c, r) = reach(pm);
+        let (z0, z1) = if agree { (-r, 0.0) } else { (0.0, r) };
+        let mut boxed = Geo::default();
+        boxed.cuboid(
+            pm,
+            DVec3::new(c.x - r, c.y - r, z0),
+            DVec3::new(c.x + r, c.y + r, z1),
+        );
+        let half = self.solid_ents(&boxed)?;
+        if class != "IFCPOLYGONALBOUNDEDHALFSPACE" {
+            return Some(half);
+        }
+        let m = xf * self.axis2(e.arg(2));
+        let outline = orient(vec![self.closed_loop(e.arg(3))?]).pop()?;
+        let (c, r) = reach(m);
+        let mut prism = Geo::default();
+        prism.prism(m, &outline, c.z - r, c.z + r);
+        let prism = self.solid_ents(&prism)?;
+        let out = solid::intersect(
+            SolidInput::new(&half, DMat4::IDENTITY),
+            SolidInput::new(&prism, DMat4::IDENTITY),
+        )
+        .ok()?;
+        solid::is_solid(&out).then_some(out)
+    }
+
+    /// A boolean `.DIFFERENCE.`: the second operand cut out of the first when both
+    /// are solids, else the first operand alone (the second counted as skipped).
+    fn difference(
+        &mut self,
+        e: &Entity,
+        xf: DMat4,
+        style: Option<usize>,
+        geo: &mut Geo,
+        depth: usize,
+    ) {
+        let mut first = Geo::default();
+        if let Some(o) = e.arg(1).as_ref_id() {
+            self.item(o, xf, style, &mut first, depth + 1);
+        }
+        let Some((second_id, second)) = self.get(e.arg(2)) else {
+            geo.append(first);
+            return;
+        };
+        let class = second.class.clone();
+        let items = self.report.items.clone();
+        let body = self.solid_ents(&first);
+        let cutter = match (&body, first.bounds()) {
+            (Some(_), Some((lo, hi))) => self.half_space(second, xf, lo, hi).or_else(|| {
+                let mut g = Geo::default();
+                self.item(second_id, xf, None, &mut g, depth + 1);
+                self.solid_ents(&g)
+            }),
+            _ => None,
+        };
+        match body.zip(cutter).and_then(|(b, c)| Self::subtract(&b, &c)) {
+            Some(out) => {
+                if class.contains("HALFSPACE") {
+                    self.read(&class);
+                }
+                *self.report.cut.entry(class_name(&class)).or_default() += 1;
+                self.add_ents(geo, &out);
+            }
+            None => {
+                self.report.items = items;
+                self.skip(&class);
+                geo.append(first);
+            }
+        }
+    }
+
+    /// Cuts the openings of an element out of its body `ents` (model units, in the
+    /// element's coordinates; `world` is the element's placement, file units).
+    fn cut_openings(&mut self, ents: &mut Entities, openings: &BTreeSet<u64>, world: DMat4) {
+        let solid = solid::is_solid(ents);
+        for &op in openings {
+            let Some(o) = self.f.get(op) else { continue };
+            let class = o.class.clone();
+            if !solid || o.args.len() < 7 {
+                self.skip(&class);
+                continue;
+            }
+            let rel = world.inverse() * self.placement(o.arg(5), 0);
+            let items = self.report.items.clone();
+            // Each body item is cut on its own: openings are often several touching
+            // extrusions, whose faces together are not one solid.
+            let mut cut = Some(ents.clone());
+            for it in self.body_items(o.arg(6)) {
+                let mut g = Geo::default();
+                self.item(it, rel, None, &mut g, 0);
+                cut = cut.and_then(|body| {
+                    let c = self.solid_ents(&g)?;
+                    Self::subtract(&body, &c)
+                });
+            }
+            match cut {
+                Some(out) => {
+                    *ents = out;
+                    *self.report.cut.entry(class_name(&class)).or_default() += 1;
+                }
+                None => {
+                    self.report.items = items;
+                    self.skip(&class);
+                }
+            }
         }
     }
 
@@ -1917,8 +2190,11 @@ impl<'a> Reader<'a> {
             e.class.as_str(),
             "IFCOPENINGELEMENT" | "IFCOPENINGSTANDARDCASE" | "IFCVOIDINGFEATURE"
         ) {
-            let c = e.class.clone();
-            self.skip(&c);
+            // Openings of an element are counted where they are cut.
+            if !self.voids.values().any(|v| v.contains(&id)) {
+                let c = e.class.clone();
+                self.skip(&c);
+            }
             return None;
         }
         let is_project = e.class == "IFCPROJECT";
@@ -1941,6 +2217,9 @@ impl<'a> Reader<'a> {
         }
         let has_geometry = !geo.mesh.polygons.is_empty() || !geo.instances.is_empty();
         let mut ents = self.build(geo);
+        if let Some(openings) = self.voids.get(&id).cloned() {
+            self.cut_openings(&mut ents, &openings, world);
+        }
         if has_geometry && !is_empty(&ents) {
             self.report.with_geometry += 1;
         }
@@ -2262,6 +2541,170 @@ END-ISO-10303-21;
         let mm = 1.0 / 25.4;
         assert!((hi.x - 6000.0 * mm).abs() < 1e-6 && lo.x.abs() < 1e-6);
         assert!(report.summary().contains("skipped 1 IfcHalfSpaceSolid"));
+    }
+
+    /// The first definition of IFC class `kind` with faces.
+    fn body_of<'m>(m: &'m Model, kind: &str) -> &'m Entities {
+        &m.definitions
+            .values()
+            .find(|d| d.attributes.kind == kind && !d.entities.faces.is_empty())
+            .unwrap_or_else(|| panic!("no {kind}"))
+            .entities
+    }
+
+    const MM3: f64 = 1.0 / (25.4 * 25.4 * 25.4);
+
+    #[test]
+    fn wall_with_window_opening_is_cut() {
+        // A 4000 x 200 x 2500 wall; a 1000 x 1200 window opening (400 deep, through
+        // the wall) placed relative to the wall, 900 above its base.
+        let body = "\
+#50=IFCWALL('w',$,'Wall A',$,$,#51,#52,$,$);
+#51=IFCLOCALPLACEMENT(#100,#53);
+#53=IFCAXIS2PLACEMENT3D(#54,$,$);
+#54=IFCCARTESIANPOINT((1000.,0.,0.));
+#52=IFCPRODUCTDEFINITIONSHAPE($,$,(#55));
+#55=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#56));
+#56=IFCEXTRUDEDAREASOLID(#57,$,#58,2500.);
+#57=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4000.,200.);
+#58=IFCDIRECTION((0.,0.,1.));
+#80=IFCOPENINGELEMENT('o',$,'Window opening',$,$,#81,#82,$,.OPENING.);
+#81=IFCLOCALPLACEMENT(#51,#83);
+#83=IFCAXIS2PLACEMENT3D(#84,$,$);
+#84=IFCCARTESIANPOINT((500.,0.,900.));
+#82=IFCPRODUCTDEFINITIONSHAPE($,$,(#85));
+#85=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#86));
+#86=IFCEXTRUDEDAREASOLID(#87,$,#58,1200.);
+#87=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1000.,400.);
+#88=IFCRELVOIDSELEMENT('v',$,$,$,#50,#80);
+#70=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#50),#30);
+";
+        let (m, report) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        assert_eq!(report.cut.get("IfcOpeningElement"), Some(&1));
+        assert_eq!(report.skipped.get("IfcOpeningElement"), None);
+        assert!(report.summary().contains("1 openings and booleans cut"));
+        let wall = body_of(&m, "IfcWall");
+        assert!(crate::is_solid(wall));
+        // Six sides and four reveals; the two big sides have the hole.
+        assert_eq!(wall.faces.len(), 10);
+        assert_eq!(
+            wall.faces.values().filter(|f| f.holes.len() == 1).count(),
+            2
+        );
+        let v = crate::solid::volume(wall);
+        let want = (4000.0 * 200.0 * 2500.0 - 1000.0 * 200.0 * 1200.0) * MM3;
+        assert!((v - want).abs() < 1e-6 * want, "{v} {want}");
+        // No opening object comes in.
+        assert!(
+            m.definitions
+                .values()
+                .all(|d| d.attributes.kind != "IfcOpeningElement")
+        );
+        // Deterministic.
+        let (again, _) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
+        let pts = |e: &Entities| -> Vec<[u64; 3]> {
+            e.vertices
+                .values()
+                .map(|v| v.pos.to_array().map(f64::to_bits))
+                .collect()
+        };
+        assert_eq!(pts(wall), pts(body_of(&again, "IfcWall")));
+    }
+
+    #[test]
+    fn boolean_differences_and_clippings_are_cut() {
+        // Column 1: a 1000 x 1000 x 3000 box clipped by a half space above z = 2000
+        // (agreement false: the normal +z points into the material).
+        // Column 2: the same box minus a 400 x 400 x 3000 box at its corner
+        // (IfcBooleanResult with two solids).
+        // Column 3: clipped by a polygonal bounded half space: the half space above
+        // z = 2000 only over the square x, y in 0..500 (one corner removed).
+        // Column 4: an open face set clipped: not cut, kept whole.
+        let body = "\
+#58=IFCDIRECTION((0.,0.,1.));
+#57=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1000.,1000.);
+#56=IFCEXTRUDEDAREASOLID(#57,$,#58,3000.);
+#90=IFCCARTESIANPOINT((0.,0.,2000.));
+#91=IFCAXIS2PLACEMENT3D(#90,$,$);
+#92=IFCPLANE(#91);
+#93=IFCHALFSPACESOLID(#92,.F.);
+#94=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#56,#93);
+#95=IFCSHAPEREPRESENTATION($,'Body','Clipping',(#94));
+#96=IFCPRODUCTDEFINITIONSHAPE($,$,(#95));
+#97=IFCCOLUMN('c1',$,'C1',$,$,$,#96,$,$);
+#110=IFCCARTESIANPOINT((400.,400.,-10.));
+#111=IFCAXIS2PLACEMENT3D(#110,$,$);
+#112=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,400.,400.);
+#113=IFCEXTRUDEDAREASOLID(#112,#111,#58,3020.);
+#114=IFCBOOLEANRESULT(.DIFFERENCE.,#56,#113);
+#115=IFCSHAPEREPRESENTATION($,'Body','CSG',(#114));
+#116=IFCPRODUCTDEFINITIONSHAPE($,$,(#115));
+#117=IFCBEAM('c2',$,'C2',$,$,$,#116,$,$);
+#120=IFCPOLYLINE((#121,#122,#123,#124,#121));
+#121=IFCCARTESIANPOINT((0.,0.));
+#122=IFCCARTESIANPOINT((600.,0.));
+#123=IFCCARTESIANPOINT((600.,600.));
+#124=IFCCARTESIANPOINT((0.,600.));
+#125=IFCPOLYGONALBOUNDEDHALFSPACE(#92,.F.,#6,#120);
+#126=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#56,#125);
+#127=IFCSHAPEREPRESENTATION($,'Body','Clipping',(#126));
+#128=IFCPRODUCTDEFINITIONSHAPE($,$,(#127));
+#129=IFCMEMBER('c3',$,'C3',$,$,$,#128,$,$);
+#130=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(3000.,0.,0.),(0.,3000.,3000.)));
+#131=IFCTRIANGULATEDFACESET(#130,$,$,((1,2,3)),$);
+#132=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#131,#93);
+#133=IFCSHAPEREPRESENTATION($,'Body','Clipping',(#132));
+#134=IFCPRODUCTDEFINITIONSHAPE($,$,(#133));
+#135=IFCPLATE('c4',$,'C4',$,$,$,#134,$,$);
+#140=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#97,#117,#129,#135),#30);
+";
+        let (m, report) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        let full = 1000.0 * 1000.0 * 3000.0 * MM3;
+        let vol = |kind: &str| {
+            let e = body_of(&m, kind);
+            assert!(crate::is_solid(e), "{kind}");
+            crate::solid::volume(e)
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6 * full;
+        assert!(near(vol("IfcColumn"), full * 2.0 / 3.0));
+        let corner = 100.0 * 100.0 * 3000.0 * MM3;
+        assert!(near(vol("IfcBeam"), full - 9.0 * corner));
+        let removed = 500.0 * 500.0 * 1000.0 * MM3;
+        assert!(near(vol("IfcMember"), full - removed));
+        assert_eq!(report.cut.get("IfcHalfSpaceSolid"), Some(&1));
+        assert_eq!(report.cut.get("IfcExtrudedAreaSolid"), Some(&1));
+        assert_eq!(report.cut.get("IfcPolygonalBoundedHalfSpace"), Some(&1));
+        // The plate's open triangle is kept, its half space counted as skipped.
+        assert_eq!(body_of(&m, "IfcPlate").faces.len(), 1);
+        assert_eq!(report.skipped.get("IfcHalfSpaceSolid"), Some(&1));
+    }
+
+    #[test]
+    fn openings_of_mapped_elements_are_not_cut() {
+        // The element's body is a mapped item: not a solid in the kernel's sense
+        // (nested instance), so the opening is counted as skipped.
+        let body = "\
+#58=IFCDIRECTION((0.,0.,1.));
+#57=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1000.,1000.);
+#56=IFCEXTRUDEDAREASOLID(#57,$,#58,1000.);
+#60=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#56));
+#61=IFCREPRESENTATIONMAP(#6,#60);
+#62=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#5,$,$);
+#63=IFCMAPPEDITEM(#61,#62);
+#64=IFCSHAPEREPRESENTATION($,'Body','MappedRepresentation',(#63));
+#65=IFCPRODUCTDEFINITIONSHAPE($,$,(#64));
+#66=IFCWALL('w',$,'W',$,$,#100,#65,$,$);
+#80=IFCOPENINGELEMENT('o',$,$,$,$,#100,#82,$,.OPENING.);
+#82=IFCPRODUCTDEFINITIONSHAPE($,$,(#60));
+#88=IFCRELVOIDSELEMENT('v',$,$,$,#66,#80);
+#70=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#66),#30);
+";
+        let (m, report) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        assert_eq!(report.skipped.get("IfcOpeningElement"), Some(&1));
+        assert!(report.cut.is_empty());
     }
 
     #[test]

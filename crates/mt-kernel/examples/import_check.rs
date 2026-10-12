@@ -67,6 +67,7 @@ fn import(path: &Path) -> Result<Model, String> {
                 report.summary(),
                 report.meters_per_unit
             );
+            println!("  cut {:?}; skipped {:?}", report.cut, report.skipped);
             Ok(model)
         }
         "fbx" => {

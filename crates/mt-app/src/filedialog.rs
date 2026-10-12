@@ -4,7 +4,9 @@
 //! desktop portal is running.
 //!
 //! Dialogs start in the Preferences > Files folder for what they open or save
-//! ([`Folder`], chosen from the file types: models, texture images, exports).
+//! ([`Folder`], chosen from the file types: models, styles, texture images, exports;
+//! or named by the caller with [`open_in`] / [`save_in`]: components, watermark
+//! images).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -102,9 +104,10 @@ pub(crate) fn folder(f: Folder) -> Option<PathBuf> {
 
 const IMAGES: [&str; 8] = ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "tga", "gif"];
 
-/// Which default folder a dialog for `filters` starts in: models for `.skp`, texture
-/// images when opening images, Export for other saved files, Models for other opened
-/// (imported) files. Unverified: which folder SketchUp's Import dialog starts in.
+/// Which default folder a dialog for `filters` starts in: models for `.skp`, styles
+/// for `.style`, texture images when opening images, Export for other saved files,
+/// Models for other opened (imported) files. Unverified: which folder SketchUp's
+/// Import dialog starts in.
 pub(crate) fn folder_for(saving: bool, filters: &[(&str, &[&str])]) -> Folder {
     let has = |ext: &str| {
         filters
@@ -113,6 +116,8 @@ pub(crate) fn folder_for(saving: bool, filters: &[(&str, &[&str])]) -> Folder {
     };
     if has("skp") {
         Folder::Models
+    } else if has("style") {
+        Folder::Styles
     } else if saving {
         Folder::Export
     } else if IMAGES.iter().any(|e| has(e)) {
@@ -122,8 +127,8 @@ pub(crate) fn folder_for(saving: bool, filters: &[(&str, &[&str])]) -> Folder {
     }
 }
 
-fn start_dir(saving: bool, filters: &[(&str, &[&str])]) -> Option<PathBuf> {
-    folder(folder_for(saving, filters)).filter(|d| d.is_dir())
+fn start_dir(f: Folder) -> Option<PathBuf> {
+    folder(f).filter(|d| d.is_dir())
 }
 
 fn test_answer() -> Option<Option<PathBuf>> {
@@ -136,11 +141,16 @@ fn test_answer() -> Option<Option<PathBuf>> {
 /// A "Save" dialog. `filters` are (name, extensions); a chosen name without an
 /// extension gets the first filter's first extension.
 pub(crate) fn save(filters: &[(&str, &[&str])], file_name: &str) -> Option<PathBuf> {
+    save_in(folder_for(true, filters), filters, file_name)
+}
+
+/// A "Save" dialog starting in the default folder `f`.
+pub(crate) fn save_in(f: Folder, filters: &[(&str, &[&str])], file_name: &str) -> Option<PathBuf> {
     let path = match test_answer() {
         Some(answer) => answer,
         None => {
             let mut d = rfd::FileDialog::new().set_file_name(file_name);
-            if let Some(dir) = start_dir(true, filters) {
+            if let Some(dir) = start_dir(f) {
                 d = d.set_directory(dir);
             }
             for (name, exts) in filters {
@@ -157,11 +167,16 @@ pub(crate) fn save(filters: &[(&str, &[&str])], file_name: &str) -> Option<PathB
 
 /// An "Open" dialog.
 pub(crate) fn open(filters: &[(&str, &[&str])]) -> Option<PathBuf> {
+    open_in(folder_for(false, filters), filters)
+}
+
+/// An "Open" dialog starting in the default folder `f`.
+pub(crate) fn open_in(f: Folder, filters: &[(&str, &[&str])]) -> Option<PathBuf> {
     if let Some(answer) = test_answer() {
         return answer;
     }
     let mut d = rfd::FileDialog::new();
-    if let Some(dir) = start_dir(false, filters) {
+    if let Some(dir) = start_dir(f) {
         d = d.set_directory(dir);
     }
     for (name, exts) in filters {
@@ -197,6 +212,9 @@ mod tests {
         assert_eq!(folder_for(false, png), Folder::TextureImages);
         assert_eq!(folder_for(false, obj), Folder::Models);
         assert_eq!(folder_for(true, obj), Folder::Export);
+        let style: &[(&str, &[&str])] = &[("Styles", &["style"])];
+        assert_eq!(folder_for(false, style), Folder::Styles);
+        assert_eq!(folder_for(true, style), Folder::Styles);
         let mut f = Folders::default();
         f.set(Folder::Export, Some(PathBuf::from("/x")));
         assert_eq!(f.get(Folder::Export), Some(Path::new("/x")));

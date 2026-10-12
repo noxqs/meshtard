@@ -266,7 +266,10 @@ impl App {
             Event::WatermarkAdd => {
                 let filters: [(&str, &[&str]); 1] =
                     [("Images (*.png, *.jpg)", &["png", "jpg", "jpeg"])];
-                let Some(path) = crate::filedialog::open(&filters) else {
+                let Some(path) = crate::filedialog::open_in(
+                    crate::filedialog::Folder::WatermarkImages,
+                    &filters,
+                ) else {
                     return false;
                 };
                 let data = match std::fs::read(&path) {
