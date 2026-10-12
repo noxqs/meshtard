@@ -1,12 +1,19 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the release binaries and publishes a GitHub
-# release with them, using docs/releases/<tag>.md as the notes. Tags with a
-# hyphen (v0.2.0-rc1) and 0.x versions are marked as pre-releases.
+# Pushing a tag like v0.1.0, or running this workflow by hand with a tag name,
+# builds the release binaries and publishes a GitHub release with them, using
+# docs/releases/<tag>.md as the notes. Run by hand, the tag is created on the
+# commit that was built. Tags with a hyphen (v0.2.0-rc1) and 0.x versions are
+# marked as pre-releases.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.0"
+        required: true
 
 permissions:
   contents: write
@@ -65,10 +72,10 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
           pre=""
           case "$TAG" in v0.*|*-*) pre="--prerelease" ;; esac
-          gh release create "$TAG" dist/* --title "Meshtard ${TAG#v}" --notes-file "$notes" $pre
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Meshtard ${TAG#v}" --notes-file "$notes" $pre
