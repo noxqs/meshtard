@@ -503,7 +503,24 @@ impl Shell {
         } else {
             self.icon_palette.disabled()
         };
-        icons::paint(painter, icon_rect, &shown, &palette);
+        match self.custom_icons.get(shown.as_str()) {
+            Some(tex) => {
+                let tint = if enabled {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_white_alpha(110)
+                };
+                painter.image(
+                    *tex,
+                    icon_rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    tint,
+                );
+            }
+            None => {
+                icons::paint(painter, icon_rect, &shown, &palette);
+            }
+        }
 
         let arrow = Rect::from_min_max(rect.max - vec2(9.0, 9.0), rect.max);
         if !button.flyout.is_empty() {

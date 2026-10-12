@@ -18,6 +18,7 @@ mod document;
 mod entity_info;
 mod errors;
 mod export;
+mod extensions;
 mod filedialog;
 mod fix_problems;
 mod flip;
@@ -299,6 +300,10 @@ const IMPLEMENTED: &[&str] = &[
     "edit.replace_selected",
     "help.search",
     "window.3d_warehouse",
+    // Extensions (extensions/): Extension Manager, Warehouse, Console.
+    "extensions.manager",
+    "extensions.warehouse",
+    "window.extension_console",
 ];
 
 fn main() -> eframe::Result {
@@ -461,6 +466,8 @@ struct App {
     stretch: move_extra::Stretch,
     /// Window > Model Library (3D Warehouse equivalent).
     library: library::Library,
+    /// Extensions: Rhai scripts, the Extension Manager and Warehouse.
+    extensions: extensions::Extensions,
 }
 
 impl App {
@@ -568,10 +575,12 @@ impl App {
             grips: Default::default(),
             stretch: Default::default(),
             library: Default::default(),
+            extensions: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
         app.rebuild(&render_state.device);
+        app.load_extensions();
         app
     }
 
@@ -1075,6 +1084,7 @@ impl App {
             || self.presentation_command(ctx, frame, id)
             || self.texture_command(frame, id)
             || self.library_command(ctx, id)
+            || self.extensions_command(ctx, frame, id)
         {
         } else if id == "window.model_info" {
             self.open_model_info();
@@ -2582,6 +2592,7 @@ impl eframe::App for App {
         let playing = self.animation.is_playing();
         let tray_on = shell.tray_visible();
         let spec = self.spec.clone();
+        let ext_ids = self.extensions.command_ids();
         let ui_frame = mt_ui::Frame {
             spec: &spec,
             active_tool: self.tool.command(),
@@ -2596,7 +2607,7 @@ impl eframe::App for App {
                 "camera.previous" => can_go_back,
                 "camera.next" => can_go_forward,
                 "file.revert" => has_file,
-                _ => IMPLEMENTED.contains(&id),
+                _ => IMPLEMENTED.contains(&id) || ext_ids.iter().any(|x| x == id),
             },
             is_checked: &|id| {
                 camera_cmd::is_checked(&camera, id)
@@ -2635,6 +2646,7 @@ impl eframe::App for App {
         self.tool_extra_ui(ui.ctx(), frame);
         self.search_ui(ui.ctx(), frame);
         self.library_ui(ui.ctx(), frame);
+        self.extensions_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),

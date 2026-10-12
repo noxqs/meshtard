@@ -25,6 +25,7 @@ glam.workspace = true
 image = { workspace = true, features = ["jpeg"] }
 log.workspace = true
 toml.workspace = true
+serde.workspace = true
 ttf-parser = "0.25"
 # Bundled 3D Text fonts (Ubuntu Light, Hack): already built for egui.
 epaint_default_fonts = "0.36"
@@ -33,6 +34,12 @@ env_logger.workspace = true
 # threads, pure-Rust TLS (rustls) with the system's certificates.
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
 serde_json = "1"
+# Extensions (Extensions > Extension Manager): the Rhai scripting language (sandboxed:
+# no file or network access unless the app registers functions for it), .mtx
+# packages (zip) and SHA-256 checks of Extension Warehouse downloads.
+rhai = "1.23"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }

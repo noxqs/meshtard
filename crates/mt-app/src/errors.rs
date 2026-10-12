@@ -14,6 +14,12 @@ pub(crate) struct ErrorMessage {
     detail: String,
 }
 
+impl ErrorMessage {
+    pub(crate) fn new(heading: String, detail: String) -> Self {
+        Self { heading, detail }
+    }
+}
+
 impl App {
     /// Shows `Could not <verb> "<file name>".` with the reason and the full path.
     pub(crate) fn file_error(&mut self, verb: &str, path: &Path, err: impl Display) {

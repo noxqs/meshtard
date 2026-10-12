@@ -1,0 +1,4 @@
+# The example extensions are packed into extensions/dist/*.mtx, whose SHA-256 is in
+# extensions/catalog.json: keep their bytes identical on every checkout.
+extensions/examples/** -text
+extensions/dist/*.mtx binary
