@@ -257,6 +257,13 @@ items = [
   { id = "tool.text_3d", label = "3D Text" },
   { separator = true },
   { id = "tool.section_plane", label = "Section Plane" },
+  { label = "Sandbox", items = [
+    { id = "tool.sandbox_smoove", label = "Smoove" },
+    { id = "tool.sandbox_stamp", label = "Stamp" },
+    { id = "tool.sandbox_drape", label = "Drape" },
+    { id = "tool.sandbox_add_detail", label = "Add Detail" },
+    { id = "tool.sandbox_flip_edge", label = "Flip Edge" },
+  ] },
 ]
 
 [[menu]]

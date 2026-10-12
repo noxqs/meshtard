@@ -11,7 +11,7 @@ Sub-items noted as "Left" under finished items, ranked by usefulness. Work down 
 6. [ ] Components: Cut Opening applied to the glued face, Always Face Camera drawn, Shadows Face Sun used. M [60]
 
 ## Medium
-7. [ ] Sandbox tools: Smoove, Stamp, Drape, Add Detail, Flip Edge (and their toolbar buttons). M [29, 40]
+7. [x] Sandbox tools: Smoove, Stamp, Drape, Add Detail, Flip Edge (and their toolbar buttons). M [29, 40] Done: `mt_kernel::sandbox` (tests validate every op) and `crates/mt-app/src/sandbox_tools.rs`; Tools > Sandbox menu, five Sandbox toolbar buttons with icons, Instructor pages, one undo step each. Left: Smoove and Add Detail only in the open context (open the terrain group first; Stamp and Drape work on a group from outside); Add Detail's Shift (horizontal move) and drag on a vertex; Stamp's preview is the object's box, not its footprint, and stamps the footprint's outer loop only; Flip Edge has no hover highlight; Smoove falloff shape, default radius (10' / 3 m) and offset (1') from memory: trial.
 8. [ ] Import: DXF blocks / INSERT, text, dimensions, hatches, splines, ellipses; glTF node hierarchy and PBR beyond base color; FBX node hierarchy as groups. M [64, 72]
 9. [ ] Export: 3DS, USDZ, "Export only current selection", STL ASCII, PLY UVs. M [72]
 10. [ ] Panels: Materials collections / sample / thumbnail style; Components collections and Statistics tab; Styles collections, Mix tab, .style files; Tags multi-select, sort, expand/collapse all, Apply Tags to Scenes, Show New Tags, Color by Tag for text and dimensions; Outliner sort / Expand All / section plane rows; Scenes thumbnails and tab search. M [60]

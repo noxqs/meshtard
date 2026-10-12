@@ -48,6 +48,7 @@ mod presentation;
 mod print;
 mod report;
 mod sandbox;
+mod sandbox_tools;
 mod search;
 mod section_export;
 mod selection;
@@ -262,6 +263,11 @@ const IMPLEMENTED: &[&str] = &[
     "window.preferences",
     "tool.sandbox_from_scratch",
     "tool.sandbox_from_contours",
+    "tool.sandbox_smoove",
+    "tool.sandbox_stamp",
+    "tool.sandbox_drape",
+    "tool.sandbox_add_detail",
+    "tool.sandbox_flip_edge",
     "tool.text_3d",
     "file.export_section",
     "file.export_animation",
@@ -1076,6 +1082,7 @@ impl App {
             if let Some(m) = self.modify.as_mut() {
                 m.set_material(self.current_material);
             }
+            self.sandbox_activate(frame, id);
             self.erase_drag.clear();
             self.shift_lock.reset(&mut self.engine);
             self.inference = None;

@@ -452,6 +452,52 @@ steps = [
 modifiers = []
 
 [[tool]]
+id = "tool.sandbox_smoove"
+title = "Smoove"
+summary = "Raises or lowers terrain into smooth hills and valleys."
+steps = [
+  "Open the terrain group, then click a point on the terrain (or select part of it first).",
+  "Move up or down and click to set the height, or type it.",
+  "Type a radius before clicking to change it.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.sandbox_stamp"
+title = "Stamp"
+summary = "Presses an object's footprint into the terrain as a level pad."
+steps = [
+  "Move the object above the terrain, then click it.",
+  "Type an offset for the sloped band around the pad, if needed.",
+  "Click the terrain, move up or down to set the pad's height, and click.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.sandbox_drape"
+title = "Drape"
+summary = "Projects edges down onto the terrain, splitting its faces."
+steps = ["Select the edges above the terrain, then click the terrain."]
+modifiers = []
+
+[[tool]]
+id = "tool.sandbox_add_detail"
+title = "Add Detail"
+summary = "Adds triangles to the terrain where it needs more detail."
+steps = [
+  "Select faces, then start the tool to split each triangle into four.",
+  "Or click a face or edge, move up or down to set the new vertex's height, and click.",
+]
+modifiers = []
+
+[[tool]]
+id = "tool.sandbox_flip_edge"
+title = "Flip Edge"
+summary = "Turns the diagonal shared by two triangles the other way."
+steps = ["Show hidden geometry, then click the edge to flip."]
+modifiers = []
+
+[[tool]]
 id = "camera.orbit"
 title = "Orbit"
 summary = "Turns the view around the model."

@@ -23,7 +23,7 @@ use crate::modify::{Ctx, ModelEdit, ModifyTool};
 use crate::selection::Mode;
 
 /// Default grid spacing in inches: 10' imperial, 3 m metric (unverified).
-fn default_spacing(metric: bool) -> f64 {
+pub(crate) fn default_spacing(metric: bool) -> f64 {
     if metric { 3000.0 / 25.4 } else { 120.0 }
 }
 
@@ -296,7 +296,8 @@ impl App {
     }
 
     /// Makes the change a modify tool left after a click or typed value, as one undo
-    /// step, and selects what it made.
+    /// step, and selects what it made. An edit that returns nothing changed nothing
+    /// (Stamp and Drape when they fail) and makes no undo step.
     pub(crate) fn apply_model_edit(&mut self, frame: &eframe::Frame) {
         let Some(edit) = self.modify.as_mut().and_then(|t| t.take_model_edit()) else {
             return;
@@ -305,11 +306,14 @@ impl App {
             return;
         };
         let mut placed = Vec::new();
-        doc.edit_model(|m, active| {
+        let changed = doc.edit_model(|m, active| {
             placed = edit(m, active);
-            true
+            !placed.is_empty()
         });
         self.engine.unlock();
+        if !changed {
+            return;
+        }
         self.selection.clear();
         self.selection.apply(Mode::Replace, placed);
         if let Some(rs) = frame.wgpu_render_state() {
