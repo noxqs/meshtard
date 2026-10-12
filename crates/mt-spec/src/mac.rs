@@ -372,7 +372,8 @@ mod tests {
         assert_eq!(key(&mac, "edit.delete").unwrap(), "Backspace");
         assert_eq!(key(&mac, "window.preferences").unwrap(), "Ctrl+Comma");
         assert_eq!(key(&mac, "file.exit").unwrap(), "Ctrl+Q");
-        assert_eq!(key(&win, "file.exit"), None);
+        // SketchUp 2026 for Windows also binds Ctrl+Q (spec/parity/SHORTCUTS.md).
+        assert_eq!(key(&win, "file.exit").unwrap(), "Ctrl+Q");
         // Tool keys are the same on both systems.
         for id in ["tool.line", "tool.select", "tool.push_pull", "help.search"] {
             assert_eq!(key(&win, id), key(&mac, id), "{id}");

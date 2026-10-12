@@ -348,6 +348,29 @@ impl Shortcut {
         }
         Ok(shortcut)
     }
+
+    /// Text for menus and shortcut lists: punctuation keys as their character
+    /// (`Ctrl+,` for the keymap's `Ctrl+Comma`), other keys by name.
+    pub fn label(&self) -> String {
+        let key = match self.key.as_str() {
+            "Comma" => ",",
+            "Period" => ".",
+            "Slash" => "/",
+            "Backslash" => "\\",
+            "Semicolon" => ";",
+            "Quote" => "'",
+            "Minus" => "-",
+            "Plus" => "+",
+            "Equals" => "=",
+            "OpenBracket" => "[",
+            "CloseBracket" => "]",
+            "Backtick" => "`",
+            other => other,
+        };
+        let mut text = self.to_string();
+        text.truncate(text.len() - self.key.len());
+        text + key
+    }
 }
 
 impl fmt::Display for Shortcut {
@@ -663,6 +686,8 @@ mod tests {
         assert!(Shortcut::parse("Ctrl+").is_err());
         assert!(Shortcut::parse("Hyper+L").is_err());
         assert!(Shortcut::parse("Ctrl+Ctrl+L").is_err());
+        assert_eq!(Shortcut::parse("Ctrl+Comma").unwrap().label(), "Ctrl+,");
+        assert_eq!(Shortcut::parse("Shift+Z").unwrap().label(), "Shift+Z");
         assert!(Shortcut::parse("Cmd+Ctrl+L").is_err());
         assert_eq!(
             Shortcut::parse("Cmd+Shift+Z").unwrap(),

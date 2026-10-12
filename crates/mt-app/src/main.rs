@@ -56,6 +56,7 @@ mod search;
 mod section_export;
 mod selection;
 mod settings;
+mod shortcut_list;
 mod small_items;
 mod snap;
 mod soften;
@@ -321,6 +322,7 @@ const IMPLEMENTED: &[&str] = &[
     "edit.select_instances",
     "edit.replace_selected",
     "help.search",
+    "help.keyboard_shortcuts",
     "window.3d_warehouse",
     "camera.match_new_photo",
     // Extensions (extensions/): Extension Manager, Warehouse, Console.
@@ -1176,6 +1178,8 @@ impl App {
             self.open_model_info();
         } else if id == "window.preferences" {
             self.open_preferences();
+        } else if id == "help.keyboard_shortcuts" {
+            self.open_shortcut_list();
         } else if id == "file.exit" {
             self.request(ctx, frame, confirm::Pending::Exit);
         } else if let Some(rs) = frame.wgpu_render_state()
@@ -2770,6 +2774,7 @@ impl eframe::App for App {
         self.model_info_ui(ui.ctx(), frame);
         self.geo_map_ui(ui.ctx(), frame);
         self.preferences_ui(ui.ctx(), frame);
+        self.shortcut_list_ui(ui.ctx());
         self.presentation_ui(ui.ctx(), frame);
         self.context_extra_ui(ui.ctx(), frame);
         self.tool_extra_ui(ui.ctx(), frame);

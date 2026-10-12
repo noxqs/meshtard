@@ -305,6 +305,8 @@ items = [
 label = "Help"
 items = [
   { id = "help.search", label = "Search" },
+  # Not in SketchUp: a printable list of every shortcut (spec/parity/SHORTCUTS.md).
+  { id = "help.keyboard_shortcuts", label = "Keyboard Shortcuts" },
   { separator = true },
   { id = "help.welcome", label = "Welcome to Meshtard" },
   { id = "help.knowledge_center", label = "Knowledge Center" },

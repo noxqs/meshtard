@@ -54,8 +54,8 @@ On Mac there are two kinds of shortcuts: menu key equivalents with Command, buil
 | Redo | Ctrl+Y | Cmd+Shift+Z | [inf] | F7 and macOS convention (forum also reports Cmd+Y in the web app) |
 | Select None | Ctrl+T | Cmd+Shift+A | [inf] | F3 (Cmd+T opens the Fonts panel on Mac, F1) |
 | Delete | Delete | Backspace (the Mac "delete" key) | [inf] | F4 |
-| Preferences / Settings | none | Cmd+, | [inf] | macOS convention |
-| Exit / Quit | none (SketchUp 2026 Windows reportedly has Ctrl+Q) | Cmd+Q | [inf] | F5, macOS convention |
+| Preferences / Settings | Ctrl+, (SketchUp 2026 Windows, forum t/342241; SHORTCUTS.md) | Cmd+, | [inf] | macOS convention |
+| Exit / Quit | Ctrl+Q (SketchUp 2026 Windows, F5; bound since 2026-10-12, SHORTCUTS.md) | Cmd+Q | [inf] | F5, macOS convention |
 | Entity Info | none | Cmd+I | [inf] | B1 |
 | Materials | none | Cmd+Shift+C | [inf] | F1 ("Colors palette") |
 | Model Info | none | none | [inf] | B1 gives Shift+Cmd+I, which Invert Selection uses (kept as Cmd+Shift+I); unresolved |

@@ -103,6 +103,9 @@ struct Dialog {
     selected: Option<String>,
     /// Waiting for the keys of the selected command's new shortcut.
     capturing: bool,
+    /// A pressed shortcut another command has: the shortcut and that command,
+    /// waiting for Keep Original or Replace.
+    conflict: Option<(Shortcut, String)>,
     note: Option<String>,
     /// Files > Import / Export: include the shortcuts.
     with_shortcuts: bool,
@@ -120,6 +123,8 @@ pub(crate) struct Prefs {
     /// The spec's axis colors (Accessibility's defaults for the drawn axes).
     spec_axes: [[f32; 3]; 3],
     dialog: Option<Dialog>,
+    /// Help > Keyboard Shortcuts while open.
+    pub(crate) shortcut_list: Option<crate::shortcut_list::ListDialog>,
     /// Auto-save: since when the model has changes not auto-saved yet.
     dirty_since: Option<Instant>,
     /// The document state last auto-saved.
@@ -223,6 +228,18 @@ pub(crate) fn diff(
     out
 }
 
+/// The command other than `id` that has shortcut `s`.
+pub(crate) fn holder(
+    bindings: &BTreeMap<String, String>,
+    id: &str,
+    s: &Shortcut,
+) -> Option<String> {
+    bindings
+        .iter()
+        .find(|(k, v)| *k != id && Shortcut::parse(v).ok().as_ref() == Some(s))
+        .map(|(k, _)| k.clone())
+}
+
 /// Gives `id` the shortcut `to` (none: removes it). A command that had the same
 /// shortcut loses it; returns that command.
 pub(crate) fn rebind(
@@ -234,10 +251,7 @@ pub(crate) fn rebind(
         bindings.remove(id);
         return None;
     };
-    let other = bindings
-        .iter()
-        .find(|(k, v)| *k != id && Shortcut::parse(v).ok().as_ref() == Some(to))
-        .map(|(k, _)| k.clone());
+    let other = holder(bindings, id, to);
     if let Some(o) = &other {
         bindings.remove(o);
     }
@@ -474,6 +488,7 @@ impl App {
             filter: String::new(),
             selected: None,
             capturing: false,
+            conflict: None,
             note: None,
             with_shortcuts: true,
         });
@@ -681,7 +696,7 @@ impl App {
                         Page::Applications => crate::prefs_pages::applications_page(ui, &mut more),
                         Page::General => general_page(ui, &mut general),
                         Page::Shortcuts => {
-                            keymap_changed |= self.shortcuts_page(ui, &mut d);
+                            keymap_changed |= self.shortcuts_page(ui, &mut d, &mut files_action);
                         }
                         Page::Template => self.template_page(ui),
                         Page::Workspace => self.workspace_page(ui, &mut more),
@@ -937,121 +952,181 @@ fn general_page(ui: &mut egui::Ui, g: &mut General) {
 }
 
 impl App {
-    /// The Shortcuts page. Returns whether the keymap changed.
-    fn shortcuts_page(&mut self, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+    /// The Shortcuts page. Returns whether the keymap changed; Import / Export go to
+    /// `action` (they read and write the whole preferences file, shortcuts included,
+    /// like SketchUp's Preferences.dat).
+    ///
+    /// Layout after SketchUp for Windows (help: creating-and-editing-shortcuts,
+    /// importing-and-exporting-shortcuts [doc]): Filter, the Function list with the
+    /// Assigned key, a selected command's key set by pressing it, a warning with
+    /// Keep Original / Replace when another command has that key, Remove, Reset All,
+    /// Import and Export. SketchUp types the key into an Add Shortcut box and adds it
+    /// with +; here the key is recorded when pressed. Show All opens Help > Keyboard
+    /// Shortcuts (this app's own).
+    fn shortcuts_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        d: &mut Dialog,
+        action: &mut Option<crate::prefs_pages::FilesAction>,
+    ) -> bool {
+        use crate::shortcut_list::{key_label, matches};
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.text_edit_singleline(&mut d.filter);
         });
         let filter = d.filter.to_lowercase();
-        let commands = self.spec.commands();
+        let rows = self.shortcut_rows();
         egui::ScrollArea::vertical()
-            .max_height(260.0)
+            .max_height(255.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new("mt_pref_shortcuts")
                     .num_columns(2)
                     .striped(true)
                     .show(ui, |ui| {
-                        for (id, label) in &commands {
-                            if !filter.is_empty()
-                                && !label.to_lowercase().contains(&filter)
-                                && !id.contains(&filter)
-                            {
+                        ui.strong("Function");
+                        ui.strong("Assigned");
+                        ui.end_row();
+                        for r in &rows {
+                            let key = key_label(&self.spec.keymap.bindings, &r.id);
+                            if !matches(r, &key, &filter) {
                                 continue;
                             }
-                            let selected = d.selected.as_deref() == Some(id.as_str());
-                            let text = format!("{label}  ({id})");
-                            if ui.selectable_label(selected, text).clicked() {
-                                d.selected = Some(id.clone());
+                            let selected = d.selected.as_deref() == Some(r.id.as_str());
+                            let resp = ui
+                                .selectable_label(selected, &r.function)
+                                .on_hover_text(&r.id);
+                            if resp.clicked() {
+                                d.selected = Some(r.id.clone());
                                 d.capturing = false;
+                                d.conflict = None;
                             }
-                            ui.label(self.spec.keymap.bindings.get(id).map_or("", String::as_str));
+                            ui.label(key);
                             ui.end_row();
                         }
                     });
             });
         ui.separator();
-        let Some(id) = d.selected.clone() else {
-            ui.label("Select a command to change its shortcut.");
-            if ui.button("Reset All").clicked() {
-                self.spec.keymap.bindings = self.prefs.defaults.clone();
-                changed = true;
-            }
-            return changed;
+        let function = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .map_or_else(|| id.to_owned(), |r| r.function.clone())
         };
-        ui.horizontal(|ui| {
-            let label = self.spec.command_label(&id).unwrap_or_else(|| id.clone());
-            ui.label(format!("{label}:"));
-            let current = self
-                .spec
-                .keymap
-                .bindings
-                .get(&id)
-                .cloned()
-                .unwrap_or_default();
-            let text = if d.capturing {
-                "Press keys...".to_owned()
-            } else if current.is_empty() {
-                "(none)".to_owned()
-            } else {
-                current
-            };
-            let r = ui.button(text);
-            if r.clicked() {
-                d.capturing = true;
-                d.note = None;
-            }
-            if d.capturing {
-                // Focus keeps the app's shortcuts and Measurements typing away from
-                // the keys pressed.
-                r.request_focus();
-                let pressed = ui.input(|i| {
-                    i.events.iter().find_map(|e| match e {
-                        egui::Event::Key {
-                            key,
-                            pressed: true,
-                            modifiers,
-                            ..
-                        } if !is_modifier(*key) => Some((*key, *modifiers)),
-                        _ => None,
-                    })
-                });
-                match pressed {
-                    Some((egui::Key::Escape, m)) if !m.any() => d.capturing = false,
-                    Some((key, m)) => {
-                        let s = Shortcut {
-                            ctrl: m.command,
-                            shift: m.shift,
-                            alt: m.alt,
-                            key: key.name().to_owned(),
-                        };
-                        if let Some(other) = rebind(&mut self.spec.keymap.bindings, &id, Some(&s)) {
-                            let name = self.spec.command_label(&other).unwrap_or(other);
-                            d.note = Some(format!("{s} was removed from {name}."));
-                        }
-                        d.capturing = false;
-                        r.surrender_focus();
+        if let Some(id) = d.selected.clone() {
+            if let Some((s, other)) = d.conflict.clone() {
+                ui.label(format!(
+                    "{} is already assigned to {}.",
+                    s.label(),
+                    function(&other)
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Keep Original").clicked() {
+                        d.conflict = None;
+                    }
+                    if ui.button("Replace").clicked() {
+                        rebind(&mut self.spec.keymap.bindings, &id, Some(&s));
+                        d.note = Some(format!(
+                            "{} was removed from {}.",
+                            s.label(),
+                            function(&other)
+                        ));
+                        d.conflict = None;
                         changed = true;
                     }
-                    None => {}
-                }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}:", function(&id)));
+                    let current = key_label(&self.spec.keymap.bindings, &id);
+                    let text = if d.capturing {
+                        "Press keys...".to_owned()
+                    } else if current.is_empty() {
+                        "(none)".to_owned()
+                    } else {
+                        current
+                    };
+                    let r = ui
+                        .button(text)
+                        .on_hover_text("Click, then press the new shortcut (Escape cancels).");
+                    if r.clicked() {
+                        d.capturing = true;
+                        d.note = None;
+                    }
+                    if d.capturing {
+                        // Focus keeps the app's shortcuts and Measurements typing away
+                        // from the keys pressed.
+                        r.request_focus();
+                        if let Some(pressed) = captured(ui) {
+                            d.capturing = false;
+                            r.surrender_focus();
+                            if let Some(s) = pressed {
+                                match holder(&self.spec.keymap.bindings, &id, &s) {
+                                    Some(other) => d.conflict = Some((s, other)),
+                                    None => {
+                                        rebind(&mut self.spec.keymap.bindings, &id, Some(&s));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Remove").clicked() {
+                        rebind(&mut self.spec.keymap.bindings, &id, None);
+                        changed = true;
+                    }
+                });
             }
-            if ui.button("Remove").clicked() {
-                rebind(&mut self.spec.keymap.bindings, &id, None);
-                changed = true;
-            }
-            if ui.button("Reset All").clicked() {
-                self.spec.keymap.bindings = self.prefs.defaults.clone();
-                changed = true;
-            }
-        });
+        } else {
+            ui.label("Select a function to change its shortcut.");
+        }
         if let Some(note) = &d.note {
             ui.label(egui::RichText::new(note).small());
         }
+        ui.horizontal(|ui| {
+            if ui.button("Reset All").clicked() {
+                self.spec.keymap.bindings = self.prefs.defaults.clone();
+                d.conflict = None;
+                d.note = Some("All shortcuts are back to the defaults.".into());
+                changed = true;
+            }
+            if ui.button("Import...").clicked() {
+                *action = Some(crate::prefs_pages::FilesAction::Import { shortcuts: true });
+            }
+            if ui.button("Export...").clicked() {
+                *action = Some(crate::prefs_pages::FilesAction::Export { shortcuts: true });
+            }
+            if ui.button("Show All...").clicked() {
+                self.open_shortcut_list();
+            }
+        });
         changed
     }
+}
+
+/// While recording a shortcut: the first non-modifier key pressed this frame;
+/// `Some(None)` for a plain Escape (cancel).
+fn captured(ui: &egui::Ui) -> Option<Option<Shortcut>> {
+    let (key, m) = ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } if !is_modifier(*key) => Some((*key, *modifiers)),
+            _ => None,
+        })
+    })?;
+    if key == egui::Key::Escape && !m.any() {
+        return Some(None);
+    }
+    Some(Some(Shortcut {
+        ctrl: m.command,
+        shift: m.shift,
+        alt: m.alt,
+        key: key.name().to_owned(),
+    }))
 }
 
 #[cfg(test)]
@@ -1094,6 +1169,20 @@ mod tests {
         let mut again = defaults.clone();
         apply_overrides(&mut again, &o);
         assert_eq!(again, b);
+    }
+
+    /// The Shortcuts page asks Keep Original / Replace when the key is taken.
+    #[test]
+    fn holder_finds_the_other_command() {
+        let b = map(&[("tool.line", "L"), ("tool.move", "M")]);
+        let m = Shortcut::parse("M").unwrap();
+        assert_eq!(holder(&b, "tool.line", &m), Some("tool.move".into()));
+        // A command's own key is no conflict.
+        assert_eq!(holder(&b, "tool.move", &m), None);
+        assert_eq!(
+            holder(&b, "tool.line", &Shortcut::parse("K").unwrap()),
+            None
+        );
     }
 
     #[test]

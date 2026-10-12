@@ -12,6 +12,15 @@ Changes since 0.1.0.
 
 Still not saved: scenes, shadow settings, fog, model axes, locks, the active section plane, two-point perspective, text and dimension tags, tag folders and dashes, environments, fonts and dimension expert settings. Where the SketchUp 2017 format keeps most of these is not known yet; files saved by SketchUp during the trial will show it (`spec/parity/TRIAL_CHECKLIST.md` 1b). Tag folders and environments came after SketchUp 2017 and need the newer file format.
 
+## Shortcuts
+
+- Default shortcuts checked against SketchUp 2026 for Windows (help page, 2026 Quick Reference Card, a Windows shortcut export; list with sources in `spec/parity/SHORTCUTS.md`). New defaults: K Back Edges, Ctrl+Q Exit, Ctrl+, Preferences.
+- Preferences > Shortcuts lists every command by menu path (`Camera/Zoom Extents`), including right-click and extension commands, with the key under Assigned; the filter also matches a key.
+- Pressing a key another command has asks Keep Original / Replace instead of taking it silently.
+- Import... and Export... buttons on the Shortcuts page, and Show All....
+- Help > Keyboard Shortcuts: every shortcut grouped by menu, with a filter, Copy and Save as text for printing.
+- Menus and Search show punctuation keys as characters (`Ctrl+,`).
+
 ## macOS
 
 - The menu bar follows SketchUp for Mac: a Meshtard application menu with About Meshtard, Settings... (Cmd+,), the system's Services/Hide/Show All, and Quit Meshtard (Cmd+Q); Preferences, Exit and About leave the Window, File and Help menus. The Window menu starts with Minimize and Zoom and lists the panels directly (Show Dialogs replaces the Default Tray submenu).
