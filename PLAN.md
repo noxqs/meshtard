@@ -234,7 +234,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Tray panel collections, Statistics, Mix, .style files, tag multi-select, scene thumbnails (10); Model Info fonts, dimension expert settings, OpenStreetMap location snapshot (11); watermark masks and order, Modeling colors (13); Search button (14); Model Library cache and recent downloads (12).
 - [x] IFC import/export, openings and boolean differences cut (15); Preferences > Files folders used (FEATURES 43).
 - [x] `validate` geometry checks on a grid (about 80x faster).
-- [ ] Mesh import healing: imports valid with all geometry checks (in progress).
+- [x] Mesh import healing (`mesh_heal.rs`): invalid imports 16 -> 3 of 59 sample files, all Khronos glTF samples valid. Left (LEFTOVERS 17): snap rounding for near-collinear edges and paper-thin solids; slivers lost on glTF re-export of healed faces.
 - Waiting on the trial: LEFTOVERS 1 (model-only data in .skp, needs sample files) and 5 (Arc Side and Center, Intersection with Hidden Section).
 
 ## Risks
