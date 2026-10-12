@@ -62,7 +62,14 @@ pub(crate) fn describe(doc: &Document, items: &[Owner]) -> EntityInfo {
             .sum();
         match root.curves[c].arc {
             Some(arc) => {
-                info.title = if arc.is_circle() { "Circle" } else { "Arc" }.into();
+                info.title = if root.curves[c].polygon {
+                    "Polygon"
+                } else if arc.is_circle() {
+                    "Circle"
+                } else {
+                    "Arc"
+                }
+                .into();
                 info.field(
                     "radius",
                     "Radius",

@@ -263,6 +263,31 @@ impl PlaneLock {
     }
 }
 
+/// A plane that a three-point tool (Rotated Rectangle, 3 Point Arc) takes at its first
+/// point from a Shift lock over a face: the later points are projected onto it.
+#[derive(Debug, Default, Clone, Copy)]
+struct ShiftPlane {
+    /// The normal Shift holds now (`None` when released).
+    face: Option<DVec3>,
+    /// Origin and normal of the plane the shape was started in.
+    taken: Option<(DVec3, DVec3)>,
+}
+
+impl ShiftPlane {
+    /// The first point was placed at `p`.
+    fn start(&mut self, p: DVec3) {
+        self.taken = self.face.map(|n| (p, n.normalize()));
+    }
+
+    /// `p` in the shape's plane (unchanged when the shape has none).
+    fn onto(&self, p: DVec3) -> DVec3 {
+        match self.taken {
+            Some((o, n)) => p - n * (p - o).dot(n),
+            None => p,
+        }
+    }
+}
+
 /// Plane normal for a shape started at `inf`: the locked one, the face's, else up.
 fn plane_normal(lock: Option<DVec3>, inf: &Inference) -> DVec3 {
     lock.or(inf.normal).unwrap_or(DVec3::Z).normalize()
@@ -538,15 +563,18 @@ impl DrawTool for Rectangle {
 
 // ------------------------------------------------------------------ Rotated rectangle
 
-/// Three points: one side (any direction), then the width perpendicular to it.
+/// Three points: one side (any direction), then the width perpendicular to it. Shift
+/// over a face before the first point keeps the rectangle in the face's plane.
 #[derive(Debug, Default)]
 pub struct RotatedRectangle {
     points: Vec<DVec3>,
+    plane: ShiftPlane,
 }
 
 impl RotatedRectangle {
     fn corners(&self, c: DVec3) -> Option<[DVec3; 4]> {
         let [a, b] = self.points[..] else { return None };
+        let c = self.plane.onto(c);
         let side = (b - a).normalize_or_zero();
         let w = (c - b) - side * (c - b).dot(side);
         Some([a, b, b + w, a + w])
@@ -580,13 +608,17 @@ impl DrawTool for RotatedRectangle {
     }
 
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        if self.points.is_empty() {
+            self.plane.start(inf.point);
+        }
+        let point = self.plane.onto(inf.point);
         if self.points.len() < 2 {
             if self
                 .points
                 .last()
-                .is_none_or(|p| p.distance(inf.point) > mt_kernel::TOL)
+                .is_none_or(|p| p.distance(point) > mt_kernel::TOL)
             {
-                self.points.push(inf.point);
+                self.points.push(point);
             }
             return false;
         }
@@ -615,7 +647,7 @@ impl DrawTool for RotatedRectangle {
         };
         match self.points.len() {
             1 => {
-                let d = (c.point - self.points[0]).normalize_or_zero();
+                let d = (self.plane.onto(c.point) - self.points[0]).normalize_or_zero();
                 if d != DVec3::ZERO {
                     self.points.push(self.points[0] + d * len);
                 }
@@ -636,7 +668,7 @@ impl DrawTool for RotatedRectangle {
 
     fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
         match self.points.len() {
-            1 => vec![vec![self.points[0], cur.point]],
+            1 => vec![vec![self.points[0], self.plane.onto(cur.point)]],
             2 => self
                 .corners(cur.point)
                 .map(|c| vec![closed(c.to_vec())])
@@ -647,6 +679,11 @@ impl DrawTool for RotatedRectangle {
 
     fn cancel(&mut self) {
         self.points.clear();
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        self.plane.face = normal;
+        true
     }
 }
 
@@ -704,7 +741,17 @@ impl Polygon {
     }
 
     fn make(&mut self, ents: &mut Entities, arc: Arc) -> bool {
-        add_curve(ents, &arc.points(), self.is_circle.then_some(arc));
+        // A polygon is an arc curve flagged as a polygon, as in SketchUp: it keeps its
+        // center (Center inference, Entity Info radius and sides).
+        let edges = add_curve(ents, &arc.points(), Some(arc));
+        if !self.is_circle
+            && let Some(curve) = edges
+                .first()
+                .and_then(|&e| ents.edges[e].attrs.curve)
+                .and_then(|c| ents.curves.get_mut(c))
+        {
+            curve.polygon = true;
+        }
         self.center = None;
         true
     }
@@ -1409,10 +1456,13 @@ impl DrawTool for CenterArc {
     }
 }
 
+/// Start, a point on the arc, end. Shift over a face before the start keeps the arc
+/// in the face's plane.
 #[derive(Debug, Default)]
 pub struct ThreePointArc {
     points: Vec<DVec3>,
     segments: ArcSegments,
+    plane: ShiftPlane,
 }
 
 impl DrawTool for ThreePointArc {
@@ -1434,17 +1484,21 @@ impl DrawTool for ThreePointArc {
     }
 
     fn click(&mut self, ents: &mut Entities, inf: &Inference) -> bool {
+        if self.points.is_empty() {
+            self.plane.start(inf.point);
+        }
+        let point = self.plane.onto(inf.point);
         if self.points.len() < 2 {
             if self
                 .points
                 .last()
-                .is_none_or(|p| p.distance(inf.point) > mt_kernel::TOL)
+                .is_none_or(|p| p.distance(point) > mt_kernel::TOL)
             {
-                self.points.push(inf.point);
+                self.points.push(point);
             }
             return false;
         }
-        let Some(arc) = arc_three_points(self.points[0], self.points[1], inf.point, ARC_SEGMENTS)
+        let Some(arc) = arc_three_points(self.points[0], self.points[1], point, ARC_SEGMENTS)
             .map(|a| self.segments.apply(a))
         else {
             return false;
@@ -1470,14 +1524,13 @@ impl DrawTool for ThreePointArc {
     }
 
     fn preview(&self, cur: &Inference) -> Vec<Vec<DVec3>> {
+        let c = self.plane.onto(cur.point);
         match self.points[..] {
-            [a] => vec![vec![a, cur.point]],
+            [a] => vec![vec![a, c]],
             [a, b] => {
-                match arc_three_points(a, b, cur.point, ARC_SEGMENTS)
-                    .map(|x| self.segments.apply(x))
-                {
+                match arc_three_points(a, b, c, ARC_SEGMENTS).map(|x| self.segments.apply(x)) {
                     Some(arc) => vec![arc.points()],
-                    None => vec![vec![a, b, cur.point]],
+                    None => vec![vec![a, b, c]],
                 }
             }
             _ => Vec::new(),
@@ -1486,6 +1539,11 @@ impl DrawTool for ThreePointArc {
 
     fn cancel(&mut self) {
         self.points.clear();
+    }
+
+    fn lock_face_plane(&mut self, normal: Option<DVec3>) -> bool {
+        self.plane.face = normal;
+        true
     }
 
     fn step_segments(&mut self, more: bool) -> bool {
@@ -2574,6 +2632,39 @@ mod tests {
     }
 
     #[test]
+    fn shift_plane_keeps_rotated_rectangle_and_3_point_arc_in_a_face() {
+        let (n, _, _) = roof(40.0);
+        let o = v(1.0, 2.0, 3.0);
+        let off = |p: DVec3| (p - o).dot(n).abs();
+        // Rotated Rectangle: Shift over the roof, then points off it land in it.
+        let mut e = Entities::new();
+        let mut t = RotatedRectangle::default();
+        assert!(t.lock_face_plane(Some(n)));
+        t.click(&mut e, &on_face(o, n));
+        t.lock_face_plane(None); // Released: the shape keeps its plane.
+        t.click(&mut e, &inf(o + v(10.0, 0.0, 7.0)));
+        assert!(t.click(&mut e, &inf(o + v(0.0, 6.0, -5.0))));
+        assert_eq!(e.faces.len(), 1);
+        assert!(e.vertices.values().all(|x| off(x.pos) < 1e-9));
+        // Without the lock the side keeps its height.
+        let mut t = RotatedRectangle::default();
+        let mut e = Entities::new();
+        t.click(&mut e, &inf(o));
+        t.click(&mut e, &inf(o + v(10.0, 0.0, 7.0)));
+        assert_eq!(t.points[1], o + v(10.0, 0.0, 7.0));
+        // 3 Point Arc.
+        let mut e = Entities::new();
+        let mut t = ThreePointArc::default();
+        t.lock_face_plane(Some(n));
+        t.click(&mut e, &on_face(o, n));
+        t.click(&mut e, &inf(o + v(5.0, 5.0, 9.0)));
+        let preview = t.preview(&inf(o + v(10.0, 0.0, -4.0)));
+        assert!(preview.iter().flatten().all(|&p| off(p) < 1e-9));
+        assert!(t.click(&mut e, &inf(o + v(10.0, 0.0, -4.0))));
+        assert!(e.vertices.values().all(|x| off(x.pos) < 1e-9));
+    }
+
+    #[test]
     fn rectangle_tool_makes_a_face_and_takes_dimensions() {
         let mut e = Entities::new();
         let mut t = Rectangle::default();
@@ -2608,6 +2699,15 @@ mod tests {
         ));
         assert_eq!(e.faces.len(), 2);
         assert_eq!(e.edges.len(), 24 + 8);
+        // The circle is an arc curve; the polygon too, flagged as a polygon, with its
+        // center and sides (Circle/Polygon Center inference).
+        let mut curves: Vec<_> = e.curves.values().collect();
+        curves.sort_by_key(|c| c.polygon);
+        assert!(!curves[0].polygon && curves[0].arc.unwrap().is_circle());
+        let poly = curves[1].arc.unwrap();
+        assert!(curves[1].polygon);
+        assert_eq!((poly.center, poly.segments), (v(100.0, 0.0, 0.0), 8));
+        assert!((poly.radius - 5.0).abs() < 1e-9);
     }
 
     #[test]

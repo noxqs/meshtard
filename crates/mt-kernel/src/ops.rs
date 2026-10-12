@@ -110,7 +110,12 @@ fn chain_between(ents: &mut Entities, va: VertexId, vb: VertexId) -> Vec<VertexI
             let (d, s, t) = segment_segment(pa, pb, ps, pt)?;
             let elen = ps.distance(pt);
             let interior = |u: f64, l: f64| u * l > TOL && (1.0 - u) * l > TOL;
-            (d <= TOL && interior(s, len) && interior(t, elen)).then(|| (id, ps + (pt - ps) * t))
+            let p = ps + (pt - ps) * t;
+            // Near an end of the line the crossing still counts when the crossed edge
+            // passes more than TOL from that end: the end vertex is not snapped onto
+            // the edge, and a steep line would graze the edge just before reaching it.
+            let off_ends = p.distance(pa) > TOL && p.distance(pb) > TOL;
+            (d <= TOL && (interior(s, len) || off_ends) && interior(t, elen)).then_some((id, p))
         })
         .collect();
     for (_, p) in crossing {
