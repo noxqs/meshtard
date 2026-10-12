@@ -5,8 +5,8 @@
 //!
 //! Layouts follow SketchUp 2026 as remembered and are unverified: where each
 //! command sits (a Details menu here), the icons (own drawings), the Statistics
-//! rows and the Mix tab (SketchUp drags a style onto a setting slot; here a style
-//! is picked, then a setting group's button is clicked).
+//! rows and the Mix tab (a style is dragged onto a setting group, as SketchUp
+//! drags onto slots, or picked and the group clicked).
 
 use egui::{
     Align2, Color32, FontId, Painter, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2,
@@ -18,6 +18,9 @@ use crate::tray_data::{
     Collection, STYLE_PARTS, StyleSource, ThumbnailStyle, TrayData, cube_shades, search_names,
 };
 use crate::{CollectionKind, Event, Shell};
+
+/// Width over height of the style thumbnails the app renders.
+pub const STYLE_THUMB_ASPECT: f32 = 1.8;
 
 /// The collection dropdown: "In Model" (`None`) and `collections`. Returns the
 /// collection just chosen, if any.
@@ -96,6 +99,58 @@ pub(crate) fn paint_cube_swatch(p: &Painter, rect: Rect, color: [u8; 3]) {
     ));
 }
 
+/// A textured material swatch: the image on a cube's three visible faces (shaded
+/// like [`paint_cube_swatch`]) or, flat, filling the square.
+pub(crate) fn paint_texture_swatch(p: &Painter, rect: Rect, tex: egui::TextureId, cube: bool) {
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    if !cube {
+        p.image(tex, rect, uv, Color32::WHITE);
+        return;
+    }
+    let r = rect.shrink(1.0);
+    let c = r.center();
+    let h = r.height() * 0.5;
+    let up = pos2(c.x, r.top());
+    let ul = pos2(r.left(), c.y - h * 0.5);
+    let ur = pos2(r.right(), c.y - h * 0.5);
+    let mid = pos2(c.x, c.y);
+    let dl = pos2(r.left(), c.y + h * 0.5);
+    let dr = pos2(r.right(), c.y + h * 0.5);
+    let down = pos2(c.x, r.bottom());
+    let mut mesh = egui::Mesh::with_texture(tex);
+    // Corners in uv order (0,0), (1,0), (1,1), (0,1), with the face's shade.
+    for (quad, shade) in [
+        ([ul, up, ur, mid], 255u8),
+        ([ul, mid, down, dl], 215),
+        ([mid, ur, dr, down], 165),
+    ] {
+        let base = mesh.vertices.len() as u32;
+        let tint = Color32::from_gray(shade);
+        for (q, t) in quad.into_iter().zip([
+            pos2(0.0, 0.0),
+            pos2(1.0, 0.0),
+            pos2(1.0, 1.0),
+            pos2(0.0, 1.0),
+        ]) {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: q,
+                uv: t,
+                color: tint,
+            });
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    p.add(egui::Shape::mesh(mesh));
+    let edge = Stroke::new(0.6, Color32::from_black_alpha(90));
+    p.add(egui::Shape::closed_line(
+        vec![up, ur, dr, down, dl, ul],
+        edge,
+    ));
+    p.add(egui::Shape::line(vec![ul, mid, ur], edge));
+    p.add(egui::Shape::line_segment([mid, down], edge));
+}
+
 /// Section plane icon for the Outliner: a square plane with an arrow; filled when it
 /// is the active cut.
 pub(crate) fn paint_section_icon(p: &Painter, r: Rect, ink: Color32, active: bool) {
@@ -165,13 +220,13 @@ fn list_row(
     ui: &mut egui::Ui,
     t: &Theme32,
     name: &str,
-    thumbnail: Option<egui::TextureId>,
+    thumbnail: Option<(egui::TextureId, f32)>,
     selected: bool,
     icon: fn(&Painter, Rect, Color32),
 ) -> egui::Response {
     let w = ui.available_width();
     let h = if thumbnail.is_some() { 36.0 } else { ROW + 4.0 };
-    let (row, r) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+    let (row, r) = ui.allocate_exact_size(vec2(w, h), Sense::click_and_drag());
     let (fill, ink) = if selected {
         (t.selection, Color32::WHITE)
     } else if r.hovered() {
@@ -180,12 +235,13 @@ fn list_row(
         (t.field, t.text)
     };
     ui.painter().rect_filled(row, 0.0, fill);
-    let icon_rect = Rect::from_center_size(
-        pos2(row.left() + 4.0 + (h - 6.0) / 2.0, row.center().y),
-        vec2(h - 6.0, h - 6.0),
+    let aspect = thumbnail.map_or(1.0, |t| t.1);
+    let icon_rect = Rect::from_min_size(
+        pos2(row.left() + 4.0, row.top() + 3.0),
+        vec2((h - 6.0) * aspect, h - 6.0),
     );
     match thumbnail {
-        Some(tex) => {
+        Some((tex, _)) => {
             ui.painter().image(
                 tex,
                 icon_rect,
@@ -294,17 +350,12 @@ impl Shell {
                     let (rect, r) = ui.allocate_exact_size(vec2(size, size), Sense::click());
                     let inner = rect.shrink(2.0);
                     match (item.thumbnail, item.color) {
-                        (Some(tex), _) if style != ThumbnailStyle::Cube => {
-                            ui.painter().image(
-                                tex,
-                                inner,
-                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
+                        (Some(tex), _) => {
+                            paint_texture_swatch(ui.painter(), inner, tex, style.cube(true));
                         }
-                        (thumb, color) => {
+                        (None, color) => {
                             let color = color.unwrap_or([200, 200, 200]);
-                            if style.cube(thumb.is_some()) {
+                            if style.cube(false) {
                                 paint_cube_swatch(ui.painter(), inner, color);
                             } else {
                                 ui.painter().rect_filled(
@@ -357,7 +408,8 @@ impl Shell {
         ui.spacing_mut().item_spacing.y = 0.0;
         let top = ui.cursor().top();
         for (k, item) in col.items.iter().enumerate() {
-            if list_row(ui, &t, &item.name, item.thumbnail, false, paint_box).clicked() {
+            let thumb = item.thumbnail.map(|x| (x, 1.0));
+            if list_row(ui, &t, &item.name, thumb, false, paint_box).clicked() {
                 self.pending.push(Event::ComponentFromCollection {
                     collection: c,
                     item: k,
@@ -418,7 +470,8 @@ impl Shell {
         ui.spacing_mut().item_spacing.y = 0.0;
         let top = ui.cursor().top();
         for (k, item) in col.items.iter().enumerate() {
-            if list_row(ui, &t, &item.name, item.thumbnail, false, no_icon).clicked() {
+            let thumb = item.thumbnail.map(|x| (x, STYLE_THUMB_ASPECT));
+            if list_row(ui, &t, &item.name, thumb, false, no_icon).clicked() {
                 self.pending.push(Event::StyleFromCollection {
                     collection: c,
                     item: k,
@@ -428,8 +481,9 @@ impl Shell {
         list_frame(ui, &t, top, w);
     }
 
-    /// The Styles Mix tab: pick a style in the browser below (In Model or a
-    /// collection), then click a setting group to take that group from it.
+    /// The Styles Mix tab: drag a style from the browser below (In Model or a
+    /// collection) onto a setting group to take that group from it, or pick the
+    /// style and click the group.
     pub(crate) fn styles_mix(&mut self, ui: &mut egui::Ui, data: &TrayData) {
         let t = self.theme.clone();
         let more = &mut self.tray_ui.more;
@@ -445,20 +499,55 @@ impl Shell {
             }
         };
         let source = more.mix_source.filter(|&s| source_name(s).is_some());
+        let dragging = egui::DragAndDrop::has_payload_of_type::<StyleSource>(ui.ctx());
         ui.label(
             RichText::new(match source.and_then(source_name) {
-                Some(n) => format!("From \"{n}\": click a setting group to use it."),
-                None => "Pick a style below, then click a setting group.".to_owned(),
+                _ if dragging => "Drop the style on a setting group.".to_owned(),
+                Some(n) => format!("From \"{n}\": click a setting group, or drag a style onto one."),
+                None => "Drag a style from below onto a setting group (or pick one, then click the group).".to_owned(),
             })
             .color(t.text_disabled),
         );
+        let w = ui.available_width();
         for (k, part) in STYLE_PARTS.iter().enumerate() {
-            let b = egui::Button::new(*part).min_size(vec2(ui.available_width(), 0.0));
-            if ui.add_enabled(source.is_some(), b).clicked()
+            let (rect, r) = ui.allocate_exact_size(vec2(w, ROW + 6.0), Sense::click());
+            let over = r.dnd_hover_payload::<StyleSource>().is_some();
+            let live = source.is_some() || dragging;
+            let (fill, border) = if over {
+                (t.pressed, t.pressed_border)
+            } else if dragging {
+                (t.field, t.selection)
+            } else if r.hovered() && live {
+                (t.hover, t.hover_border)
+            } else {
+                (t.field, t.border)
+            };
+            ui.painter().rect(
+                rect,
+                2.0,
+                fill,
+                Stroke::new(1.0, border),
+                StrokeKind::Inside,
+            );
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                *part,
+                FontId::proportional(t.sizes.font),
+                if live { t.text } else { t.text_disabled },
+            );
+            if let Some(dropped) = r.dnd_release_payload::<StyleSource>() {
+                self.tray_ui.more.mix_source = Some(*dropped);
+                self.pending.push(Event::StyleMix {
+                    source: *dropped,
+                    part: k,
+                });
+            } else if r.clicked()
                 && let Some(source) = source
             {
                 self.pending.push(Event::StyleMix { source, part: k });
             }
+            ui.add_space(2.0);
         }
         ui.add_space(4.0);
         ui.separator();
@@ -469,9 +558,12 @@ impl Shell {
             &data.style_collections,
             &mut more.mix_collection,
         );
-        let names: Vec<(StyleSource, String)> = match more.mix_collection {
+        let names: Vec<(StyleSource, String, Option<egui::TextureId>)> = match more.mix_collection {
             None => (data.styles.iter().enumerate())
-                .map(|(i, n)| (StyleSource::InModel(i), n.clone()))
+                .map(|(i, n)| {
+                    let thumb = data.style_thumbnails.get(i).copied().flatten();
+                    (StyleSource::InModel(i), n.clone(), thumb)
+                })
                 .collect(),
             Some(c) => data.style_collections[c]
                 .items
@@ -484,6 +576,7 @@ impl Shell {
                             item: k,
                         },
                         x.name.clone(),
+                        x.thumbnail,
                     )
                 })
                 .collect(),
@@ -495,8 +588,30 @@ impl Shell {
         let w = ui.available_width();
         ui.spacing_mut().item_spacing.y = 0.0;
         let top = ui.cursor().top();
-        for (s, name) in names {
-            if list_row(ui, &t, &name, None, source == Some(s), no_icon).clicked() {
+        for (s, name, thumb) in names {
+            let thumb = thumb.map(|x| (x, STYLE_THUMB_ASPECT));
+            let r = list_row(ui, &t, &name, thumb, source == Some(s), no_icon);
+            r.dnd_set_drag_payload(s);
+            if r.dragged()
+                && let Some(p) = ui.ctx().pointer_interact_pos()
+            {
+                // The style's name follows the pointer while it is dragged.
+                let layer =
+                    egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("mt_ui_mix_drag"));
+                let painter = ui.ctx().layer_painter(layer);
+                let font = FontId::proportional(t.sizes.font);
+                let galley = painter.layout_no_wrap(name.clone(), font, t.text);
+                let r = Rect::from_min_size(p + vec2(12.0, 8.0), galley.size()).expand(4.0);
+                painter.rect(
+                    r,
+                    3.0,
+                    t.field,
+                    Stroke::new(1.0, t.border),
+                    StrokeKind::Inside,
+                );
+                painter.galley(r.min + vec2(4.0, 4.0), galley, t.text);
+            }
+            if r.clicked() {
                 self.tray_ui.more.mix_source = Some(s);
             }
         }
@@ -899,6 +1014,87 @@ mod tests {
         );
         click(&mut s, y + ROW, egui::Modifiers::CTRL);
         assert_eq!(s.tray_ui.more.tag_set, [Tag(3)], "Ctrl+click takes B out");
+    }
+
+    #[test]
+    fn mix_tab_takes_a_group_from_a_dropped_style() {
+        let spec = mt_spec::Spec::builtin().expect("spec");
+        let mut s = Shell::new(&spec);
+        s.open_panel("window.styles");
+        let reset = |s: &mut Shell| {
+            only(s, "window.styles");
+            s.tray_ui.more.styles_tab = 2;
+            s.tray_ui.more.mix_collection = None;
+        };
+        reset(&mut s);
+        s.set_tray_data(TrayData {
+            styles: vec!["A".into(), "B".into()],
+            ..TrayData::default()
+        });
+        let ctx = egui::Context::default();
+        run(&mut s, &ctx, vec![]);
+        run(&mut s, &ctx, vec![]);
+        let rect = s.last_tray_rects.first().map(|r| r.1).expect("tray drawn");
+        let x = rect.center().x;
+        // The Edge Settings slot: the first clicked point that mixes, with "A" picked.
+        let mut slot = None;
+        for y in (40..880).step_by(3) {
+            reset(&mut s);
+            s.tray_ui.more.mix_source = Some(StyleSource::InModel(0));
+            let p = pos2(x, y as f32);
+            run(&mut s, &ctx, vec![egui::Event::PointerMoved(p)]);
+            if run(&mut s, &ctx, click_at(p))
+                .iter()
+                .any(|e| matches!(e, Event::StyleMix { part: 0, .. }))
+            {
+                slot = Some(p);
+                break;
+            }
+        }
+        let slot = slot.expect("no Edge Settings slot");
+        // The "B" row: the second point below the slots that picks a style.
+        let mut row = None;
+        let mut seen = 0;
+        for y in (slot.y as usize + 100..880).step_by(3) {
+            reset(&mut s);
+            s.tray_ui.more.mix_source = None;
+            let p = pos2(x, y as f32);
+            run(&mut s, &ctx, vec![egui::Event::PointerMoved(p)]);
+            run(&mut s, &ctx, click_at(p));
+            if s.tray_ui.more.mix_source == Some(StyleSource::InModel(1)) {
+                row = Some(p);
+                break;
+            }
+            seen += usize::from(s.tray_ui.more.mix_source.is_some());
+        }
+        assert!(seen > 0, "row A not found first");
+        let row = row.expect("no row B");
+        // Drag "B" onto the slot: nothing picked first, so only the drop mixes.
+        reset(&mut s);
+        s.tray_ui.more.mix_source = None;
+        let b = egui::PointerButton::Primary;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: b,
+            pressed,
+            modifiers: Default::default(),
+        };
+        run(&mut s, &ctx, vec![egui::Event::PointerMoved(row)]);
+        run(&mut s, &ctx, vec![button(row, true)]);
+        let mut got = Vec::new();
+        for k in 1..=10 {
+            let p = row + (slot - row) * (k as f32 / 10.0);
+            got.extend(run(&mut s, &ctx, vec![egui::Event::PointerMoved(p)]));
+        }
+        got.extend(run(&mut s, &ctx, vec![button(slot, false)]));
+        got.extend(run(&mut s, &ctx, vec![]));
+        assert!(
+            got.contains(&Event::StyleMix {
+                source: StyleSource::InModel(1),
+                part: 0
+            }),
+            "{got:?}"
+        );
     }
 
     #[test]

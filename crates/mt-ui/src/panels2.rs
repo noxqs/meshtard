@@ -1253,7 +1253,9 @@ impl Shell {
         ui.spacing_mut().item_spacing.y = 0.0;
         let top = ui.cursor().top();
         for (i, name) in data.styles.iter().enumerate() {
-            let (row, r) = ui.allocate_exact_size(vec2(w, ROW + 4.0), Sense::click());
+            let thumb = data.style_thumbnails.get(i).copied().flatten();
+            let h = if thumb.is_some() { 36.0 } else { ROW + 4.0 };
+            let (row, r) = ui.allocate_exact_size(vec2(w, h), Sense::click());
             let (fill, ink) = if selected == Some(i) {
                 (t.selection, Color32::WHITE)
             } else if r.hovered() {
@@ -1267,8 +1269,18 @@ impl Shell {
             } else {
                 name.clone()
             };
+            let mut left = row.left() + 8.0;
+            if let Some(tex) = thumb {
+                let icon = Rect::from_min_size(
+                    pos2(row.left() + 4.0, row.top() + 3.0),
+                    vec2((h - 6.0) * crate::STYLE_THUMB_ASPECT, h - 6.0),
+                );
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                ui.painter().image(tex, icon, uv, Color32::WHITE);
+                left = icon.right() + 6.0;
+            }
             ui.painter().with_clip_rect(row).text(
-                pos2(row.left() + 8.0, row.center().y),
+                pos2(left, row.center().y),
                 Align2::LEFT_CENTER,
                 text,
                 FontId::proportional(t.sizes.font),

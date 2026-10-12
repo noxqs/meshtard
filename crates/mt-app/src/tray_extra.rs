@@ -13,13 +13,15 @@
 //! files. Built in: a "Colors" materials collection and a "Default Styles" styles
 //! collection (names and contents our own drafts, unverified).
 //!
-//! The `.style` format is our own text file (SketchUp's is a zip archive whose
-//! layout is not known here): `key=value` lines with the style items of
-//! `mt_kernel::export::style_items` plus fog and a few model-only settings;
-//! watermarks are not saved.
+//! `.style` files are told apart by their content: SketchUp's own are zip archives
+//! (read by [`crate::style_zip`]: its items, watermarks and thumbnail), ours are a
+//! text file of `key=value` lines with the style items of
+//! `mt_kernel::export::style_items` plus fog and a few model-only settings
+//! (watermarks are not saved in ours). Save As writes ours.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use mt_kernel::model_data::NamedStyle;
 use mt_kernel::{DefinitionId, Entities, Material, Model, StyleSettings};
@@ -331,6 +333,16 @@ fn parse_rgb(v: &str) -> Option<[u8; 3]> {
     Some([it.next()??, it.next()??, it.next()??])
 }
 
+/// Reads a `.style` file of either kind (see the module docs), with its thumbnail
+/// image when it has one.
+pub(crate) fn read_style_bytes(data: &[u8]) -> Result<(NamedStyle, Option<Vec<u8>>), String> {
+    if crate::style_zip::is_zip(data) {
+        return crate::style_zip::read(data).map(|z| (z.style, z.thumbnail));
+    }
+    let text = std::str::from_utf8(data).map_err(|_| "Not a style file.".to_owned())?;
+    parse_style_file(text).map(|s| (s, None))
+}
+
 /// Reads a `.style` file's text; settings it lacks keep the defaults.
 pub(crate) fn parse_style_file(text: &str) -> Result<NamedStyle, String> {
     if !text.starts_with(STYLE_HEADER) {
@@ -488,14 +500,23 @@ pub(crate) fn builtin_colors() -> Vec<(&'static str, [u8; 3])> {
 pub(crate) enum LibItem {
     Color(String, [u8; 3]),
     File(String, PathBuf),
-    Style(Box<NamedStyle>),
+    Style(Box<LibStyle>),
+}
+
+/// A style of a collection: the style, its thumbnail key (file path, or the name of
+/// a built-in one) and its own thumbnail image (SketchUp `.style` files).
+#[derive(Clone)]
+pub(crate) struct LibStyle {
+    pub style: NamedStyle,
+    key: String,
+    image: Option<Arc<[u8]>>,
 }
 
 impl LibItem {
     fn name(&self) -> &str {
         match self {
             Self::Color(n, _) | Self::File(n, _) => n,
-            Self::Style(s) => &s.name,
+            Self::Style(s) => &s.style.name,
         }
     }
 }
@@ -571,10 +592,16 @@ pub(crate) fn scan_folders(roots: &[PathBuf], k: usize) -> Vec<LibCollection> {
         let items = files
             .into_iter()
             .filter_map(|p| match k {
-                2 => std::fs::read_to_string(&p)
+                2 => std::fs::read(&p)
                     .ok()
-                    .and_then(|t| parse_style_file(&t).ok())
-                    .map(|s| LibItem::Style(Box::new(s))),
+                    .and_then(|t| read_style_bytes(&t).ok())
+                    .map(|(style, image)| {
+                        LibItem::Style(Box::new(LibStyle {
+                            style,
+                            key: p.display().to_string(),
+                            image: image.map(Arc::from),
+                        }))
+                    }),
                 _ => Some(LibItem::File(file_stem(&p), p)),
             })
             .collect();
@@ -648,6 +675,8 @@ pub(crate) struct TrayLib {
     want_thumbs: Vec<PathBuf>,
     /// Scene thumbnails by [`scene_key`].
     scene_thumbs: HashMap<u64, egui::TextureHandle>,
+    /// Rendered thumbnails of materials, components and styles.
+    pub(crate) render: crate::thumbs::Thumbs,
 }
 
 impl TrayLib {
@@ -675,7 +704,13 @@ impl TrayLib {
                     name: "Default Styles".into(),
                     items: builtin_styles()
                         .into_iter()
-                        .map(|s| LibItem::Style(Box::new(s)))
+                        .map(|style| {
+                            LibItem::Style(Box::new(LibStyle {
+                                key: format!("builtin:{}", style.name),
+                                style,
+                                image: None,
+                            }))
+                        })
                         .collect(),
                 }],
                 _ => Vec::new(),
@@ -684,6 +719,31 @@ impl TrayLib {
             self.collections[k] = Some(list);
         }
         self.collections[k].as_deref().unwrap_or_default()
+    }
+
+    /// Scanned collection styles without an image of their own: their thumbnail
+    /// keys and settings (to render).
+    pub(crate) fn styles_to_render(&self) -> Vec<(String, StyleSettings)> {
+        self.lib_styles()
+            .filter(|s| s.image.is_none())
+            .map(|s| (s.key.clone(), s.style.settings.clone()))
+            .collect()
+    }
+
+    /// Scanned collection styles with an image of their own (keys and bytes).
+    pub(crate) fn style_images(&self) -> Vec<(String, Arc<[u8]>)> {
+        self.lib_styles()
+            .filter_map(|s| Some((s.key.clone(), s.image.clone()?)))
+            .collect()
+    }
+
+    fn lib_styles(&self) -> impl Iterator<Item = &LibStyle> {
+        (self.collections[2].iter().flatten())
+            .flat_map(|c| &c.items)
+            .filter_map(|it| match it {
+                LibItem::Style(s) => Some(&**s),
+                _ => None,
+            })
     }
 
     fn item(&mut self, k: usize, c: usize, i: usize) -> Option<LibItem> {
@@ -701,11 +761,14 @@ impl TrayLib {
                     .map(|it| {
                         let (color, thumbnail) = match it {
                             LibItem::Color(_, c) => (Some(*c), None),
+                            LibItem::File(_, p) if k == 1 => (None, self.render.file(p)),
                             LibItem::File(_, p) => match self.thumbs.get(p) {
                                 Some(Some((t, c))) => (Some(*c), Some(t.id())),
                                 _ => (None, None),
                             },
-                            LibItem::Style(_) => (None, None),
+                            LibItem::Style(s) => {
+                                (None, self.render.style(&s.key, s.image.is_some()))
+                            }
                         };
                         CollectionItem {
                             name: it.name().to_owned(),
@@ -743,6 +806,8 @@ impl App {
         data.material_collections = self.tray_lib.ui_collections(0);
         data.component_collections = self.tray_lib.ui_collections(1);
         data.style_collections = self.tray_lib.ui_collections(2);
+        data.material_thumbnails = self.material_thumbnails();
+        (data.component_thumbnails, data.style_thumbnails) = self.rendered_thumbnails();
         let Some(doc) = &self.document else {
             return;
         };
@@ -771,6 +836,7 @@ impl App {
     /// Loads waiting material thumbnails and renders one missing scene thumbnail per
     /// frame while the Scenes panel shows thumbnails.
     pub(crate) fn tray_lib_ui(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        self.thumbnails_ui(ctx, frame);
         for _ in 0..4 {
             let Some(path) = self.tray_lib.want_thumbs.pop() else {
                 break;
@@ -1013,6 +1079,20 @@ impl App {
                         }
                     }
                 }
+                // Components: read the files for their rendered thumbnails.
+                if *kind == CollectionKind::Components {
+                    let paths: Vec<PathBuf> = (self.tray_lib.collections(1).get(*collection))
+                        .map(|c| {
+                            (c.items.iter())
+                                .filter_map(|it| match it {
+                                    LibItem::File(_, p) => Some(p.clone()),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.tray_lib.render.want_files(paths);
+                }
                 return Ok(false);
             }
             Event::CollectionAdd(kind) => kind_index(*kind),
@@ -1031,6 +1111,9 @@ impl App {
                 let all = self.tray_lib.extra().clone();
                 save_extra(&all);
                 self.tray_lib.collections[k] = None;
+                if k == 2 {
+                    self.tray_lib.render.forget_collections();
+                }
                 self.message = Some(format!("Collection folder added: {}", dir.display()));
             }
             return Ok(false);
@@ -1201,7 +1284,7 @@ impl App {
             }
             Event::StyleFromCollection { collection, item } => {
                 match self.tray_lib.item(2, collection, item) {
-                    Some(LibItem::Style(s)) => Ok(self.add_and_apply_style(*s)),
+                    Some(LibItem::Style(s)) => Ok(self.add_and_apply_style(s.style)),
                     _ => Ok(false),
                 }
             }
@@ -1229,11 +1312,11 @@ impl App {
                 let Some(path) = crate::filedialog::open(&filters) else {
                     return Ok(false);
                 };
-                match std::fs::read_to_string(&path)
+                match std::fs::read(&path)
                     .map_err(|e| e.to_string())
-                    .and_then(|t| parse_style_file(&t))
+                    .and_then(|t| read_style_bytes(&t))
                 {
-                    Ok(s) => Ok(self.add_and_apply_style(s)),
+                    Ok((s, _)) => Ok(self.add_and_apply_style(s)),
                     Err(e) => {
                         self.file_error("open", &path, e);
                         Ok(false)
@@ -1249,7 +1332,7 @@ impl App {
                         .map(|s| s.settings.clone()),
                     StyleSource::Collection { collection, item } => {
                         match self.tray_lib.item(2, collection, item) {
-                            Some(LibItem::Style(s)) => Some(s.settings),
+                            Some(LibItem::Style(s)) => Some(s.style.settings),
                             _ => None,
                         }
                     }
@@ -1409,6 +1492,28 @@ mod tests {
             let back = parse_style_file(&style_file_text(&s)).unwrap();
             assert_eq!(back.settings, s.settings, "{}", s.name);
         }
+    }
+
+    #[test]
+    fn style_files_of_either_kind_by_content() {
+        use std::io::Write;
+        let ours = style_file_text(&builtin_styles()[3]);
+        let (s, image) = read_style_bytes(ours.as_bytes()).unwrap();
+        assert_eq!(s.name, "Wireframe");
+        assert!(image.is_none());
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default();
+        zip.start_file("style.xml", o).unwrap();
+        zip.write_all(br#"<sty:style name="[Z]"><sty:item id="2001"><t:variant type="4">0</t:variant></sty:item></sty:style>"#)
+            .unwrap();
+        zip.start_file("doc_thumbnail.png", o).unwrap();
+        zip.write_all(b"png").unwrap();
+        let data = zip.finish().unwrap().into_inner();
+        let (s, image) = read_style_bytes(&data).unwrap();
+        assert_eq!(s.name, "Z");
+        assert_eq!(s.settings.face_style, mt_kernel::FaceStyle::Wireframe);
+        assert_eq!(image.as_deref(), Some(&b"png"[..]));
+        assert!(read_style_bytes(&[0xff, 0xfe, 0]).is_err());
     }
 
     #[test]

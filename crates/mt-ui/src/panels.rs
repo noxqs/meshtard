@@ -232,7 +232,15 @@ impl Shell {
                             let name = match cell {
                                 Some(i) => {
                                     let m = &data.materials[i];
-                                    if style.cube(m.texture.is_some()) {
+                                    let thumb = data.material_thumbnails.get(i).copied().flatten();
+                                    if let Some(tex) = thumb.filter(|_| m.texture.is_some()) {
+                                        crate::panels3::paint_texture_swatch(
+                                            ui.painter(),
+                                            rect.shrink(2.0),
+                                            tex,
+                                            style.cube(true),
+                                        );
+                                    } else if style.cube(m.texture.is_some()) {
                                         crate::panels3::paint_cube_swatch(
                                             ui.painter(),
                                             rect.shrink(2.0),
@@ -694,7 +702,9 @@ impl Shell {
         let top = ui.cursor().top();
         let font = FontId::proportional(t.sizes.font);
         for (i, c) in data.components.iter().enumerate() {
-            let (row, r) = ui.allocate_exact_size(vec2(w, ROW + 4.0), Sense::click());
+            let thumb = data.component_thumbnails.get(i).copied().flatten();
+            let h = if thumb.is_some() { 36.0 } else { ROW + 4.0 };
+            let (row, r) = ui.allocate_exact_size(vec2(w, h), Sense::click());
             let (fill, ink, sub) = if current == Some(i) {
                 (t.selection, Color32::WHITE, Color32::WHITE)
             } else if r.hovered() {
@@ -703,9 +713,25 @@ impl Shell {
                 (t.field, t.text, t.text_disabled)
             };
             ui.painter().rect_filled(row, 0.0, fill);
-            let icon =
-                Rect::from_center_size(pos2(row.left() + 13.0, row.center().y), vec2(16.0, 16.0));
-            paint_cube(ui.painter(), icon, ink);
+            let icon = match thumb {
+                Some(tex) => {
+                    let icon = Rect::from_center_size(
+                        pos2(row.left() + 4.0 + (h - 6.0) / 2.0, row.center().y),
+                        vec2(h - 6.0, h - 6.0),
+                    );
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    ui.painter().image(tex, icon, uv, Color32::WHITE);
+                    icon
+                }
+                None => {
+                    let icon = Rect::from_center_size(
+                        pos2(row.left() + 13.0, row.center().y),
+                        vec2(16.0, 16.0),
+                    );
+                    paint_cube(ui.painter(), icon, ink);
+                    icon
+                }
+            };
             let count = c.instances.to_string();
             let count_w = ui
                 .painter()
