@@ -73,6 +73,12 @@ pub struct TrayData {
     pub component_stats: Vec<(String, usize, usize)>,
     /// Scenes panel thumbnails, one per entry of `scenes` (`None`: not rendered yet).
     pub scene_thumbnails: Vec<Option<egui::TextureId>>,
+    /// Texture images of `materials` (`None`: plain color or not loaded yet); the
+    /// panel draws them flat or on a cube by the thumbnail style.
+    pub material_thumbnails: Vec<Option<egui::TextureId>>,
+    /// Rendered thumbnails of `components` and of the "In Model" `styles`.
+    pub component_thumbnails: Vec<Option<egui::TextureId>>,
+    pub style_thumbnails: Vec<Option<egui::TextureId>>,
 }
 
 impl Default for TrayData {
@@ -114,6 +120,9 @@ impl Default for TrayData {
             style_collections: Vec::new(),
             component_stats: Vec::new(),
             scene_thumbnails: Vec::new(),
+            material_thumbnails: Vec::new(),
+            component_thumbnails: Vec::new(),
+            style_thumbnails: Vec::new(),
         }
     }
 }

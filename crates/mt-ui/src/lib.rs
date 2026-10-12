@@ -126,6 +126,7 @@ mod menu;
 mod panels;
 mod panels2;
 mod panels3;
+pub use panels3::STYLE_THUMB_ASPECT;
 mod status;
 mod style_panel;
 mod theme;
