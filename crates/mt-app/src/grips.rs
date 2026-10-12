@@ -327,7 +327,12 @@ impl App {
             )
         });
         let primary = egui::PointerButton::Primary;
-        let (escape, alt) = ui.input(|i| (i.key_pressed(egui::Key::Escape), i.modifiers.alt));
+        let (escape, alt) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Escape),
+                crate::tool_mods::held(i.modifiers, crate::tool_mods::Role::Alternate),
+            )
+        });
         let clicked = response.clicked_by(primary);
         let pressed = response.drag_started_by(primary);
         // A drag starts where the button went down: pick what was under the press.

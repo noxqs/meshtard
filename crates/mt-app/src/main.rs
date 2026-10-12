@@ -30,6 +30,7 @@ mod geo_map;
 mod graphics;
 mod grips;
 mod image_entity;
+mod image_igloo;
 mod import;
 mod label_fonts;
 mod lasso;
@@ -71,6 +72,7 @@ mod templates;
 mod text3d;
 mod texture_position;
 mod tool_extra;
+mod tool_mods;
 mod tools;
 mod tray;
 mod tray_extra;
@@ -112,6 +114,8 @@ const IMPLEMENTED: &[&str] = &[
     "file.save_as",
     "file.save_copy_as",
     "file.exit",
+    // Mac only (menus_mac.toml); not in the Windows menus.
+    "file.close",
     "tool.select",
     "tool.lasso",
     "tool.snaps",
@@ -331,6 +335,7 @@ const IMPLEMENTED: &[&str] = &[
     "help.context_help",
     "window.3d_warehouse",
     "camera.match_new_photo",
+    "camera.image_igloo",
     // Extensions (extensions/): Extension Manager, Warehouse, Console.
     "extensions.manager",
     "extensions.warehouse",
@@ -1281,6 +1286,8 @@ impl App {
             }
         } else if id == "file.new" {
             self.request(ctx, frame, confirm::Pending::New);
+        } else if id == "file.close" {
+            self.request(ctx, frame, confirm::Pending::Close);
         } else if matches!(id, "file.save" | "file.save_as" | "file.save_copy_as") {
             self.save_command(ctx, id);
         } else if id == "file.open" {
@@ -1535,7 +1542,8 @@ impl App {
                 DVec2::ZERO
             },
             shift,
-            alt: ui.input(|i| i.modifiers.alt),
+            // Alt (Option on the Mac) orbits without gravity.
+            alt: ui.input(|i| tool_mods::held(i.modifiers, tool_mods::Role::AltOption)),
             wheel: if response.hovered() {
                 f64::from(notches) * self.prefs.wheel_sign()
             } else {
@@ -1546,6 +1554,8 @@ impl App {
         let before = self.camera.clone();
         // Match Photo editing takes the mouse (no navigation while lining up).
         let photo = self.match_photo_input(ui, &response, rect, viewport_px);
+        // The Image Igloo takes the left button (orbit, pick a photo).
+        let igloo = !photo && self.image_igloo_input(ui, &response, rect, viewport_px);
         if !photo {
             nav::apply(self.tool, &mut self.camera, &input, viewport_px);
         }
@@ -1558,7 +1568,7 @@ impl App {
         // navigation tool, which does nothing here).
         let texpos =
             self.texture_position_input(ui, &response, rect, viewport_px, &render_state.device);
-        match if texpos || photo {
+        match if texpos || photo || igloo {
             Tool::Pan
         } else {
             self.tool
@@ -1635,6 +1645,7 @@ impl App {
             );
         }
         self.match_photo_over(ui, rect);
+        self.image_igloo_paint(ui, rect);
         self.draw_selection_box(ui, &response, rect);
         self.crosshairs(ui, &response, rect, viewport_px);
         self.draw_lasso(ui, &response, rect);
@@ -1753,7 +1764,8 @@ impl App {
                     k(egui::Key::Escape),
                 ],
                 i.modifiers.shift,
-                i.modifiers.alt,
+                // Alt on Windows, Command on the Mac (Line cycle, Shift+Alt plane).
+                tool_mods::held(i.modifiers, tool_mods::Role::Alternate),
             )
         });
         let [right, left, up, down, escape] = keys;
@@ -1887,7 +1899,7 @@ impl App {
             let k = |key| i.key_pressed(key);
             (
                 k(egui::Key::Escape),
-                i.modifiers.command,
+                tool_mods::held(i.modifiers, tool_mods::Role::Copy),
                 [
                     k(egui::Key::ArrowRight),
                     k(egui::Key::ArrowLeft),
@@ -1895,11 +1907,11 @@ impl App {
                 ],
                 k(egui::Key::ArrowDown),
                 i.modifiers.shift,
-                i.modifiers.alt,
+                tool_mods::held(i.modifiers, tool_mods::Role::Alternate),
             )
         });
-        // Pressing Ctrl (Option on macOS in SketchUp; unverified) toggles copy / new
-        // faces; holding it is no longer needed.
+        // Pressing Ctrl (Option on the Mac, `tool_mods`) toggles copy / new faces;
+        // holding it is no longer needed.
         let ctrl_down = ctrl && !self.ctrl_was_down;
         self.ctrl_was_down = ctrl;
         if self.modify.as_ref().is_some_and(|m| m.finished()) {
@@ -2002,11 +2014,7 @@ impl App {
             .collect();
         let local = self.inference.map(|i| to_local(&i, self.ctx_xf));
         tool.input(&modify::Input {
-            held: ui.input(|i| cursor::Mods {
-                ctrl: i.modifiers.command,
-                shift: i.modifiers.shift,
-                alt: i.modifiers.alt,
-            }),
+            held: ui.input(|i| tool_mods::mods(i.modifiers, self.tool)),
             press: response.drag_started_by(egui::PointerButton::Primary),
             ray: cursor.map(|c| {
                 let r = self.camera.ray(c, viewport_px);
@@ -2160,12 +2168,12 @@ impl App {
         };
         let primary = egui::PointerButton::Primary;
         let pos = response.interact_pointer_pos();
-        let mods = ui.input(|i| i.modifiers);
+        let mods = ui.input(|i| tool_mods::mods(i.modifiers, Tool::Eraser));
         // Erasing one edge of a curve erases the whole curve, so the drag highlights all
         // of it (hiding and softening work per edge).
         let whole_curve = |app: &Self, o: Owner| -> Vec<Owner> {
             let curve = match (o, &app.document) {
-                (Owner::Edge(e), Some(doc)) if !mods.shift && !mods.command && !mods.alt => {
+                (Owner::Edge(e), Some(doc)) if !mods.shift && !mods.ctrl && !mods.alt => {
                     doc.active().edges.get(e).and_then(|x| x.attrs.curve)
                 }
                 _ => None,
@@ -2224,7 +2232,7 @@ impl App {
             return;
         }
         if let Some(doc) = &mut self.document {
-            let (hide, soften) = cursor::eraser_mode(mods.command, mods.shift, mods.alt);
+            let (hide, soften) = cursor::eraser_mode(mods.ctrl, mods.shift, mods.alt);
             doc.erase(&done, hide, soften);
         }
         self.rebuild(device);
@@ -2246,8 +2254,8 @@ impl App {
                 f64::from((p.y - rect.min.y) * ppp),
             )
         };
-        let mods = ui.input(|i| i.modifiers);
-        let mode = Mode::from_modifiers(mods.command, mods.shift);
+        let mods = ui.input(|i| tool_mods::mods(i.modifiers, Tool::Select));
+        let mode = Mode::from_modifiers(mods.ctrl, mods.shift);
         // Esc closes the open group or component (unverified for SketchUp 2026).
         if ui.input(|i| i.key_pressed(egui::Key::Escape))
             && let Some(doc) = self.document.as_mut()
@@ -2544,10 +2552,9 @@ impl eframe::App for App {
         self.handle_shortcuts(ui.ctx(), frame, shell.is_typing());
 
         let info = self.entity_info();
-        let status = self
-            .message
-            .clone()
-            .unwrap_or_else(|| match (&self.draw, self.tool) {
+        // Tool hints name Windows keys; on the Mac they read Option / Command.
+        let status = self.message.clone().unwrap_or_else(|| {
+            let hint = match (&self.draw, self.tool) {
                 // The Line tool's inference mode (Alt cycles it after the first click).
                 (Some(d), Tool::Draw("tool.line")) if d.anchor().is_some() => format!(
                     "{} Alt = cycle inferences: {}.",
@@ -2560,7 +2567,9 @@ impl eframe::App for App {
                 }
                 (_, Tool::Pick(_)) => self.pick_status(),
                 (_, t) => t.hint().to_owned(),
-            });
+            };
+            tool_mods::Platform::current().hint(&hint, self.tool)
+        });
         let units = self
             .document
             .as_ref()
@@ -2587,6 +2596,7 @@ impl eframe::App for App {
         let can_go_back = self.camera_history.can_go_back();
         let can_go_forward = self.camera_history.can_go_forward();
         let can_edit_photo = self.can_edit_matched_photo();
+        let can_igloo = self.can_image_igloo();
         let camera = self.camera.clone();
         let scene_tabs = self.scene_tabs;
         let playing = self.animation.is_playing();
@@ -2611,6 +2621,7 @@ impl eframe::App for App {
                 "camera.previous" => can_go_back,
                 "camera.next" => can_go_forward,
                 "camera.edit_matched_photo" => can_edit_photo,
+                "camera.image_igloo" => can_igloo,
                 "file.revert" => has_file,
                 _ => small_on.iter().find(|(c, _)| *c == id).map_or_else(
                     || IMPLEMENTED.contains(&id) || ext_ids.iter().any(|x| x == id),

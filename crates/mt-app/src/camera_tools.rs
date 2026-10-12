@@ -167,8 +167,14 @@ impl App {
                     self.camera_tools.walking = true;
                     self.camera_history.push(self.camera.clone());
                 }
-                let (shift, ctrl, dt) =
-                    ui.input(|i| (i.modifiers.shift, i.modifiers.command, i.stable_dt));
+                let (shift, ctrl, dt) = ui.input(|i| {
+                    let run = crate::tool_mods::Role::Copy;
+                    (
+                        i.modifiers.shift,
+                        crate::tool_mods::held(i.modifiers, run),
+                        i.stable_dt,
+                    )
+                });
                 let dt = f64::from(dt.min(0.1));
                 let offset = (now - start)
                     .to_array()

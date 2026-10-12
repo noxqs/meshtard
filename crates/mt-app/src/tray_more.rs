@@ -724,6 +724,7 @@ impl App {
     /// Activates scene `i`: the camera moves there over the transition time; the rest
     /// of what it saves applies at once.
     pub(crate) fn scene_activate(&mut self, i: usize) -> bool {
+        self.image_igloo_leave();
         let Some(doc) = self.document.as_mut() else {
             return false;
         };

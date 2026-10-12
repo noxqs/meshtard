@@ -47,7 +47,7 @@ unbound**, **command missing**.
 | Ctrl+Shift+E | Zoom Extents (second key) | Camera/Zoom Extents | `camera.zoom_extents` | EXP [inf] | bound (second key, since 2026-10-12; FEATURES 75) |
 | Ctrl+Shift+W | Zoom Window | Camera/Zoom Window | `camera.zoom_window` | EXP [inf] | bound |
 | G | Make Component | Edit/Make Component | `edit.make_component` | HELP [doc] | bound |
-| I | Image Igloo | Camera/Image Igloo | - | HELP [doc], EXP | command missing (FEATURES 73) |
+| I | Image Igloo | Camera/Image Igloo | `camera.image_igloo` | HELP [doc], EXP | bound since 2026-10-12 (FEATURES 73) |
 | K | Back Edges | View/Edge Style/Back Edges | `view.back_edges` | HELP [doc], EXP | bound (was unbound before 2026-10-12) |
 | Shift+S | Search | Help/Search | `help.search` | HELP, QRC [doc] | bound |
 | Ctrl+N | New | File/New | `file.new` | EXP [inf] | bound |
@@ -75,9 +75,9 @@ unbound**, **command missing**.
 | (none) | Purge Unused | Edit/Purge Unused | `edit.purge_unused` | RN [doc] | command exists unbound (same as SketchUp) |
 | (none) | Environments panel | Window/Environments | `window.environments` | RN [doc] | command exists unbound (same as SketchUp) |
 
-Totals: 48 rows, 46 default keys: 45 bound in `keymap.toml` (36 before 2026-10-12,
-plus K, Ctrl+Q, Ctrl+,, Shift+F1 and the 5 second keys, which needed several keys per
-command, FEATURES 75); 1 key of a missing command (Image Igloo). The last two rows are
+Totals: 48 rows, 46 default keys, all bound in `keymap.toml` (36 before 2026-10-12,
+plus K, Ctrl+Q, Ctrl+,, Shift+F1, the 5 second keys, which needed several keys per
+command, FEATURES 75, and I for Image Igloo, FEATURES 73). The last two rows are
 commands with no default key.
 
 ## Mouse (QRC [doc])
@@ -106,7 +106,7 @@ unverified against the real app), "differs" means another key does it.
 | Follow Me | Alt | face perimeter as path | present since 2026-10-12: Alt-click the profile, then click the face (SketchUp drags; FEATURES 76) |
 | Flip | Ctrl | toggle flip / copy | present |
 | Lasso | Shift / Alt / Shift+Alt | add-subtract / add / subtract | present since 2026-10-12 (Select's Ctrl / Ctrl+Shift also work; FEATURES 76) |
-| Line | Alt | lock current inference direction | differs: Alt cycles inference modes per the 2026 drawing-basics help page; the two official pages disagree (check in the trial) |
+| Line | Alt | lock current inference direction | differs: Alt (Command on the Mac) cycles inference modes per the drawing-basics help page, last updated 2026-09-29 and newer than this card (PDF dated 2025-09-10; the Mac card lists Shift there); unverified, check in the trial |
 | Line | number Enter | length | present |
 | Look Around | number Enter | eye height | present |
 | Move | Ctrl / Shift / Alt | copy / lock direction / auto-fold | present |

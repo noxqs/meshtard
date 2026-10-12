@@ -186,6 +186,7 @@ items = [
   { separator = true },
   { id = "camera.match_new_photo", label = "Match New Photo..." },
   { id = "camera.edit_matched_photo", label = "Edit Matched Photo" },
+  { id = "camera.image_igloo", label = "Image Igloo" },
   { separator = true },
   { id = "camera.orbit", label = "Orbit" },
   { id = "camera.pan", label = "Pan" },

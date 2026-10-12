@@ -17,6 +17,8 @@ Marks: **[doc]** stated by Trimble (help.sketchup.com, Quick Reference Card, rel
 | S7 | Quick Reference Card 2026, SketchUp, Mac / Windows (PDF) | https://download.sketchup.com/QRC2026/HC-QRC2026-en-SU-mac.pdf, https://download.sketchup.com/QRC2026/HC-QRC2026-en-SU-windows.pdf (listed on https://help.sketchup.com/en/quick-reference-cards) |
 | S8 | Help: MacOS - Spacebar Opens Model Info (Aug 21, 2026) | https://help.sketchup.com/en/troubleshooting/space-bar-opens-model-info-dialog-box |
 | S9 | Release notes SketchUp Desktop 2026.0 | https://help.sketchup.com/en/release-notes/sketchup-desktop-20260 |
+| S10 | Help: Introducing Drawing Basics and Concepts (Last updated Sep 29, 2026): "press the COMMAND key on the Mac or ALT key on Windows" to cycle the Line tool's inferences; "Shift+Alt (Windows) or Shift + Command (MacOS)" face-plane lock; Alt / Command frees the Rotate and Protractor center | https://help.sketchup.com/en/sketchup/introducing-drawing-basics-and-concepts |
+| F8 | Forum: No "close" option listed in "File" drop down (2021): on Windows "One instance per file >> no close, just exit"; the Mac version opens many files at once and a window closes with its red button or Command-W | https://forums.sketchup.com/t/no-close-option-listed-in-file-drop-down/157352 |
 | F1 | Forum: Switched from Windows 10 to macOS (2021) | https://forums.sketchup.com/t/switched-from-windows-10-to-macos/170097 |
 | F2 | Forum: Default Keystrokes/Shortcuts List? (2021) | https://forums.sketchup.com/t/default-keystrokes-shortcuts-list/152384 |
 | F3 | Forum: Unselect all | https://forums.sketchup.com/t/unselect-all/194758 |
@@ -45,7 +47,7 @@ Marks: **[doc]** stated by Trimble (help.sketchup.com, Quick Reference Card, rel
 
 ## Shortcuts
 
-Single-key tool shortcuts are identical on both systems: the 2026 Mac and Windows Quick Reference Cards list the same keys (Space, B, E, L, R, C, A, M, P, Q, S, F, T, O, H, Z, Shift+S) [doc, S7]. S6 lists one set for both systems, adding Shift+Space (Lasso), Shift+Z (Zoom Extents), G (Make Component), K (Back Edges). Modifier keys inside tools are Option/Command on Mac where Windows has Ctrl/Alt (S7, Mac card: e.g. Move Option = copy, Command = auto-fold); meshtard's tools still read Ctrl/Alt (not changed here).
+Single-key tool shortcuts are identical on both systems: the 2026 Mac and Windows Quick Reference Cards list the same keys (Space, B, E, L, R, C, A, M, P, Q, S, F, T, O, H, Z, Shift+S) [doc, S7]. S6 lists one set for both systems, adding Shift+Space (Lasso), Shift+Z (Zoom Extents), G (Make Component), K (Back Edges). Modifier keys inside tools: next section.
 
 On Mac there are two kinds of shortcuts: menu key equivalents with Command, built into the app and not editable, and the Preferences > Shortcuts set (column "Key" on Mac, "Assigned" on Windows) [doc S5 for the column names; inf F2 for the two kinds]. Users cannot assign Command chords on Mac [inf, F2].
 
@@ -64,7 +66,38 @@ On Mac there are two kinds of shortcuts: menu key equivalents with Command, buil
 | Invert Selection | Ctrl+Shift+I | Cmd+Shift+I (Ctrl read as Cmd) | [inf] | community posts only |
 | Everything else with Ctrl | Ctrl+... | Cmd+... (same key) | [inf] | |
 
-Not covered: Hide Dialogs shortcut (one forum post says Shift+A shows/hides all palettes, unconfirmed); File > Close (Cmd+W) and other standard Mac menu items SketchUp has (Close, Minimize per document window); localized labels.
+| Close (File menu, Mac only) | none (no such item: one model per app instance) | Cmd+W | [inf] | F8; macOS convention. `menus_mac.toml` `[[insert]]` puts File > Close after Open |
+
+Not covered: Hide Dialogs shortcut (one forum post says Shift+A shows/hides all palettes, unconfirmed); Open Recent and the per-window Minimize; localized labels.
+
+## Modifier keys inside tools
+
+The two 2026 Quick Reference Cards (S7, both PDFs dated 2025-09-10) side by side, with S10 for the Line tool and the Rotate / Protractor center. The rule is Ctrl -> Option and Alt -> Command, except in the tools marked "Option", where Windows Alt is Option on the Mac. meshtard: `crates/mt-app/src/tool_mods.rs` (roles Copy = Ctrl / Option, Alternate = Alt / Command, AltOption = Alt / Option; `Platform::Pc` for Windows and Linux, `Platform::Mac`); tests run on every system with the platform passed in. Not checked in SketchUp for Mac.
+
+| Tool | Windows (S7) | Mac (S7) | Role in meshtard |
+|---|---|---|---|
+| 3 Point Arc segments | Alt + / - | Option + / - | AltOption (Ctrl / Copy + / - kept, Meshtard's earlier key) |
+| Eraser soften / hide / unsoften | Ctrl / Shift / Alt | Option / Shift / Option+Shift | Copy / Shift / Alternate (Ctrl+Shift = Option+Shift also unsoftens; Command unsoftens too [inf]) |
+| Follow Me face perimeter | Alt | Command | Alternate |
+| Flip copy | Ctrl | Option | Copy |
+| Lasso add / subtract | Alt / Shift+Alt | Option / Shift+Option | AltOption |
+| Line inference cycle | Alt (S7 says "lock in current inference direction"; S10 says cycle) | Shift (S7, lock) / Command (S10, cycle) | Alternate: meshtard follows S10, the newer page (see STATUS.md) |
+| Move copy / auto-fold | Ctrl / Alt | Option / Command | Copy / Alternate |
+| Offset overlap | Alt | Command | Alternate |
+| Orbit without gravity | Alt | Option | AltOption |
+| Paint Bucket fill / replace on object / sample | Ctrl / Ctrl+Shift / Alt | Option / Option+Shift / Command | Copy / Copy+Shift / Alternate |
+| Protractor guide toggle | Ctrl | Option | Copy |
+| Push/Pull copy of the face | Ctrl | Option | Copy |
+| Rectangle from the center | Alt | Option | AltOption |
+| Rotated Rectangle plane lock | Alt | Command | Alternate |
+| Rotate copy | Ctrl | Option | Copy |
+| Scale about the center | Ctrl | Option | Copy |
+| Select add / subtract | Ctrl / Ctrl+Shift | Option / Option+Shift | Copy |
+| Tape Measure guide toggle | Ctrl | Option | Copy |
+| Shift+Alt face-plane lock; Rotate / Protractor free center | Shift+Alt; Alt (S10) | Shift+Command; Command (S10) | Alternate |
+| Tag tool all instances / sample, Walk run, Move grip cycling | Ctrl / Alt, Ctrl, Alt | not listed | Copy / Alternate, Copy, Alternate [inf] |
+
+The Mac's Control key does nothing in tools in meshtard (Control-click is the right click on macOS) [inf]. Status-bar hints, written with Ctrl and Alt, are shown with the Mac names; the Instructor texts are not yet.
 
 ## How it is built
 

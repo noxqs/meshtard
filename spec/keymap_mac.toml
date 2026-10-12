@@ -21,5 +21,6 @@ verified = false
 "edit.paste" = "Cmd+V"
 "window.preferences" = "Cmd+Comma"   # [inf] macOS convention for Settings
 "file.exit" = "Cmd+Q"                # [inf] macOS convention for Quit
+"file.close" = "Cmd+W"               # [inf] macOS convention; a Mac-only command
 "window.entity_info" = "Cmd+I"       # [inf] older Mac book (Missing Manual)
 "window.materials" = "Cmd+Shift+C"   # [inf] forum: Colors palette (Materials)

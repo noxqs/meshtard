@@ -69,8 +69,8 @@ impl App {
                 f64::from((p.y - rect.min.y) * ppp),
             )
         };
-        let mods = ui.input(|i| i.modifiers);
-        let mode = Mode::for_lasso(mods.command, mods.shift, mods.alt);
+        let mods = ui.input(|i| crate::tool_mods::mods(i.modifiers, crate::nav::Tool::Lasso));
+        let mode = Mode::for_lasso(mods.ctrl, mods.shift, mods.alt);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.lasso = Lasso::default();
             return;

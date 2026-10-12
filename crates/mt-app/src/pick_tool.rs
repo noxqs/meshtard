@@ -230,8 +230,10 @@ impl App {
             )
         });
         let clicked = response.clicked_by(egui::PointerButton::Primary);
-        let (alt, shift, ctrl) =
-            ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.modifiers.command));
+        let (alt, shift, ctrl) = ui.input(|i| {
+            let m = crate::tool_mods::mods(i.modifiers, self.tool);
+            (m.alt, m.shift, m.ctrl)
+        });
         let Some(doc) = self.document.as_mut() else {
             return;
         };

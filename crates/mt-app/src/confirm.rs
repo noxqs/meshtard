@@ -1,5 +1,5 @@
-//! "Save changes?" before New, Open, opening a dropped file and closing the window,
-//! when the model has unsaved changes. SketchUp for Windows asks "Save changes to
+//! "Save changes?" before New, Open, opening a dropped file, File > Close (Mac) and
+//! closing the window, when the model has unsaved changes. SketchUp for Windows asks "Save changes to
 //! "<name>"?" with Yes / No / Cancel (wording unverified).
 
 use std::path::PathBuf;
@@ -15,6 +15,10 @@ pub enum Pending {
     /// Open this file, or ask for one.
     Open(Option<PathBuf>),
     Exit,
+    /// File > Close (SketchUp for Mac only, Cmd+W): the model's window closes. Meshtard
+    /// has one window, so it gets a new untitled model and the Welcome window, as when
+    /// the Mac app has no model open (unverified).
+    Close,
     /// File > Revert: asks "Revert?" instead of "Save changes?" (wording unverified).
     Revert,
     /// File > New from Template: this template (`None`: the built-in one).
@@ -45,6 +49,10 @@ impl App {
             Pending::Exit => {
                 self.closing = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Pending::Close => {
+                self.new_document(ctx, frame);
+                self.open_welcome();
             }
             Pending::Revert => self.revert(ctx, frame),
             Pending::NewFrom(template) => self.new_from_template(ctx, frame, template),

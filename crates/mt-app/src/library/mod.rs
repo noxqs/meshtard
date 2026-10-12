@@ -734,6 +734,8 @@ fn fetch_and_read(
     if let Some(p) = &asset.local_path {
         return local::load_model(p);
     }
+    // Another running meshtard's eviction leaves the model alone until it is read.
+    let _in_use = cache.and_then(|c| cache::use_model(c, &asset.key()));
     if let Some(dir) = cache.map(|c| model_dir(c, asset))
         && let Some(main) = cache::cached_main(&dir)
         && let Ok(m) = local::load_model(&main)

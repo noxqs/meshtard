@@ -21,6 +21,19 @@ pub struct MacMenus {
     /// New labels by command id.
     #[serde(default)]
     pub relabel: BTreeMap<String, String>,
+    /// Commands only SketchUp for Mac has, each put after a Windows command.
+    #[serde(default)]
+    pub insert: Vec<MacInsert>,
+}
+
+/// A Mac-only command of `menus_mac.toml`'s `[[insert]]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacInsert {
+    /// The command it follows (in the menu that holds it).
+    pub after: String,
+    pub id: String,
+    pub label: String,
 }
 
 /// `keymap_mac.toml`: shortcuts replacing a command's Windows ones (all of them: a
@@ -100,6 +113,32 @@ impl Spec {
             }
         }
 
+        // Mac-only commands, after their Windows neighbours.
+        let mut known = known;
+        for ins in &mac.menus.insert {
+            if known.contains_key(&ins.id) {
+                return Err(menus_err(format!(
+                    "insert: `{}` is already a command",
+                    ins.id
+                )));
+            }
+            let item = MenuItem::Command {
+                id: ins.id.clone(),
+                label: ins.label.clone(),
+            };
+            let mut item = Some(item);
+            for menu in &mut spec.menus.menu {
+                insert_after(&mut menu.items, &ins.after, &mut item);
+            }
+            if item.is_some() {
+                return Err(menus_err(format!(
+                    "insert: `{}` is not a command in the menus",
+                    ins.after
+                )));
+            }
+            known.insert(ins.id.clone(), ins.label.clone());
+        }
+
         for menu in &mut spec.menus.menu {
             tidy_separators(&mut menu.items);
         }
@@ -130,7 +169,7 @@ impl Spec {
         spec.validate()?;
         if spec.commands().keys().ne(known.keys()) {
             return Err(menus_err(
-                "the Mac layout has other commands than menus.toml".into(),
+                "the Mac layout has other commands than menus.toml and its inserts".into(),
             ));
         }
         Ok(spec)
@@ -203,6 +242,24 @@ fn relabel(items: &mut [MenuItem], target: &str, new: &str) -> bool {
     found
 }
 
+/// Puts `item` after command `after` (searching submenus); takes it when placed.
+fn insert_after(items: &mut Vec<MenuItem>, after: &str, item: &mut Option<MenuItem>) {
+    let Some(pos) = items
+        .iter()
+        .position(|it| matches!(it, MenuItem::Command { id, .. } if id == after))
+    else {
+        for it in items.iter_mut() {
+            if let MenuItem::Submenu { items, .. } = it {
+                insert_after(items, after, item);
+            }
+        }
+        return;
+    };
+    if let Some(it) = item.take() {
+        items.insert(pos + 1, it);
+    }
+}
+
 /// Drops separators at the start or end of a list and doubled ones.
 fn tidy_separators(items: &mut Vec<MenuItem>) {
     let sep = |it: &MenuItem| matches!(it, MenuItem::Separator { .. });
@@ -272,8 +329,17 @@ mod tests {
         let (w, m) = (counts(&win), counts(&mac));
         assert!(w.values().all(|n| *n == 1), "Windows: {w:?}");
         assert!(m.values().all(|n| *n == 1), "Mac: {m:?}");
-        assert!(w.keys().eq(m.keys()));
-        assert_eq!(win.commands().len(), mac.commands().len());
+        // The Mac has the Windows commands and its own (File > Close).
+        let inserted: Vec<&str> = (win.mac.menus.insert.iter())
+            .map(|i| i.id.as_str())
+            .collect();
+        assert_eq!(inserted, ["file.close"]);
+        assert!(w.keys().all(|k| m.contains_key(k)));
+        assert!(
+            m.keys()
+                .all(|k| w.contains_key(k) || inserted.contains(&k.as_str()))
+        );
+        assert_eq!(win.commands().len() + 1, mac.commands().len());
     }
 
     #[test]
@@ -371,6 +437,19 @@ mod tests {
     }
 
     #[test]
+    fn mac_file_menu_has_close() {
+        let (win, mac) = both();
+        let file = ids_of(items_of(&mac, "File"));
+        let open = file.iter().position(|id| *id == "file.open").unwrap();
+        assert_eq!(file[open + 1], "file.close");
+        assert_eq!(mac.command_label("file.close").unwrap(), "Close");
+        assert_eq!(mac.keymap.bindings["file.close"], ["Ctrl+W"]);
+        // SketchUp for Windows has no File > Close (one model per window).
+        assert!(win.command_label("file.close").is_none());
+        assert!(!win.keymap.bindings.contains_key("file.close"));
+    }
+
+    #[test]
     fn mac_shortcuts_replace_windows_ones() {
         let (win, mac) = both();
         let key = |s: &Spec, id: &str| s.keymap.bindings.get(id).map(|k| k[0].clone());
@@ -428,6 +507,16 @@ mod tests {
         assert!(err.contains("bound to both"), "{err}");
         let err = bad(m, &k.replacen("\"edit.redo\"", "\"edit.nope\"", 1));
         assert!(err.contains("edit.nope"), "{err}");
+        let err = bad(
+            &m.replacen("after = \"file.open\"", "after = \"file.nope\"", 1),
+            k,
+        );
+        assert!(err.contains("file.nope"), "{err}");
+        let err = bad(
+            &m.replacen("id = \"file.close\"", "id = \"file.open\"", 1),
+            k,
+        );
+        assert!(err.contains("already a command"), "{err}");
     }
 
     #[test]

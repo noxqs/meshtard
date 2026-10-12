@@ -124,6 +124,8 @@ pub(crate) struct MatchPhoto {
     shown: Option<Shown>,
     /// The photo's texture, for the image bytes it was made from.
     texture: Option<(Arc<[u8]>, egui::TextureHandle)>,
+    /// Camera > Image Igloo, while shown (`image_igloo`).
+    pub(crate) igloo: Option<crate::image_igloo::Igloo>,
 }
 
 /// Grip size in points.
@@ -182,11 +184,26 @@ impl App {
                 true
             }
             "camera.edit_matched_photo" => {
+                self.image_igloo_leave();
                 self.edit_matched_photo();
+                true
+            }
+            "camera.image_igloo" => {
+                self.image_igloo_command();
                 true
             }
             _ => false,
         }
+    }
+
+    /// No photo is being matched.
+    pub(crate) fn match_photo_editing_none(&self) -> bool {
+        self.match_photo.edit.is_none()
+    }
+
+    /// Stops showing a scene's photo (the camera is about to leave its view).
+    pub(crate) fn match_photo_hide_shown(&mut self) {
+        self.match_photo.shown = None;
     }
 
     /// Whether Edit Matched Photo applies: a scene's photo is shown, or the selected
