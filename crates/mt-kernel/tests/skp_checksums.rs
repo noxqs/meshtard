@@ -4,6 +4,10 @@
 //! and of the bytes it saves to (deterministic GUIDs and clock), plus the same for a
 //! synthetic grid big enough to need the archive's long slot references.
 //!
+//! The saved bytes are compared on Linux only: writing arcs calls `sin` / `cos`,
+//! whose last bit differs between the platforms' math libraries, so the bytes can
+//! differ on macOS and Windows while the parsed and built models do not.
+//!
 //! The expected values are in `tests/data/skp_checksums.txt`. After a change that is
 //! meant to alter the output, regenerate them with `MESHTARD_BLESS=1 cargo test -p
 //! mt-kernel --test skp_checksums` and review the diff.
@@ -113,7 +117,12 @@ fn skp_read_and_write_are_unchanged() {
     }
     let expected = std::fs::read_to_string(&expected_path).unwrap();
     for (g, e) in got.lines().zip(expected.lines()) {
-        assert_eq!(g, e, "file, parsed, built, saved");
+        if cfg!(target_os = "linux") {
+            assert_eq!(g, e, "file, parsed, built, saved");
+        } else {
+            let first3 = |l: &str| l.rsplitn(2, ' ').nth(1).unwrap_or("").to_owned();
+            assert_eq!(first3(g), first3(e), "file, parsed, built");
+        }
     }
     assert_eq!(got.lines().count(), expected.lines().count());
 }
