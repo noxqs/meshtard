@@ -558,6 +558,8 @@ pub struct Viewport {
     /// 1x1 while shadows have never been on.
     shadow_map: ShadowMap,
     shadows: Option<Shadows>,
+    /// Faces drawn into the shadow map instead of `faces`, when set.
+    shadow_casters: Option<FaceBuffers>,
     section: Option<SectionCut>,
     face_style: FaceStyle,
     xray: bool,
@@ -871,6 +873,7 @@ impl Viewport {
             shadow_sampler,
             shadow_map,
             shadows: None,
+            shadow_casters: None,
             section: None,
             face_style: FaceStyle::Shaded,
             xray: false,
@@ -923,6 +926,18 @@ impl Viewport {
     /// Triangles with any alpha below 1 are drawn translucent, after everything else.
     pub fn set_faces(&mut self, device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) {
         self.faces = FaceBuffers::new(device, vertices, indices);
+    }
+
+    /// Faces that cast shadows in place of the drawn ones (components whose "Shadows
+    /// face sun" turns them toward the sun for their shadow). Empty slices clear: the
+    /// drawn faces cast.
+    pub fn set_shadow_casters(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[FaceVertex],
+        indices: &[u32],
+    ) {
+        self.shadow_casters = FaceBuffers::new(device, vertices, indices);
     }
 
     /// The textures [`FaceVertex::texture`] indexes, decoded (PNG, JPEG, BMP) and
@@ -1245,7 +1260,10 @@ impl Viewport {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
         let mut encoder = device.create_command_encoder(&Default::default());
-        if let (Some(_), Some(faces)) = (shadow_fit, &self.faces) {
+        if let (Some(_), Some(faces)) = (
+            shadow_fit,
+            self.shadow_casters.as_ref().or(self.faces.as_ref()),
+        ) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow map"),
                 color_attachments: &[],
