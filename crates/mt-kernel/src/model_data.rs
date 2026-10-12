@@ -344,6 +344,13 @@ impl Default for TextStyle {
 pub struct GeoLocation {
     pub located: bool,
     pub north_angle: f64,
+    /// Where the model origin lies in map coordinates (meters: eastings, northings,
+    /// height), from an imported IFC file's map conversion or from moving a site far
+    /// from the origin near it; zero when unknown (Meshtard addition, not saved in
+    /// .skp).
+    pub map_origin: glam::DVec3,
+    /// EPSG code of the map's coordinate reference system, 0 when unknown.
+    pub epsg: u32,
 }
 
 impl Model {

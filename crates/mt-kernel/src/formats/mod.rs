@@ -26,6 +26,7 @@ pub mod fbx;
 pub mod fbx_export;
 pub mod ifc;
 pub mod ifc_export;
+mod ifc_geom;
 pub mod kmz;
 pub mod obj;
 pub mod ply;

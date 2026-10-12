@@ -7,7 +7,8 @@
 //!   instance is named after the entity's Name (its IFC class when it has none), the
 //!   definition has the IFC class as its Entity Info "Type" and the GlobalId as its
 //!   description. Groups with nothing below them are left out; products in no
-//!   relationship go under the project. Spaces come in hidden.
+//!   relationship go under the project. Spaces come in hidden (only their own faces
+//!   and edges when objects are contained in them).
 //! - Placements: `IfcLocalPlacement` chains (`IfcAxis2Placement3D` / `2D`); group
 //!   transforms are the placements relative to the parent's. Grid and linear
 //!   placements count as skipped and place at the parent.
@@ -18,18 +19,43 @@
 //!   rectangle, circle, hollow circle, ellipse, I / L / T / U shapes, arbitrary closed
 //!   profiles with voids from polylines, indexed poly curves with arcs and composite
 //!   curves of polylines and trimmed circles, derived profiles), `IfcSweptDiskSolid`
-//!   (tube along a polyline, mitered), `IfcMappedItem` (a component per
-//!   `IfcRepresentationMap`, named after the type that owns it) and
-//!   `IfcBooleanResult` / `IfcBooleanClippingResult` (unions keep both operands;
-//!   differences are cut, see below; intersections keep the first operand). Curves are
-//!   24 segments per full circle.
+//!   / `IfcSweptDiskSolidPolygonal` (tube along the directrix, hollow with an inner
+//!   radius, mitered; closed directrices make a ring), `IfcRevolvedAreaSolid`,
+//!   `IfcSurfaceCurveSweptAreaSolid` / `IfcFixedReferenceSweptAreaSolid` (the profile
+//!   carried along the directrix, mitered, see [`ifc_geom::sweep_rings`]), the CSG
+//!   primitives `IfcBlock`, `IfcRightCircularCylinder`, `IfcRightCircularCone`,
+//!   `IfcSphere` (12 bands) and `IfcRectangularPyramid`, `IfcCsgSolid`,
+//!   `IfcAdvancedBrep` (with voids; planar faces from their edge loops, curved faces
+//!   on B-spline, cylindrical, conical, spherical and toroidal surfaces tessellated
+//!   inside their edge loops, [`ifc_geom::surface_triangles`]; edges are lines,
+//!   circles, ellipses, polylines or B-spline curves, shared by both faces),
+//!   `IfcMappedItem` (a component per `IfcRepresentationMap`, named after the type
+//!   that owns it) and `IfcBooleanResult` / `IfcBooleanClippingResult` (see below).
+//!   Curves are 24 segments per full circle.
 //! - Colors: `IfcStyledItem` surface styles (shading or rendering color and
 //!   transparency) on items, `IfcIndexedColourMap` per-face colors, and the color of
 //!   the product's (or its type's) material through `IfcRelAssociatesMaterial` and
 //!   `IfcMaterialDefinitionRepresentation`, which paints the group (faces without a
 //!   style of their own).
+//! - Textures: `IfcIndexedTriangleTextureMap` texture coordinates on triangulated
+//!   face sets, with the image of an `IfcBlobTexture` (PNG / JPEG), an
+//!   `IfcPixelTexture` (made a PNG) or an `IfcImageTexture` (read by its URL through
+//!   [`import_with`]'s callback); the material is the item's style with the image.
 //! - Units: the project's `IfcUnitAssignment` length unit (SI prefixes and conversion
 //!   based units such as feet), and its plane angle unit for trimmed circles.
+//! - Georeferencing: `IfcSite` RefLatitude / RefLongitude become the model's
+//!   location (Shadows latitude and longitude, geo-located), the `IfcMapConversion`
+//!   x axis (else the context's TrueNorth) its north angle, and the conversion's
+//!   eastings, northings and height (map units, with Scale; IfcOpenShell's reading
+//!   when no map unit is given) its map origin and EPSG code. A model farther than
+//!   1 km from the origin (its middle, per axis) is moved near it by whole meters,
+//!   [`IfcReport::moved`], the map origin following; an element whose points are far
+//!   from its own origin has them moved near it the same way first, so definitions
+//!   hold small coordinates.
+//! - Booleans, with the Solid Tools: `.UNION.` and `.INTERSECTION.` join their
+//!   operands ([`solid::union`], [`solid::intersect`]; counted in
+//!   [`IfcReport::joined`]) when both are closed solids, else a union keeps both
+//!   operands as they are and an intersection the first.
 //! - Cutting, with the Solid Tools' [`solid::subtract`]: the openings of an element
 //!   (`IfcRelVoidsElement` to an `IfcOpeningElement`, placed by its own placement) are
 //!   cut out of the element's body, and a boolean `.DIFFERENCE.` cuts its second
@@ -55,6 +81,7 @@ use std::io::Read;
 
 use glam::{DMat3, DMat4, DVec2, DVec3};
 
+use super::ifc_geom;
 use super::step::{self, Entity, File, Value};
 use crate::entities::{DefinitionId, Entities, Instance};
 use crate::mesh_import::{self, Mesh, MeshOptions, Polygon};
@@ -63,7 +90,11 @@ use crate::solid::{self, SolidInput};
 use crate::validate::{Checks, validate};
 
 /// Segments of a full circle.
-const CIRCLE_SEGMENTS: usize = 24;
+pub(crate) const CIRCLE_SEGMENTS: usize = 24;
+/// Bands of a sphere from pole to pole.
+const SPHERE_STACKS: usize = 12;
+/// Geometry farther than this from the origin (meters, per axis) is moved near it.
+const FAR: f64 = 1000.0;
 /// Segments around a swept disk tube.
 const TUBE_SEGMENTS: usize = 12;
 const MAX_DEPTH: usize = 32;
@@ -100,6 +131,12 @@ pub struct IfcReport {
     pub skipped: BTreeMap<String, usize>,
     /// Openings and boolean difference operands cut out, by IFC class.
     pub cut: BTreeMap<String, usize>,
+    /// Boolean union and intersection operands joined with the Solid Tools, by IFC
+    /// class.
+    pub joined: BTreeMap<String, usize>,
+    /// How far the model was moved toward the origin (meters, file axes): the site
+    /// was farther than 1 km away. The model's geo-location keeps the offset.
+    pub moved: DVec3,
 }
 
 impl IfcReport {
@@ -112,6 +149,9 @@ impl IfcReport {
         let cut: usize = self.cut.values().sum();
         if cut > 0 {
             s += &format!("; {cut} openings and booleans cut");
+        }
+        if self.moved != DVec3::ZERO {
+            s += &format!("; moved {:.0} m to the origin", self.moved.length());
         }
         if !self.skipped.is_empty() {
             let mut list: Vec<(&String, &usize)> = self.skipped.iter().collect();
@@ -153,7 +193,18 @@ fn unzip(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
 }
 
 /// Reads an IFC (or IFCZIP) file into a model: the project's groups at its root.
+/// Texture images the file names by URL are not read (see [`import_with`]).
 pub fn import(bytes: &[u8], opts: &IfcOptions) -> Result<(Model, IfcReport), String> {
+    import_with(bytes, opts, &|_| None)
+}
+
+/// [`import`], reading the texture images the file names (`IfcImageTexture` URLs)
+/// through `read`.
+pub fn import_with(
+    bytes: &[u8],
+    opts: &IfcOptions,
+    read: super::ReadFile,
+) -> Result<(Model, IfcReport), String> {
     let data = unzip(bytes)?;
     let file = step::parse(&data)?;
     if !file.schema.iter().any(|s| s.starts_with("IFC")) && !file.schema.is_empty() {
@@ -162,7 +213,7 @@ pub fn import(bytes: &[u8], opts: &IfcOptions) -> Result<(Model, IfcReport), Str
             file.schema.join(", ")
         ));
     }
-    Ok(Reader::new(&file, opts).run())
+    Ok(Reader::new(&file, opts, read).run())
 }
 
 /// `IFCWALLSTANDARDCASE` as `IfcWallStandardCase` (known words; the rest
@@ -186,6 +237,8 @@ pub fn class_name(upper: &str) -> String {
         "BASED",
         "BEAM",
         "BEARING",
+        "BEZIER",
+        "BLOB",
         "BLOCK",
         "BOILER",
         "BOOLEAN",
@@ -216,6 +269,7 @@ pub fn class_name(upper: &str) -> String {
         "COMPRESSOR",
         "CONDENSER",
         "CONE",
+        "CONICAL",
         "CONTROL",
         "CONTROLLER",
         "CONVERSION",
@@ -223,9 +277,12 @@ pub fn class_name(upper: &str) -> String {
         "COOLING",
         "COURSE",
         "COVERING",
+        "CRS",
+        "CSG",
         "CURTAIN",
         "CURVE",
         "CYLINDER",
+        "CYLINDRICAL",
         "DAMPER",
         "DEEP",
         "DEF",
@@ -237,6 +294,7 @@ pub fn class_name(upper: &str) -> String {
         "DOOR",
         "DUCT",
         "EARTHWORKS",
+        "EDGE",
         "ELECTRIC",
         "ELEMENT",
         "ELEMENTED",
@@ -248,6 +306,7 @@ pub fn class_name(upper: &str) -> String {
         "EXCHANGER",
         "EXTERNAL",
         "EXTRUDED",
+        "EXTRUSION",
         "FACE",
         "FACETED",
         "FACILITY",
@@ -275,6 +334,7 @@ pub fn class_name(upper: &str) -> String {
         "HEATER",
         "HOLLOW",
         "HUMIDIFIER",
+        "IMAGE",
         "IMPACT",
         "INDEXED",
         "INTERCEPTOR",
@@ -301,14 +361,18 @@ pub fn class_name(upper: &str) -> String {
         "MOTOR",
         "MOVING",
         "NETWORK",
+        "OF",
+        "OFFSET",
         "OPEN",
         "OPENING",
+        "ORIENTED",
         "OUTLET",
         "PARAMETER",
         "PART",
         "PAVEMENT",
         "PILE",
         "PIPE",
+        "PIXEL",
         "PLACEMENT",
         "PLANE",
         "PLATE",
@@ -317,8 +381,10 @@ pub fn class_name(upper: &str) -> String {
         "POLYLINE",
         "POLYLOOP",
         "PORT",
+        "PRIMITIVE",
         "PROFILE",
         "PROJECT",
+        "PROJECTED",
         "PROTECTIVE",
         "PROXY",
         "PUMP",
@@ -329,9 +395,11 @@ pub fn class_name(upper: &str) -> String {
         "RAMP",
         "RATIONAL",
         "RECTANGLE",
+        "RECTANGULAR",
         "REFERENCE",
         "REINFORCING",
         "RESULT",
+        "REVOLUTION",
         "REVOLVED",
         "RIGHT",
         "ROAD",
@@ -355,6 +423,7 @@ pub fn class_name(upper: &str) -> String {
         "SPACE",
         "SPATIAL",
         "SPHERE",
+        "SPHERICAL",
         "SPINE",
         "STACK",
         "STAIR",
@@ -371,11 +440,14 @@ pub fn class_name(upper: &str) -> String {
         "TENDON",
         "TERMINAL",
         "TESSELLATED",
+        "TEXTURE",
+        "TOROIDAL",
         "TOWER",
         "TRACK",
         "TRANSFORMER",
         "TRANSPORT",
         "TREATMENT",
+        "TRIANGLE",
         "TRIANGULATED",
         "TRIMMED",
         "TUBE",
@@ -385,6 +457,7 @@ pub fn class_name(upper: &str) -> String {
         "VALUE",
         "VALVE",
         "VEHICLE",
+        "VERTEX",
         "VIRTUAL",
         "VISUAL",
         "VOIDS",
@@ -506,7 +579,7 @@ impl Geo {
     }
 
     /// A box, faces outward: `m` maps the unit-free box `lo..hi` into place.
-    fn cuboid(&mut self, m: DMat4, lo: DVec3, hi: DVec3) {
+    fn cuboid(&mut self, m: DMat4, lo: DVec3, hi: DVec3, material: Option<usize>) {
         let c = |i: usize| {
             m.transform_point3(DVec3::new(
                 if i & 1 == 0 { lo.x } else { hi.x },
@@ -527,26 +600,96 @@ impl Geo {
             if flip {
                 pts.reverse();
             }
-            self.polygon(&pts, None);
+            self.polygon(&pts, material);
         }
     }
 
     /// The prism of the counter-clockwise loop `l` from `z0` to `z1` (`z0 < z1`),
     /// faces outward, placed by `m`.
-    fn prism(&mut self, m: DMat4, l: &[DVec2], z0: f64, z1: f64) {
+    fn prism(&mut self, m: DMat4, l: &[DVec2], z0: f64, z1: f64, material: Option<usize>) {
         let flip = m.determinant() < 0.0;
         let put = |p: DVec2, z: f64| m.transform_point3(p.extend(z));
         let add = |mut pts: Vec<DVec3>, geo: &mut Geo| {
             if flip {
                 pts.reverse();
             }
-            geo.face(&pts, &[], None);
+            geo.face(&pts, &[], material);
         };
         add(l.iter().rev().map(|&p| put(p, z0)).collect(), self);
         add(l.iter().map(|&p| put(p, z1)).collect(), self);
         for k in 0..l.len() {
             let (a, b) = (l[k], l[(k + 1) % l.len()]);
             add(vec![put(a, z0), put(b, z0), put(b, z1), put(a, z1)], self);
+        }
+    }
+
+    /// A quad, split into two triangles unless it is flat.
+    fn quad(&mut self, q: [DVec3; 4], material: Option<usize>) {
+        let n = (q[1] - q[0]).cross(q[2] - q[0]);
+        let size = (q[2] - q[0]).length().max((q[3] - q[1]).length());
+        let off = match n.try_normalize() {
+            Some(n) => (q[3] - q[0]).dot(n).abs(),
+            None => 0.0,
+        };
+        if off <= 1e-9 * size.max(1e-300) {
+            self.face(&q, &[], material);
+        } else {
+            self.face(&[q[0], q[1], q[2]], &[], material);
+            self.face(&[q[0], q[2], q[3]], &[], material);
+        }
+    }
+
+    /// The solid swept through `rings` (`rings[s][l]`: loop `l` at station `s`,
+    /// loop 0 the outline, the others holes, the same number of points at every
+    /// station): sides between stations and, unless `closed` (the last station is
+    /// the first), caps at both ends. Faces turn outward when the outline runs
+    /// counter-clockwise seen from where the sweep goes.
+    fn sweep(&mut self, rings: &[Vec<Vec<DVec3>>], closed: bool, material: Option<usize>) {
+        if rings.len() < 2 || rings[0].is_empty() {
+            return;
+        }
+        let centroid = |l: &[DVec3]| l.iter().copied().sum::<DVec3>() / l.len().max(1) as f64;
+        // Which way the outline turns relative to the motion.
+        let mut flip = false;
+        for s in 1..rings.len() {
+            let motion = centroid(&rings[s][0]) - centroid(&rings[s - 1][0]);
+            let along = newell(&rings[s - 1][0]).dot(motion);
+            if along.abs() > 1e-12 * motion.length() {
+                flip = along < 0.0;
+                break;
+            }
+        }
+        let rev = |mut v: Vec<DVec3>| {
+            v.reverse();
+            v
+        };
+        for w in rings.windows(2) {
+            for (a, b) in w[0].iter().zip(&w[1]) {
+                let n = a.len().min(b.len());
+                for k in 0..n {
+                    let k1 = (k + 1) % n;
+                    let q = [a[k], a[k1], b[k1], b[k]];
+                    self.quad(if flip { [q[3], q[2], q[1], q[0]] } else { q }, material);
+                }
+            }
+        }
+        if !closed {
+            let (first, last) = (&rings[0], &rings[rings.len() - 1]);
+            let cap = |loops: &Vec<Vec<DVec3>>, reverse: bool| -> (Vec<DVec3>, Vec<Vec<DVec3>>) {
+                let f = |l: &Vec<DVec3>| if reverse { rev(l.clone()) } else { l.clone() };
+                (f(&loops[0]), loops[1..].iter().map(f).collect())
+            };
+            let (o, h) = cap(first, !flip);
+            self.face(&o, &h, material);
+            let (o, h) = cap(last, flip);
+            self.face(&o, &h, material);
+        }
+    }
+
+    fn polygon_uv(&mut self, points: &[DVec3], material: Option<usize>, uvs: Vec<DVec2>) {
+        self.polygon(points, material);
+        if let Some(p) = self.mesh.polygons.last_mut() {
+            p.uvs = uvs;
         }
     }
 
@@ -678,6 +821,13 @@ fn second_proj_axis(z: DVec3, x: DVec3, arg: Option<DVec3>) -> DVec3 {
         .unwrap_or_else(|| z.cross(x))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Difference,
+    Union,
+    Intersection,
+}
+
 struct Reader<'a> {
     f: &'a File,
     opts: MeshOptions,
@@ -703,10 +853,18 @@ struct Reader<'a> {
     /// Element -> its openings (`IfcRelVoidsElement`), in number order.
     voids: BTreeMap<u64, BTreeSet<u64>>,
     groups: usize,
+    /// Reads texture images named by URL.
+    read: super::ReadFile<'a>,
+    /// `IfcEdgeCurve` -> its points from start to end vertex (item coordinates).
+    edges: HashMap<u64, Vec<DVec3>>,
+    /// Tessellated face set -> its `IfcIndexedTriangleTextureMap`.
+    texture_maps: HashMap<u64, u64>,
+    /// (style material, surface texture) -> textured material.
+    textured: HashMap<(Option<usize>, u64), Option<usize>>,
 }
 
 impl<'a> Reader<'a> {
-    fn new(f: &'a File, opts: &IfcOptions) -> Self {
+    fn new(f: &'a File, opts: &IfcOptions, read: super::ReadFile<'a>) -> Self {
         let mut r = Reader {
             f,
             opts: MeshOptions {
@@ -732,6 +890,10 @@ impl<'a> Reader<'a> {
             placements: HashMap::new(),
             voids: BTreeMap::new(),
             groups: 0,
+            read,
+            edges: HashMap::new(),
+            texture_maps: HashMap::new(),
+            textured: HashMap::new(),
         };
         r.units();
         r.index();
@@ -825,6 +987,11 @@ impl<'a> Reader<'a> {
                 "IFCINDEXEDCOLOURMAP" => {
                     if let Some(set) = e.arg(0).as_ref_id() {
                         self.colour_maps.insert(set, id);
+                    }
+                }
+                "IFCINDEXEDTRIANGLETEXTUREMAP" => {
+                    if let Some(set) = e.arg(1).as_ref_id() {
+                        self.texture_maps.entry(set).or_insert(id);
                     }
                 }
                 "IFCMATERIALDEFINITIONREPRESENTATION" => {
@@ -1188,6 +1355,29 @@ impl<'a> Reader<'a> {
                 out
             }
             "IFCTRIMMEDCURVE" => self.trimmed(e, depth)?,
+            "IFCBSPLINECURVEWITHKNOTS" | "IFCRATIONALBSPLINECURVEWITHKNOTS" => {
+                let points: Vec<DVec3> = e
+                    .arg(1)
+                    .list()
+                    .iter()
+                    .filter_map(|p| self.point(p))
+                    .collect();
+                let mults: Vec<i64> = e.arg(5).list().iter().filter_map(Value::as_i64).collect();
+                let degree = e.arg(0).as_i64().and_then(|d| usize::try_from(d).ok())?;
+                let knots =
+                    ifc_geom::Knots::new(degree, &mults, &e.arg(6).numbers(), points.len())?;
+                let weights = if e.class.starts_with("IFCRATIONAL") {
+                    e.arg(8).numbers()
+                } else {
+                    Vec::new()
+                };
+                ifc_geom::BSplineCurve {
+                    knots,
+                    points,
+                    weights,
+                }
+                .sample()
+            }
             "IFCCIRCLE" | "IFCELLIPSE" => {
                 let m = self.axis2(e.arg(0));
                 let rx = e.arg(1).as_f64()?;
@@ -1514,27 +1704,35 @@ impl<'a> Reader<'a> {
                 self.extrusion(e, xf, style, geo)
             }
             "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => self.tube(e, xf, style, geo),
-            "IFCMAPPEDITEM" => self.mapped(e, xf, style, geo, depth),
-            "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT"
-                if e.arg(0).as_enum() == Some("DIFFERENCE") =>
-            {
-                self.difference(e, xf, style, geo, depth);
+            "IFCREVOLVEDAREASOLID" | "IFCREVOLVEDAREASOLIDTAPERED" => {
+                self.revolved(e, xf, style, geo)
+            }
+            "IFCSURFACECURVESWEPTAREASOLID" | "IFCFIXEDREFERENCESWEPTAREASOLID" => {
+                self.swept_along(e, xf, style, geo)
+            }
+            "IFCBLOCK"
+            | "IFCRIGHTCIRCULARCYLINDER"
+            | "IFCRIGHTCIRCULARCONE"
+            | "IFCSPHERE"
+            | "IFCRECTANGULARPYRAMID" => self.primitive(e, xf, style, geo),
+            "IFCCSGSOLID" => match e.arg(0).as_ref_id() {
+                Some(root) => {
+                    self.item(root, xf, style, geo, depth + 1);
+                    true
+                }
+                None => false,
+            },
+            "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => {
+                let mut shells = e.arg(0).refs();
+                shells.extend(e.arg(1).refs());
+                for s in shells {
+                    self.shell(s, xf, style, geo);
+                }
                 true
             }
+            "IFCMAPPEDITEM" => self.mapped(e, xf, style, geo, depth),
             "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => {
-                let union = e.arg(0).as_enum() == Some("UNION");
-                let mut ops = vec![e.arg(1)];
-                if union {
-                    ops.push(e.arg(2));
-                } else if let Some((_, second)) = self.get(e.arg(2)) {
-                    let c = second.class.clone();
-                    self.skip(&c);
-                }
-                for op in ops {
-                    if let Some(o) = op.as_ref_id() {
-                        self.item(o, xf, style, geo, depth + 1);
-                    }
-                }
+                self.boolean(e, xf, style, geo, depth);
                 true
             }
             _ => false,
@@ -1617,6 +1815,7 @@ impl<'a> Reader<'a> {
             pm,
             DVec3::new(c.x - r, c.y - r, z0),
             DVec3::new(c.x + r, c.y + r, z1),
+            None,
         );
         let half = self.solid_ents(&boxed)?;
         if class != "IFCPOLYGONALBOUNDEDHALFSPACE" {
@@ -1626,7 +1825,7 @@ impl<'a> Reader<'a> {
         let outline = orient(vec![self.closed_loop(e.arg(3))?]).pop()?;
         let (c, r) = reach(m);
         let mut prism = Geo::default();
-        prism.prism(m, &outline, c.z - r, c.z + r);
+        prism.prism(m, &outline, c.z - r, c.z + r, None);
         let prism = self.solid_ents(&prism)?;
         let out = solid::intersect(
             SolidInput::new(&half, DMat4::IDENTITY),
@@ -1636,9 +1835,11 @@ impl<'a> Reader<'a> {
         solid::is_solid(&out).then_some(out)
     }
 
-    /// A boolean `.DIFFERENCE.`: the second operand cut out of the first when both
-    /// are solids, else the first operand alone (the second counted as skipped).
-    fn difference(
+    /// A boolean result with the Solid Tools when both operands are closed solids:
+    /// `.DIFFERENCE.` cuts the second operand out of the first, `.UNION.` and
+    /// `.INTERSECTION.` join them. Otherwise a union keeps both operands as they are,
+    /// a difference or intersection the first one (the second counted as skipped).
+    fn boolean(
         &mut self,
         e: &Entity,
         xf: DMat4,
@@ -1646,6 +1847,11 @@ impl<'a> Reader<'a> {
         geo: &mut Geo,
         depth: usize,
     ) {
+        let op = match e.arg(0).as_enum() {
+            Some("UNION") => Op::Union,
+            Some("INTERSECTION") => Op::Intersection,
+            _ => Op::Difference,
+        };
         let mut first = Geo::default();
         if let Some(o) = e.arg(1).as_ref_id() {
             self.item(o, xf, style, &mut first, depth + 1);
@@ -1657,28 +1863,58 @@ impl<'a> Reader<'a> {
         let class = second.class.clone();
         let items = self.report.items.clone();
         let body = self.solid_ents(&first);
+        // Cut faces take the element's paint; joined ones keep their style.
+        let second_style = if op == Op::Difference { None } else { style };
         let cutter = match (&body, first.bounds()) {
             (Some(_), Some((lo, hi))) => self.half_space(second, xf, lo, hi).or_else(|| {
                 let mut g = Geo::default();
-                self.item(second_id, xf, None, &mut g, depth + 1);
+                self.item(second_id, xf, second_style, &mut g, depth + 1);
                 self.solid_ents(&g)
             }),
             _ => None,
         };
-        match body.zip(cutter).and_then(|(b, c)| Self::subtract(&b, &c)) {
+        let result = body.zip(cutter).and_then(|(b, c)| match op {
+            Op::Difference => Self::subtract(&b, &c),
+            Op::Union | Op::Intersection => Self::join(&b, &c, op == Op::Union),
+        });
+        match result {
             Some(out) => {
                 if class.contains("HALFSPACE") {
                     self.read(&class);
                 }
-                *self.report.cut.entry(class_name(&class)).or_default() += 1;
+                let counts = if op == Op::Difference {
+                    &mut self.report.cut
+                } else {
+                    &mut self.report.joined
+                };
+                *counts.entry(class_name(&class)).or_default() += 1;
                 self.add_ents(geo, &out);
             }
             None => {
                 self.report.items = items;
-                self.skip(&class);
                 geo.append(first);
+                if op == Op::Union {
+                    self.item(second_id, xf, style, geo, depth + 1);
+                } else {
+                    self.skip(&class);
+                }
             }
         }
+    }
+
+    /// The union (or intersection) of two solids, when it comes out sound.
+    fn join(a: &Entities, b: &Entities, union: bool) -> Option<Entities> {
+        let f = if union {
+            solid::union
+        } else {
+            solid::intersect
+        };
+        let out = f(
+            SolidInput::new(a, DMat4::IDENTITY),
+            SolidInput::new(b, DMat4::IDENTITY),
+        )
+        .ok()?;
+        validate(&out, Checks::TOPOLOGY).is_empty().then_some(out)
     }
 
     /// Cuts the openings of an element out of its body `ents` (model units, in the
@@ -1718,7 +1954,9 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// The faces of a shell or connected face set.
+    /// The faces of a shell or connected face set: faces bounded by poly loops or
+    /// edge loops; `IfcAdvancedFace` / `IfcFaceSurface` on curved surfaces are
+    /// tessellated (see [`ifc_geom::surface_triangles`]).
     fn shell(&mut self, id: u64, xf: DMat4, style: Option<usize>, geo: &mut Geo) {
         let Some(e) = self.f.get(id) else { return };
         let style = self.item_style.get(&id).copied().or(style);
@@ -1732,18 +1970,21 @@ impl<'a> Reader<'a> {
                 let Some((_, lp)) = self.get(be.arg(0)) else {
                     continue;
                 };
-                if lp.class != "IFCPOLYLOOP" {
-                    let c = lp.class.clone();
-                    self.skip(&c);
-                    continue;
-                }
-                let mut pts: Vec<DVec3> = lp
-                    .arg(0)
-                    .list()
-                    .iter()
-                    .filter_map(|p| self.point(p))
-                    .map(|p| xf.transform_point3(p))
-                    .collect();
+                let pts: Vec<DVec3> = match lp.class.as_str() {
+                    "IFCPOLYLOOP" => lp
+                        .arg(0)
+                        .list()
+                        .iter()
+                        .filter_map(|p| self.point(p))
+                        .collect(),
+                    "IFCEDGELOOP" => self.edge_loop(lp),
+                    other => {
+                        let c = other.to_owned();
+                        self.skip(&c);
+                        continue;
+                    }
+                };
+                let mut pts: Vec<DVec3> = pts.into_iter().map(|p| xf.transform_point3(p)).collect();
                 if be.arg(1).as_enum() == Some("F") {
                     pts.reverse();
                 }
@@ -1767,7 +2008,233 @@ impl<'a> Reader<'a> {
                     bounds.remove(k)
                 }
             };
+            let mut outer = outer;
+            if matches!(fe.class.as_str(), "IFCADVANCEDFACE" | "IFCFACESURFACE") {
+                // The face's normal is the surface's, reversed when not same sense
+                // (and by a mirroring placement).
+                let sense = (fe.arg(2).as_enum() != Some("F")) != (xf.determinant() < 0.0);
+                match self.surface(fe.arg(1), xf) {
+                    Some(Ok(surface)) => {
+                        let mut loops = vec![dedup(&outer)];
+                        loops.extend(bounds.iter().map(|b| dedup(b)));
+                        if let Some(tris) = ifc_geom::surface_triangles(&surface, &loops, sense) {
+                            for t in tris {
+                                geo.polygon(&t, fstyle);
+                            }
+                            continue;
+                        }
+                    }
+                    Some(Err(class)) => self.skip(&class),
+                    None => {
+                        // A plane: loops turned to face along its normal.
+                        if let Some((_, plane)) = self.get(fe.arg(1)) {
+                            let m = xf * self.axis2(plane.arg(0));
+                            let n = m.x_axis.truncate().cross(m.y_axis.truncate());
+                            let n = if sense { n } else { -n };
+                            if newell(&outer).dot(n) < 0.0 {
+                                outer.reverse();
+                                for b in &mut bounds {
+                                    b.reverse();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             geo.face(&outer, &bounds, fstyle);
+        }
+    }
+
+    /// The curved surface of a face (`Ok`), or the class of one not read (`Err`);
+    /// `None` for a plane.
+    fn surface(&mut self, v: &Value, xf: DMat4) -> Option<Result<ifc_geom::Surface, String>> {
+        use ifc_geom::Surface;
+        let (_, e) = self.get(v)?;
+        let num = |i: usize| e.arg(i).as_f64().unwrap_or(0.0);
+        let class = e.class.as_str();
+        let s = match class {
+            "IFCPLANE" => return None,
+            "IFCCYLINDRICALSURFACE" => Surface::Cylinder {
+                m: xf * self.axis2(e.arg(0)),
+                r: num(1),
+            },
+            "IFCCONICALSURFACE" => Surface::Cone {
+                m: xf * self.axis2(e.arg(0)),
+                r: num(1),
+                tan: (num(2) * self.angle).tan(),
+            },
+            "IFCSPHERICALSURFACE" => Surface::Sphere {
+                m: xf * self.axis2(e.arg(0)),
+                r: num(1),
+            },
+            "IFCTOROIDALSURFACE" => Surface::Torus {
+                m: xf * self.axis2(e.arg(0)),
+                big: num(1),
+                r: num(2),
+            },
+            "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
+                let points: Vec<Vec<DVec3>> = e
+                    .arg(2)
+                    .list()
+                    .iter()
+                    .map(|row| {
+                        row.list()
+                            .iter()
+                            .filter_map(|p| self.point(p))
+                            .map(|p| xf.transform_point3(p))
+                            .collect()
+                    })
+                    .collect();
+                let nu = points.len();
+                let nv = points.first().map_or(0, Vec::len);
+                let ints = |i: usize| -> Vec<i64> {
+                    e.arg(i).list().iter().filter_map(Value::as_i64).collect()
+                };
+                let deg = |i: usize| e.arg(i).as_i64().and_then(|d| usize::try_from(d).ok());
+                let weights: Vec<Vec<f64>> = if class.starts_with("IFCRATIONAL") {
+                    e.arg(12).list().iter().map(Value::numbers).collect()
+                } else {
+                    Vec::new()
+                };
+                let u =
+                    deg(0).and_then(|d| ifc_geom::Knots::new(d, &ints(7), &e.arg(9).numbers(), nu));
+                let v = deg(1)
+                    .and_then(|d| ifc_geom::Knots::new(d, &ints(8), &e.arg(10).numbers(), nv));
+                match (u, v) {
+                    (Some(u), Some(v)) if points.iter().all(|r| r.len() == nv) => {
+                        Surface::BSpline(ifc_geom::BSplineSurface {
+                            u,
+                            v,
+                            points,
+                            weights,
+                        })
+                    }
+                    _ => return Some(Err(class.to_owned())),
+                }
+            }
+            other => return Some(Err(other.to_owned())),
+        };
+        Some(Ok(s))
+    }
+
+    /// The points of an `IfcEdgeLoop` (item coordinates), each edge once.
+    fn edge_loop(&mut self, lp: &Entity) -> Vec<DVec3> {
+        let mut out: Vec<DVec3> = Vec::new();
+        for oe in lp.arg(0).refs() {
+            let Some(o) = self.f.get(oe) else { continue };
+            let mut pts = self.edge_points(oe, o, 0);
+            if o.class == "IFCORIENTEDEDGE" && o.arg(3).as_enum() == Some("F") {
+                pts.reverse();
+            }
+            for p in pts {
+                if out.last().is_none_or(|q| (*q - p).length_squared() > 1e-18) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// The points of an edge from its start to its end vertex: oriented edges by
+    /// their edge element, edge curves along their geometry (lines, circles and
+    /// ellipses between the vertices, other curves cut at the points nearest the
+    /// vertices). Edges are tessellated once so the faces on both sides share points.
+    fn edge_points(&mut self, id: u64, e: &Entity, depth: usize) -> Vec<DVec3> {
+        if let Some(p) = self.edges.get(&id) {
+            return p.clone();
+        }
+        let vertex = |r: &Self, v: &Value| -> Option<DVec3> {
+            let (_, ve) = r.get(v)?;
+            r.point(ve.arg(0))
+        };
+        let pts = match e.class.as_str() {
+            "IFCORIENTEDEDGE" if depth < 4 => match self.get(e.arg(2)) {
+                Some((eid, inner)) => self.edge_points(eid, inner, depth + 1),
+                None => Vec::new(),
+            },
+            "IFCEDGECURVE" => {
+                let (s, t) = (vertex(self, e.arg(0)), vertex(self, e.arg(1)));
+                let same = e.arg(3).as_enum() != Some("F");
+                self.edge_curve(e.arg(2), same, s, t)
+                    .unwrap_or_else(|| s.into_iter().chain(t).collect())
+            }
+            _ => vertex(self, e.arg(0))
+                .into_iter()
+                .chain(vertex(self, e.arg(1)))
+                .collect(),
+        };
+        self.edges.insert(id, pts.clone());
+        pts
+    }
+
+    fn edge_curve(
+        &mut self,
+        geom: &Value,
+        same: bool,
+        s: Option<DVec3>,
+        t: Option<DVec3>,
+    ) -> Option<Vec<DVec3>> {
+        let (s, t) = (s?, t?);
+        let (_, g) = self.get(geom)?;
+        match g.class.as_str() {
+            "IFCLINE" => Some(vec![s, t]),
+            "IFCCIRCLE" | "IFCELLIPSE" => {
+                let m = self.axis2(g.arg(0));
+                let rx = g.arg(1).as_f64()?;
+                let ry = if g.class == "IFCELLIPSE" {
+                    g.arg(2).as_f64()?
+                } else {
+                    rx
+                };
+                let inv = m.inverse();
+                let ang = |p: DVec3| {
+                    let l = inv.transform_point3(p);
+                    (l.y / ry).atan2(l.x / rx)
+                };
+                let a0 = ang(s);
+                let mut a1 = ang(t);
+                let closed = (s - t).length_squared() <= 1e-18;
+                if same {
+                    while a1 <= a0 + if closed { 1e-9 } else { 1e-12 } {
+                        a1 += TAU;
+                    }
+                } else {
+                    while a1 >= a0 - if closed { 1e-9 } else { 1e-12 } {
+                        a1 -= TAU;
+                    }
+                }
+                let mut pts: Vec<DVec3> = arc(DVec2::ZERO, rx, ry, a0, a1)
+                    .into_iter()
+                    .map(|p| m.transform_point3(p.extend(0.0)))
+                    .collect();
+                let n = pts.len();
+                pts[0] = s;
+                pts[n - 1] = t;
+                Some(pts)
+            }
+            _ => {
+                let mut pts = self.curve(geom, 0)?;
+                if !same {
+                    pts.reverse();
+                }
+                let near = |p: DVec3, from: usize, pts: &[DVec3]| {
+                    (from..pts.len()).min_by(|&i, &j| {
+                        (pts[i] - p)
+                            .length_squared()
+                            .total_cmp(&(pts[j] - p).length_squared())
+                    })
+                };
+                let i0 = near(s, 0, &pts)?;
+                let i1 = near(t, i0 + 1, &pts).unwrap_or(pts.len() - 1);
+                let mut out: Vec<DVec3> = pts[i0..=i1.max(i0)].to_vec();
+                if out.len() < 2 {
+                    out = vec![s, t];
+                }
+                let n = out.len();
+                out[0] = s;
+                out[n - 1] = t;
+                Some(out)
+            }
         }
     }
 
@@ -1809,11 +2276,32 @@ impl<'a> Reader<'a> {
             None => Vec::new(),
         };
         let face_style = |k: usize| colours.get(k).copied().flatten().or(style);
+        let texture = match self.texture_maps.get(&id).copied() {
+            Some(tm) if triangles => self.texture_map(tm, style),
+            _ => None,
+        };
         if triangles {
             for (k, t) in e.arg(3).list().iter().enumerate() {
                 let pts = loop_of(t);
-                if pts.len() == 3 {
-                    geo.polygon(&pts, face_style(k));
+                if pts.len() != 3 {
+                    continue;
+                }
+                let uvs = texture.as_ref().and_then(|(_, coords, index)| {
+                    let idx: Vec<i64> = match index.get(k) {
+                        Some(i) => i.to_vec(),
+                        None if index.is_empty() => {
+                            t.list().iter().filter_map(Value::as_i64).collect()
+                        }
+                        None => return None,
+                    };
+                    idx.iter()
+                        .map(|&i| coords.get(usize::try_from(i - 1).ok()?).copied())
+                        .collect::<Option<Vec<DVec2>>>()
+                        .filter(|u| u.len() == 3)
+                });
+                match (uvs, &texture) {
+                    (Some(uvs), Some((m, _, _))) => geo.polygon_uv(&pts, Some(*m), uvs),
+                    _ => geo.polygon(&pts, face_style(k)),
                 }
             }
         } else {
@@ -1829,6 +2317,159 @@ impl<'a> Reader<'a> {
             }
         }
         true
+    }
+
+    /// The textured material, texture coordinates and per-triangle coordinate
+    /// indices (empty: the face set's own indices) of an
+    /// `IfcIndexedTriangleTextureMap`; `None` when its image cannot be read.
+    fn texture_map(
+        &mut self,
+        tm: u64,
+        style: Option<usize>,
+    ) -> Option<(usize, Vec<DVec2>, Vec<[i64; 3]>)> {
+        let e = self.f.get(tm)?;
+        let texture = e.arg(0).refs().into_iter().next()?;
+        let material = self.texture_material(style, texture)?;
+        let coords: Vec<DVec2> = self
+            .get(e.arg(2))
+            .map(|(_, l)| {
+                l.arg(0)
+                    .list()
+                    .iter()
+                    .map(|c| {
+                        let n = c.numbers();
+                        DVec2::new(
+                            n.first().copied().unwrap_or(0.0),
+                            n.get(1).copied().unwrap_or(0.0),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let index: Vec<[i64; 3]> = e
+            .arg(3)
+            .list()
+            .iter()
+            .map(|t| {
+                let n: Vec<i64> = t.list().iter().filter_map(Value::as_i64).collect();
+                [0, 1, 2].map(|k| n.get(k).copied().unwrap_or(0))
+            })
+            .collect();
+        Some((material, coords, index))
+    }
+
+    /// The material of a style (or a grey one) with a surface texture's image:
+    /// `IfcImageTexture` (read by its URL), `IfcBlobTexture` (PNG or JPEG) or
+    /// `IfcPixelTexture` (made a PNG). Made once per style and texture.
+    fn texture_material(&mut self, style: Option<usize>, texture: u64) -> Option<usize> {
+        if let Some(m) = self.textured.get(&(style, texture)) {
+            return *m;
+        }
+        let image = self.texture_image(texture);
+        if image.is_none() {
+            let class = self
+                .f
+                .get(texture)
+                .map(|t| t.class.clone())
+                .unwrap_or_default();
+            self.skip(&class);
+        }
+        let m = image.map(|(filename, data)| {
+            let base = style
+                .and_then(|m| self.model.materials.get(m))
+                .cloned()
+                .unwrap_or(Material {
+                    name: String::new(),
+                    color: [204, 204, 204],
+                    opacity: 1.0,
+                    texture: None,
+                });
+            let name = if base.name.is_empty() {
+                filename
+                    .rsplit_once('.')
+                    .map_or(filename.as_str(), |(stem, _)| stem)
+                    .to_owned()
+            } else {
+                base.name.clone()
+            };
+            self.push_material(Material {
+                name,
+                texture: Some(crate::Texture {
+                    filename,
+                    data,
+                    width: super::TEXTURE_TILE[0],
+                    height: super::TEXTURE_TILE[1],
+                    colorize: false,
+                }),
+                ..base
+            })
+        });
+        self.textured.insert((style, texture), m);
+        m
+    }
+
+    fn texture_image(&self, texture: u64) -> Option<(String, std::sync::Arc<[u8]>)> {
+        let t = self.f.get(texture)?;
+        match t.class.as_str() {
+            "IFCIMAGETEXTURE" => {
+                // IFC4: URLReference is the 6th attribute, IFC2X3 the 5th.
+                let url = t.args.iter().skip(4).rev().find_map(Value::as_str)?;
+                let tex = super::find_texture(url, self.read)?;
+                Some((tex.filename, tex.data))
+            }
+            "IFCBLOBTEXTURE" => {
+                let data = match t.arg(6) {
+                    Value::Binary(h) => ifc_geom::binary_bytes(h),
+                    _ => return None,
+                };
+                let ext = if data.starts_with(b"\x89PNG") {
+                    "png"
+                } else {
+                    "jpg"
+                };
+                super::is_image(&data).then(|| (format!("texture{texture}.{ext}"), data.into()))
+            }
+            "IFCPIXELTEXTURE" => {
+                let w = u32::try_from(t.arg(5).as_i64()?).ok()?;
+                let h = u32::try_from(t.arg(6).as_i64()?).ok()?;
+                let c = u8::try_from(t.arg(7).as_i64()?).ok()?;
+                let mut rows: Vec<Vec<u8>> = Vec::new();
+                let pixels: Vec<Vec<u8>> = t
+                    .arg(8)
+                    .list()
+                    .iter()
+                    .map(|p| match p {
+                        Value::Binary(hex) => ifc_geom::binary_bytes(hex),
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                if pixels.len() != (w as usize) * (h as usize)
+                    || pixels.iter().any(|p| p.len() != c as usize)
+                {
+                    return None;
+                }
+                // The pixels run left to right from the bottom row up.
+                for row in pixels.chunks(w as usize) {
+                    rows.push(row.concat());
+                }
+                rows.reverse();
+                let png = ifc_geom::png(w, h, c, &rows.concat())?;
+                Some((format!("texture{texture}.png"), png.into()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Adds a material, its name made unique.
+    fn push_material(&mut self, mut m: Material) -> usize {
+        let base = m.name.clone();
+        let mut n = 1;
+        while self.model.materials.iter().any(|x| x.name == m.name) {
+            n += 1;
+            m.name = format!("{base} {n}");
+        }
+        self.model.materials.push(m);
+        self.model.materials.len() - 1
     }
 
     /// Materials of an `IfcIndexedColourMap`'s faces.
@@ -1927,69 +2568,220 @@ impl<'a> Reader<'a> {
         true
     }
 
-    /// `IfcSweptDiskSolid`: a tube along the directrix, mitered at its corners.
+    /// `IfcSweptDiskSolid` / `IfcSweptDiskSolidPolygonal`: a tube (hollow with an
+    /// inner radius) along the directrix, mitered at its corners; start and end
+    /// parameters are not read (the whole directrix, as IfcOpenShell does), nor the
+    /// polygonal kind's fillet radius.
     fn tube(&mut self, e: &Entity, xf: DMat4, style: Option<usize>, geo: &mut Geo) -> bool {
-        let Some(path) = self.curve(e.arg(0), 0) else {
+        let Some((path, closed)) = self.directrix(e.arg(0), None, None) else {
             return false;
         };
         let Some(r) = e.arg(1).as_f64().filter(|r| *r > 0.0) else {
             return false;
         };
-        let path = dedup(&path);
-        if path.len() < 2 {
+        let mut loops = vec![ifc_geom::circle_n(r, TUBE_SEGMENTS)];
+        if let Some(inner) = e.arg(2).as_f64().filter(|i| *i > 0.0 && *i < r) {
+            let mut h = ifc_geom::circle_n(inner, TUBE_SEGMENTS);
+            h.reverse();
+            loops.push(h);
+        }
+        let x0 = path[1] - path[0];
+        let Some(rings) = ifc_geom::sweep_rings(&path, x0.any_orthonormal_vector(), &loops, closed)
+        else {
+            return false;
+        };
+        geo.sweep(&place_rings(rings, xf), closed, style);
+        true
+    }
+
+    /// A sweep's directrix as points, and whether it is closed. `start` and `end`
+    /// trim a bare circle or ellipse (plane angle units); other curves are taken
+    /// whole.
+    fn directrix(
+        &mut self,
+        v: &Value,
+        start: Option<f64>,
+        end: Option<f64>,
+    ) -> Option<(Vec<DVec3>, bool)> {
+        let (_, e) = self.get(v)?;
+        let (pts, closed) = match e.class.as_str() {
+            "IFCCIRCLE" | "IFCELLIPSE" => {
+                let m = self.axis2(e.arg(0));
+                let rx = e.arg(1).as_f64()?;
+                let ry = if e.class == "IFCELLIPSE" {
+                    e.arg(2).as_f64()?
+                } else {
+                    rx
+                };
+                let (pts, closed) = match (start, end) {
+                    (Some(a), Some(b)) if ((b - a) * self.angle).abs() < TAU - 1e-9 => (
+                        arc(DVec2::ZERO, rx, ry, a * self.angle, b * self.angle),
+                        false,
+                    ),
+                    _ => (circle(rx, ry), true),
+                };
+                let pts = pts
+                    .into_iter()
+                    .map(|p| m.transform_point3(p.extend(0.0)))
+                    .collect();
+                (pts, closed)
+            }
+            "IFCPOLYLINE" => {
+                let raw: Vec<DVec3> = e
+                    .arg(0)
+                    .list()
+                    .iter()
+                    .filter_map(|p| self.point(p))
+                    .collect();
+                let closed =
+                    raw.len() > 3 && (raw[0] - raw[raw.len() - 1]).length_squared() <= 1e-18;
+                (dedup(&raw), closed)
+            }
+            _ => (self.curve(v, 0)?, false),
+        };
+        let pts = dedup(&pts);
+        let closed = closed && pts.len() >= 3;
+        (pts.len() >= 2).then_some((pts, closed))
+    }
+
+    /// `IfcRevolvedAreaSolid`: the profile turned about the axis (24 steps per full
+    /// turn); the tapered kind's end profile is not read.
+    fn revolved(&mut self, e: &Entity, xf: DMat4, style: Option<usize>, geo: &mut Geo) -> bool {
+        let Some(loops) = self.profile(e.arg(0), 0) else {
+            return false;
+        };
+        let pos = self.axis2(e.arg(1));
+        let Some((_, axis)) = self.get(e.arg(2)) else {
+            return false;
+        };
+        let origin = self.point(axis.arg(0)).unwrap_or(DVec3::ZERO);
+        let dir = self.direction(axis.arg(1)).unwrap_or(DVec3::Z);
+        let Some(angle) = e.arg(3).as_f64().map(|a| a * self.angle) else {
+            return false;
+        };
+        if angle.abs() < 1e-12 {
             return false;
         }
-        let dirs: Vec<DVec3> = path
-            .windows(2)
-            .map(|w| (w[1] - w[0]).normalize_or_zero())
+        let full = angle.abs() >= TAU - 1e-9;
+        let angle = angle.clamp(-TAU, TAU);
+        let n = (angle.abs() / TAU * CIRCLE_SEGMENTS as f64).ceil().max(1.0) as usize;
+        let m = xf * pos;
+        let mut rings: Vec<Vec<Vec<DVec3>>> = (0..=n)
+            .map(|k| {
+                let turn = DMat4::from_translation(origin)
+                    * DMat4::from_axis_angle(dir, angle * k as f64 / n as f64)
+                    * DMat4::from_translation(-origin);
+                let t = m * turn;
+                loops
+                    .iter()
+                    .map(|l| {
+                        l.iter()
+                            .map(|p| t.transform_point3(p.extend(0.0)))
+                            .collect()
+                    })
+                    .collect()
+            })
             .collect();
-        let t0 = dirs[0];
-        let u = t0.any_orthonormal_vector();
-        let v = t0.cross(u);
-        let mut rings: Vec<Vec<DVec3>> = vec![
-            (0..TUBE_SEGMENTS)
-                .map(|k| {
-                    let a = TAU * k as f64 / TUBE_SEGMENTS as f64;
-                    path[0] + (u * a.cos() + v * a.sin()) * r
-                })
-                .collect(),
-        ];
-        for i in 1..path.len() {
-            let d_in = dirs[i - 1];
-            let plane_n = match dirs.get(i) {
-                Some(&d_out) => (d_in + d_out).try_normalize().unwrap_or(d_in),
-                None => d_in,
-            };
-            let denom = d_in.dot(plane_n);
-            let prev = rings.last().expect("a ring");
-            let ring: Vec<DVec3> = prev
-                .iter()
-                .map(|&q| {
-                    let s = if denom.abs() > 0.2 {
-                        (path[i] - q).dot(plane_n) / denom
-                    } else {
-                        (path[i] - path[i - 1]).length()
-                    };
-                    q + d_in * s
-                })
-                .collect();
-            rings.push(ring);
+        if full {
+            rings[n] = rings[0].clone();
         }
-        let place = |p: DVec3| xf.transform_point3(p);
-        for w in rings.windows(2) {
-            for k in 0..TUBE_SEGMENTS {
-                let k1 = (k + 1) % TUBE_SEGMENTS;
-                geo.face(
-                    &[w[0][k], w[0][k1], w[1][k1], w[1][k]].map(place),
-                    &[],
-                    style,
-                );
+        geo.sweep(&rings, full, style);
+        true
+    }
+
+    /// `IfcSurfaceCurveSweptAreaSolid` and `IfcFixedReferenceSweptAreaSolid`: the
+    /// profile swept along the directrix (in the Position's coordinates), mitered at
+    /// its corners. Its x axis starts along the reference surface's normal (a plane's
+    /// normal, or the extrusion direction crossed with the directrix for a surface of
+    /// linear extrusion; this matches IfcOpenShell) or along the fixed reference, and
+    /// is carried along the directrix without twisting.
+    fn swept_along(&mut self, e: &Entity, xf: DMat4, style: Option<usize>, geo: &mut Geo) -> bool {
+        let Some(loops) = self.profile(e.arg(0), 0) else {
+            return false;
+        };
+        let pos = self.axis2(e.arg(1));
+        let Some((path, closed)) = self.directrix(e.arg(2), e.arg(3).as_f64(), e.arg(4).as_f64())
+        else {
+            return false;
+        };
+        let t0 = (path[1] - path[0]).normalize_or_zero();
+        let x0 = if e.class == "IFCFIXEDREFERENCESWEPTAREASOLID" {
+            self.direction(e.arg(5)).unwrap_or(DVec3::X)
+        } else {
+            match self.get(e.arg(5)) {
+                Some((_, s)) if s.class == "IFCPLANE" => self.axis2(s.arg(0)).z_axis.truncate(),
+                Some((_, s)) if s.class == "IFCSURFACEOFLINEAREXTRUSION" => {
+                    let m = self.axis2(s.arg(1));
+                    let d = self.direction(s.arg(2)).unwrap_or(DVec3::Z);
+                    t0.cross(m.transform_vector3(d))
+                }
+                Some((_, s)) => {
+                    let c = s.class.clone();
+                    self.skip(&c);
+                    DVec3::Z
+                }
+                None => DVec3::Z,
             }
-        }
-        let first: Vec<DVec3> = rings[0].iter().rev().map(|&p| place(p)).collect();
-        let last: Vec<DVec3> = rings[rings.len() - 1].iter().map(|&p| place(p)).collect();
-        geo.face(&first, &[], style);
-        geo.face(&last, &[], style);
+        };
+        let Some(rings) = ifc_geom::sweep_rings(&path, x0, &loops, closed) else {
+            return false;
+        };
+        geo.sweep(&place_rings(rings, xf * pos), closed, style);
+        true
+    }
+
+    /// CSG primitives (`IfcBlock`, `IfcRightCircularCylinder`, `IfcRightCircularCone`,
+    /// `IfcSphere`, `IfcRectangularPyramid`) at their Position.
+    fn primitive(&mut self, e: &Entity, xf: DMat4, style: Option<usize>, geo: &mut Geo) -> bool {
+        let m = xf * self.axis2(e.arg(0));
+        let num = |i: usize| e.arg(i).as_f64().filter(|x| *x > 0.0);
+        let lift = |l: &[DVec2], z: f64| -> Vec<Vec<DVec3>> {
+            vec![l.iter().map(|p| m.transform_point3(p.extend(z))).collect()]
+        };
+        let rings: Vec<Vec<Vec<DVec3>>> = match e.class.as_str() {
+            "IFCBLOCK" => {
+                let (Some(x), Some(y), Some(z)) = (num(1), num(2), num(3)) else {
+                    return false;
+                };
+                geo.cuboid(m, DVec3::ZERO, DVec3::new(x, y, z), style);
+                return true;
+            }
+            "IFCRIGHTCIRCULARCYLINDER" => {
+                let (Some(h), Some(r)) = (num(1), num(2)) else {
+                    return false;
+                };
+                let c = circle(r, r);
+                vec![lift(&c, 0.0), lift(&c, h)]
+            }
+            "IFCRIGHTCIRCULARCONE" => {
+                let (Some(h), Some(r)) = (num(1), num(2)) else {
+                    return false;
+                };
+                let c = circle(r, r);
+                vec![lift(&c, 0.0), lift(&vec![DVec2::ZERO; c.len()], h)]
+            }
+            "IFCRECTANGULARPYRAMID" => {
+                let (Some(x), Some(y), Some(h)) = (num(1), num(2), num(3)) else {
+                    return false;
+                };
+                let base = [
+                    DVec2::ZERO,
+                    DVec2::new(x, 0.0),
+                    DVec2::new(x, y),
+                    DVec2::new(0.0, y),
+                ];
+                vec![lift(&base, 0.0), lift(&[DVec2::new(x, y) / 2.0; 4], h)]
+            }
+            "IFCSPHERE" => {
+                let Some(r) = num(1) else { return false };
+                ifc_geom::sphere_rings(r, SPHERE_STACKS, CIRCLE_SEGMENTS)
+                    .into_iter()
+                    .map(|l| vec![l.into_iter().map(|p| m.transform_point3(p)).collect()])
+                    .collect()
+            }
+            _ => return false,
+        };
+        geo.sweep(&rings, false, style);
         true
     }
 
@@ -2051,8 +2843,26 @@ impl<'a> Reader<'a> {
         DMat4::from_scale(DVec3::splat(self.opts.inches_per_unit))
     }
 
-    fn build(&self, geo: Geo) -> Entities {
+    fn build(&self, mut geo: Geo) -> Entities {
         let ids: Vec<usize> = (0..self.model.materials.len()).collect();
+        if geo.mesh.polygons.iter().any(|p| !p.uvs.is_empty()) {
+            // Texture sizes for the faces' texture positions.
+            geo.mesh.materials = self
+                .model
+                .materials
+                .iter()
+                .map(|m| mesh_import::MeshMaterial {
+                    name: m.name.clone(),
+                    color: m.color,
+                    opacity: m.opacity,
+                    texture: m.texture.as_ref().map(|t| mesh_import::MeshTexture {
+                        filename: t.filename.clone(),
+                        data: t.data.clone(),
+                        size: [t.width, t.height],
+                    }),
+                })
+                .collect();
+        }
         let mut ents = mesh_import::to_entities(&geo.mesh, &self.opts, &ids);
         for (definition, transform, material) in geo.instances {
             ents.instances
@@ -2169,7 +2979,128 @@ impl<'a> Reader<'a> {
                 self.model.root.instances.push(inst);
             }
         }
+        self.georeference();
         (self.model, self.report)
+    }
+
+    /// Whole meters (file units) to move `geo` by when its middle is farther than
+    /// [`FAR`] from the origin along an axis; zero otherwise.
+    fn far_shift(&self, geo: &Geo) -> DVec3 {
+        let Some((lo, hi)) = geo.bounds() else {
+            return DVec3::ZERO;
+        };
+        let m = self.report.meters_per_unit;
+        let c = (lo + hi) / 2.0 * m;
+        DVec3::from_array(
+            c.to_array()
+                .map(|x| if x.abs() > FAR { x.round() } else { 0.0 }),
+        ) / m
+    }
+
+    /// Moves a model far from the origin near it, and reads the site's latitude
+    /// and longitude (`IfcSite` RefLatitude / RefLongitude), north
+    /// (`IfcMapConversion` axis, else the context's TrueNorth) and where the model
+    /// origin lies in map coordinates (the map conversion's eastings, northings and
+    /// height plus the move, else the move alone) into the model's geo-location.
+    fn georeference(&mut self) {
+        let f = self.f;
+        // Move the whole model near the origin.
+        let mut b = [DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)];
+        for i in &self.model.root.instances {
+            world_bounds(&self.model, i, DMat4::IDENTITY, 0, &mut b);
+        }
+        let mut moved = DVec3::ZERO;
+        if b[0].x <= b[1].x {
+            let to_m = 0.0254;
+            let c = (b[0] + b[1]) / 2.0 * to_m;
+            moved = DVec3::from_array(
+                c.to_array()
+                    .map(|x| if x.abs() > FAR { x.round() } else { 0.0 }),
+            );
+            if moved != DVec3::ZERO {
+                let t = DMat4::from_translation(-moved / to_m);
+                for i in &mut self.model.root.instances {
+                    i.transform = t * i.transform;
+                }
+            }
+        }
+        self.report.moved = moved;
+        let mut geo = self.model.geo;
+        // North.
+        let conversion = f
+            .entities
+            .values()
+            .find(|e| e.class.starts_with("IFCMAPCONVERSION"));
+        let true_north = f
+            .entities
+            .values()
+            .find(|e| {
+                e.class == "IFCGEOMETRICREPRESENTATIONCONTEXT" && !matches!(e.arg(5), Value::Null)
+            })
+            .and_then(|e| f.deref(e.arg(5)))
+            .map(|(_, d)| d.arg(0).numbers())
+            .filter(|n| n.len() >= 2 && (n[0] != 0.0 || n[1] != 0.0));
+        let mut north = None;
+        if let Some(c) = conversion {
+            let (xa, xo) = (
+                c.arg(5).as_f64().unwrap_or(1.0),
+                c.arg(6).as_f64().unwrap_or(0.0),
+            );
+            let theta = xo.atan2(xa);
+            north = Some(theta.to_degrees());
+            // The target CRS: its EPSG code and map unit (meters per map unit).
+            let crs = f.deref(c.arg(1)).map(|(_, crs)| crs);
+            geo.epsg = crs
+                .and_then(|crs| crs.arg(0).as_str())
+                .and_then(|n| {
+                    let n = n.trim().to_ascii_uppercase();
+                    n.strip_prefix("EPSG:")?.trim().parse().ok()
+                })
+                .unwrap_or(0);
+            // Scale: map units per file unit (1 when not given); without a map unit
+            // the map unit is the file unit times the scale (as IfcOpenShell reads it).
+            let scale = c.arg(7).as_f64().filter(|s| *s > 0.0).unwrap_or(1.0);
+            let map_unit = crs
+                .and_then(|crs| self.unit_factor(crs.arg(6), 0))
+                .map(|u| u.1)
+                .filter(|m| *m > 0.0)
+                .unwrap_or(self.report.meters_per_unit / scale);
+            let d = moved / self.report.meters_per_unit;
+            let (sin, cos) = theta.sin_cos();
+            let e = c.arg(2).as_f64().unwrap_or(0.0) + scale * (cos * d.x - sin * d.y);
+            let n = c.arg(3).as_f64().unwrap_or(0.0) + scale * (sin * d.x + cos * d.y);
+            let h = c.arg(4).as_f64().unwrap_or(0.0) + scale * d.z;
+            geo.map_origin = DVec3::new(e, n, h) * map_unit;
+        } else {
+            geo.map_origin = moved;
+            if let Some(n) = true_north {
+                north = Some(n[0].atan2(n[1]).to_degrees());
+            }
+        }
+        if let Some(a) = north {
+            geo.north_angle = a.rem_euclid(360.0);
+            if geo.north_angle < 1e-9 || geo.north_angle > 360.0 - 1e-9 {
+                geo.north_angle = 0.0;
+            }
+        }
+        self.model.geo = geo;
+        // Latitude and longitude.
+        let site = f.entities.values().find(|e| e.class == "IFCSITE");
+        let angle = |v: &Value| -> Option<f64> {
+            let n = v.numbers();
+            let parts = [1.0, 60.0, 3600.0, 3_600_000_000.0];
+            (!n.is_empty()).then(|| n.iter().zip(parts).map(|(x, p)| x / p).sum())
+        };
+        if let Some(site) = site
+            && let (Some(lat), Some(lon)) = (angle(site.arg(9)), angle(site.arg(10)))
+            && (lat != 0.0 || lon != 0.0)
+            && lat.abs() <= 90.0
+            && lon.abs() <= 180.0
+        {
+            self.model.geo.located = true;
+            self.model.shadows.latitude = lat;
+            self.model.shadows.longitude = lon;
+        }
     }
 
     /// The group of object `id` and the objects under it, placed relative to
@@ -2216,6 +3147,21 @@ impl<'a> Reader<'a> {
             }
         }
         let has_geometry = !geo.mesh.polygons.is_empty() || !geo.instances.is_empty();
+        // Geometry far from the element's own origin (coordinates written in map
+        // units): moved near it, the element's origin moved the other way.
+        let shift = self.far_shift(&geo);
+        let world = if shift == DVec3::ZERO {
+            world
+        } else {
+            for p in &mut geo.mesh.positions {
+                *p -= shift;
+            }
+            let back = DMat4::from_translation(-shift * self.opts.inches_per_unit);
+            for (_, xf, _) in &mut geo.instances {
+                *xf = back * *xf;
+            }
+            world * DMat4::from_translation(shift)
+        };
         let mut ents = self.build(geo);
         if let Some(openings) = self.voids.get(&id).cloned() {
             self.cut_openings(&mut ents, &openings, world);
@@ -2223,11 +3169,24 @@ impl<'a> Reader<'a> {
         if has_geometry && !is_empty(&ents) {
             self.report.with_geometry += 1;
         }
+        let own_geometry = !ents.faces.is_empty();
         if let Some(kids) = children.get(&id) {
             for &k in kids {
                 if let Some(inst) = self.node(k, world, children, seen, depth + 1) {
                     ents.instances.push(inst);
                 }
+            }
+        }
+        // Spaces come in hidden; one holding objects (furniture contained in a
+        // room) hides only its own faces and edges.
+        let is_space = e.class == "IFCSPACE";
+        let holds = !ents.instances.is_empty();
+        if is_space && holds && own_geometry {
+            for f in ents.faces.values_mut() {
+                f.attrs.hidden = true;
+            }
+            for ed in ents.edges.values_mut() {
+                ed.attrs.hidden = true;
             }
         }
         if is_empty(&ents) {
@@ -2253,8 +3212,38 @@ impl<'a> Reader<'a> {
         let rel = parent_world.inverse() * world;
         let material = self.product_paint(id);
         let mut inst = instance(definition, c * rel * c.inverse(), label, material);
-        inst.hidden = e.class == "IFCSPACE";
+        inst.hidden = is_space && !holds;
         Some(inst)
+    }
+}
+
+/// Rings of [`ifc_geom::sweep_rings`] placed by `m`.
+fn place_rings(rings: Vec<Vec<Vec<DVec3>>>, m: DMat4) -> Vec<Vec<Vec<DVec3>>> {
+    rings
+        .into_iter()
+        .map(|r| {
+            r.into_iter()
+                .map(|l| l.into_iter().map(|p| m.transform_point3(p)).collect())
+                .collect()
+        })
+        .collect()
+}
+
+/// Grows `b` by the world positions under instance `i` placed by `xf` (inches).
+fn world_bounds(model: &Model, i: &Instance, xf: DMat4, depth: usize, b: &mut [DVec3; 2]) {
+    let Some(d) = model.definitions.get(i.definition) else {
+        return;
+    };
+    let xf = xf * i.transform;
+    for v in d.entities.vertices.values() {
+        let p = xf.transform_point3(v.pos);
+        b[0] = b[0].min(p);
+        b[1] = b[1].max(p);
+    }
+    if depth < MAX_DEPTH {
+        for k in &d.entities.instances {
+            world_bounds(model, k, xf, depth + 1, b);
+        }
     }
 }
 
@@ -2746,7 +3735,7 @@ END-ISO-10303-21;
 #332=IFCSWEPTDISKSOLID(#328,20.,$,$,$);
 #333=IFCISHAPEPROFILEDEF(.AREA.,$,$,200.,400.,10.,20.,$,$,$,$);
 #334=IFCEXTRUDEDAREASOLID(#333,$,#58,1000.);
-#335=IFCADVANCEDBREP(#5);
+#335=IFCSECTIONEDSOLIDHORIZONTAL(#5);
 #340=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#309,#313,#316,#327,#332,#334,#335));
 #341=IFCPRODUCTDEFINITIONSHAPE($,$,(#340));
 #342=IFCBUILDINGELEMENTPROXY('x',$,$,$,$,#100,#341,$,$);
@@ -2756,7 +3745,7 @@ END-ISO-10303-21;
         valid(&m);
         assert_eq!(report.items.get("IfcExtrudedAreaSolid"), Some(&5));
         assert_eq!(report.items.get("IfcSweptDiskSolid"), Some(&1));
-        assert_eq!(report.skipped.get("IfcAdvancedBrep"), Some(&1));
+        assert_eq!(report.skipped.get("IfcSectionedSolidHorizontal"), Some(&1));
         let proxy = m
             .definitions
             .values()
@@ -2833,6 +3822,273 @@ END-ISO-10303-21;
             )
             .is_err()
         );
+    }
+
+    /// Volume (mm3) of the first solid body of class `kind`.
+    fn solid_volume(m: &Model, kind: &str) -> f64 {
+        let e = body_of(m, kind);
+        assert!(crate::is_solid(e), "{kind} is not a solid");
+        crate::solid::volume(e) / MM3
+    }
+
+    fn near(a: f64, b: f64, rel: f64) -> bool {
+        (a - b).abs() <= rel * b.abs()
+    }
+
+    #[test]
+    fn csg_primitives_revolutions_and_sweeps() {
+        // One element per item (classes only tell them apart), millimeters.
+        let element = |id: u64, class: &str, item: u64| {
+            format!(
+                "#{id}=IFCSHAPEREPRESENTATION($,'Body','CSG',(#{item}));\n\
+                 #{}=IFCPRODUCTDEFINITIONSHAPE($,$,(#{id}));\n\
+                 #{}={class}('e{id}',$,$,$,$,#100,#{},$,$);\n",
+                id + 1,
+                id + 2,
+                id + 1
+            )
+        };
+        let mut body = String::from(
+            "\
+#58=IFCDIRECTION((0.,0.,1.));
+#59=IFCDIRECTION((0.,1.,0.));
+#200=IFCBLOCK(#6,1000.,2000.,3000.);
+#201=IFCRIGHTCIRCULARCYLINDER(#6,1000.,500.);
+#202=IFCRIGHTCIRCULARCONE(#6,1000.,500.);
+#203=IFCSPHERE(#6,1000.);
+#204=IFCRECTANGULARPYRAMID(#6,1000.,2000.,3000.);
+#210=IFCCARTESIANPOINT((3000.,0.));
+#211=IFCAXIS2PLACEMENT2D(#210,$);
+#212=IFCRECTANGLEPROFILEDEF(.AREA.,$,#211,2000.,1000.);
+#213=IFCAXIS1PLACEMENT(#5,#59);
+#205=IFCREVOLVEDAREASOLID(#212,#6,#213,1.5707963267948966);
+#220=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,100.,100.);
+#221=IFCCARTESIANPOINT((1000.,0.,0.));
+#222=IFCCARTESIANPOINT((1000.,1000.,0.));
+#223=IFCPOLYLINE((#5,#221,#222));
+#206=IFCFIXEDREFERENCESWEPTAREASOLID(#220,#6,#223,$,$,#58);
+#230=IFCCARTESIANPOINT((500.,500.,500.));
+#231=IFCAXIS2PLACEMENT3D(#230,$,$);
+#232=IFCBLOCK(#6,1000.,1000.,1000.);
+#233=IFCBLOCK(#231,1000.,1000.,1000.);
+#234=IFCBOOLEANRESULT(.UNION.,#232,#233);
+#207=IFCCSGSOLID(#234);
+#240=IFCPLANE(#6);
+#208=IFCSURFACECURVESWEPTAREASOLID(#220,#6,#223,$,$,#240);
+",
+        );
+        let classes = [
+            "IFCCOLUMN",
+            "IFCBEAM",
+            "IFCMEMBER",
+            "IFCPLATE",
+            "IFCFOOTING",
+            "IFCRAILING",
+            "IFCPILE",
+            "IFCCOVERING",
+            "IFCROOF",
+        ];
+        let mut ids = Vec::new();
+        for (k, class) in classes.iter().enumerate() {
+            let id = 300 + 10 * k as u64;
+            body += &element(id, class, 200 + k as u64);
+            ids.push(format!("#{}", id + 2));
+        }
+        body += &format!(
+            "#400=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,({}),#30);\n",
+            ids.join(",")
+        );
+        let (m, report) = import(file(&body).as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(near(solid_volume(&m, "IfcColumn"), 6e9, 1e-9));
+        // A 24-sided polygon of radius 500 instead of the circle.
+        let disk = 12.0 * 500.0 * 500.0 * (TAU / 24.0).sin();
+        assert!(near(solid_volume(&m, "IfcBeam"), disk * 1000.0, 1e-9));
+        assert!(near(
+            solid_volume(&m, "IfcMember"),
+            disk * 1000.0 / 3.0,
+            1e-9
+        ));
+        let ball = 4.0 / 3.0 * std::f64::consts::PI * 1e9;
+        let v = solid_volume(&m, "IfcPlate");
+        assert!(v < ball && v > 0.95 * ball, "{v}");
+        assert!(near(solid_volume(&m, "IfcFooting"), 2e9, 1e-9));
+        // Pappus: area times the centroid's path (a quarter turn at 3000 mm).
+        let pappus = 2000.0 * 1000.0 * 3000.0 * TAU / 4.0;
+        let v = solid_volume(&m, "IfcRailing");
+        assert!(v < pappus && v > 0.98 * pappus, "{v} {pappus}");
+        // A mitered square tube along two straight legs.
+        assert!(near(
+            solid_volume(&m, "IfcPile"),
+            100.0 * 100.0 * 2000.0,
+            1e-9
+        ));
+        assert!(near(
+            solid_volume(&m, "IfcRoof"),
+            100.0 * 100.0 * 2000.0,
+            1e-9
+        ));
+        // The union of two overlapping cubes.
+        assert!(near(solid_volume(&m, "IfcCovering"), 2e9 - 0.125e9, 1e-9));
+        assert_eq!(report.joined.get("IfcBlock"), Some(&1));
+        // The fixed reference (z) is the profile's x axis: the tube is 100 mm tall
+        // around the storey's height.
+        let pile = body_of(&m, "IfcPile");
+        let zs: Vec<f64> = pile.vertices.values().map(|v| v.pos.z * 25.4).collect();
+        let (z0, z1) = zs
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), z| (a.min(*z), b.max(*z)));
+        assert!(
+            (z0 + 50.0).abs() < 1e-6 && (z1 - 50.0).abs() < 1e-6,
+            "{z0} {z1}"
+        );
+    }
+
+    #[test]
+    fn advanced_brep_cylinder() {
+        // A cylinder of radius 1000 and height 1000: two planar faces bounded by
+        // circle edges, a cylindrical face bounded by the circles and a seam.
+        let body = "\
+#58=IFCDIRECTION((0.,0.,1.));
+#59=IFCDIRECTION((0.,0.,-1.));
+#500=IFCCARTESIANPOINT((1000.,0.,0.));
+#501=IFCCARTESIANPOINT((1000.,0.,1000.));
+#502=IFCVERTEXPOINT(#500);
+#503=IFCVERTEXPOINT(#501);
+#504=IFCCIRCLE(#6,1000.);
+#505=IFCCARTESIANPOINT((0.,0.,1000.));
+#506=IFCAXIS2PLACEMENT3D(#505,$,$);
+#507=IFCCIRCLE(#506,1000.);
+#508=IFCEDGECURVE(#502,#502,#504,.T.);
+#509=IFCEDGECURVE(#503,#503,#507,.T.);
+#510=IFCPOLYLINE((#500,#501));
+#511=IFCEDGECURVE(#502,#503,#510,.T.);
+#512=IFCORIENTEDEDGE(*,*,#508,.T.);
+#513=IFCORIENTEDEDGE(*,*,#511,.T.);
+#514=IFCORIENTEDEDGE(*,*,#509,.F.);
+#515=IFCORIENTEDEDGE(*,*,#511,.F.);
+#516=IFCEDGELOOP((#512,#513,#514,#515));
+#517=IFCFACEOUTERBOUND(#516,.T.);
+#518=IFCCYLINDRICALSURFACE(#6,1000.);
+#519=IFCADVANCEDFACE((#517),#518,.T.);
+#520=IFCEDGELOOP((#512));
+#521=IFCFACEOUTERBOUND(#520,.T.);
+#522=IFCAXIS2PLACEMENT3D(#5,#59,$);
+#523=IFCPLANE(#522);
+#524=IFCADVANCEDFACE((#521),#523,.T.);
+#525=IFCORIENTEDEDGE(*,*,#509,.T.);
+#526=IFCEDGELOOP((#525));
+#527=IFCFACEOUTERBOUND(#526,.T.);
+#528=IFCPLANE(#506);
+#529=IFCADVANCEDFACE((#527),#528,.T.);
+#530=IFCCLOSEDSHELL((#519,#524,#529));
+#531=IFCADVANCEDBREP(#530);
+#532=IFCSHAPEREPRESENTATION($,'Body','AdvancedBrep',(#531));
+#533=IFCPRODUCTDEFINITIONSHAPE($,$,(#532));
+#534=IFCCOLUMN('c',$,$,$,$,#100,#533,$,$);
+#535=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#534),#30);
+";
+        let (m, report) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        assert_eq!(report.items.get("IfcAdvancedBrep"), Some(&1));
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        let disk = 12.0 * 1000.0 * 1000.0 * (TAU / 24.0).sin();
+        assert!(near(solid_volume(&m, "IfcColumn"), disk * 1000.0, 1e-6));
+    }
+
+    #[test]
+    fn far_site_is_moved_and_georeferenced() {
+        // The site 2500 km east and 5600 km north (millimeters), at 48°8' N 11°34'30" E,
+        // with a map conversion turned a quarter turn; a slab's points far away too.
+        let body = "\
+#7=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#6,$);
+#8=IFCPROJECTEDCRS('EPSG:25832',$,$,$,$,$,$);
+#9=IFCMAPCONVERSION(#7,#8,100.,200.,10.,0.,1.,$);
+#50=IFCWALL('w',$,'Wall',$,$,#100,#52,$,$);
+#52=IFCPRODUCTDEFINITIONSHAPE($,$,(#55));
+#55=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#56));
+#56=IFCEXTRUDEDAREASOLID(#57,$,#58,2500.);
+#57=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4000.,200.);
+#58=IFCDIRECTION((0.,0.,1.));
+#60=IFCCARTESIANPOINTLIST3D(((9000000000.,0.,0.),(9000001000.,0.,0.),(9000000000.,1000.,0.)));
+#61=IFCTRIANGULATEDFACESET(#60,$,$,((1,2,3)),$);
+#62=IFCSHAPEREPRESENTATION($,'Body','Tessellation',(#61));
+#63=IFCPRODUCTDEFINITIONSHAPE($,$,(#62));
+#64=IFCSLAB('s',$,'Far slab',$,$,#65,#63,$,$);
+#65=IFCLOCALPLACEMENT(#100,#66);
+#66=IFCAXIS2PLACEMENT3D(#67,$,$);
+#67=IFCCARTESIANPOINT((-9000000000.,0.,0.));
+#70=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#50,#64),#30);
+";
+        let text = file(body)
+            .replace(
+                "#10=IFCSITE('s',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);",
+                "#10=IFCSITE('s',$,'Site',$,$,#11,$,$,.ELEMENT.,(48,8,0,0),(11,34,30,0),$,$,$);",
+            )
+            .replace(
+                "#11=IFCLOCALPLACEMENT($,#6);",
+                "#11=IFCLOCALPLACEMENT($,#12);\n#12=IFCAXIS2PLACEMENT3D(#13,$,$);\n#13=IFCCARTESIANPOINT((2500000000.,5600000000.,0.));",
+            );
+        let (m, report) = import(text.as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        assert_eq!(report.moved, DVec3::new(2_500_000.0, 5_600_000.0, 0.0));
+        assert!(report.summary().contains("moved"));
+        // The wall is near the origin now; every definition's points are small.
+        let wall = body_of(&m, "IfcWall");
+        assert!(wall.vertices.values().all(|v| v.pos.length() < 1e4));
+        let slab = body_of(&m, "IfcSlab");
+        assert!(slab.vertices.values().all(|v| v.pos.length() < 1e4));
+        let mut pts = Vec::new();
+        world_points(&m, &m.root, DMat4::IDENTITY, &mut pts);
+        let wall_world = pts.iter().map(|p| p.length()).fold(f64::MAX, f64::min);
+        assert!(wall_world < 1e4 / 25.4 * 1000.0, "{wall_world}");
+        let g = m.geo;
+        assert!(g.located);
+        assert!((m.shadows.latitude - (48.0 + 8.0 / 60.0)).abs() < 1e-9);
+        assert!((m.shadows.longitude - (11.0 + 34.5 / 60.0)).abs() < 1e-9);
+        assert!((g.north_angle - 90.0).abs() < 1e-9);
+        assert_eq!(g.epsg, 25832);
+        // Map coordinates of the new origin (map units are the file's millimeters):
+        // the move turned a quarter turn, plus the conversion's offset.
+        let want = DVec3::new(100.0 - 5.6e9, 200.0 + 2.5e9, 10.0) * 0.001;
+        assert!((g.map_origin - want).length() < 1e-6, "{}", g.map_origin);
+    }
+
+    #[test]
+    fn texture_maps() {
+        // A textured triangle: an embedded PNG (blob) and one read by URL.
+        let png = ifc_geom::png(1, 1, 3, &[10, 200, 30]).unwrap();
+        let hex: String = png.iter().map(|b| format!("{b:02X}")).collect();
+        let body = format!(
+            "\
+#60=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1000.,0.,0.),(0.,1000.,0.)));
+#61=IFCTRIANGULATEDFACESET(#60,$,$,((1,2,3)),$);
+#62=IFCTEXTUREVERTEXLIST(((0.,0.),(2.,0.),(0.,2.)));
+#63=IFCBLOBTEXTURE(.T.,.T.,$,$,$,'PNG',\"0{hex}\");
+#64=IFCINDEXEDTRIANGLETEXTUREMAP((#63),#61,#62,((1,2,3)));
+#70=IFCCARTESIANPOINTLIST3D(((0.,0.,500.),(1000.,0.,500.),(0.,1000.,500.)));
+#71=IFCTRIANGULATEDFACESET(#70,$,$,((1,2,3)),$);
+#73=IFCIMAGETEXTURE(.T.,.T.,$,$,$,'maps/wood.png');
+#74=IFCINDEXEDTRIANGLETEXTUREMAP((#73),#71,#62,$);
+#80=IFCSHAPEREPRESENTATION($,'Body','Tessellation',(#61,#71));
+#81=IFCPRODUCTDEFINITIONSHAPE($,$,(#80));
+#82=IFCSLAB('s',$,$,$,$,#100,#81,$,$);
+#83=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#82),#30);
+"
+        );
+        let read = |name: &str| (name == "maps/wood.png").then(|| png.clone());
+        let (m, _) = import_with(file(&body).as_bytes(), &IfcOptions::default(), &read).unwrap();
+        valid(&m);
+        let textured: Vec<&Material> = m.materials.iter().filter(|x| x.texture.is_some()).collect();
+        assert_eq!(textured.len(), 2);
+        assert!(textured.iter().any(|x| x.name == "wood"));
+        let slab = body_of(&m, "IfcSlab");
+        assert_eq!(slab.faces.len(), 2);
+        assert!(slab.faces.values().all(|f| f.attrs.uv.is_some()));
+        // Without the file: the image texture is counted as skipped.
+        let (_, report) = import(file(&body).as_bytes(), &IfcOptions::default()).unwrap();
+        assert_eq!(report.skipped.get("IfcImageTexture"), Some(&1));
     }
 
     #[test]

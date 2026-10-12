@@ -442,7 +442,11 @@ impl App {
         let opts = formats::ifc::IfcOptions {
             merge_coplanar: d.merge,
         };
-        let (model, report) = match read.and_then(|b| formats::ifc::import(&b, &opts)) {
+        // Texture images named by the file, relative to its folder.
+        let dir = d.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let images = move |name: &str| std::fs::read(dir.join(name)).ok();
+        let (model, report) = match read.and_then(|b| formats::ifc::import_with(&b, &opts, &images))
+        {
             Ok(x) => x,
             Err(e) => {
                 self.file_error("import", &d.path, e);
@@ -477,7 +481,20 @@ impl App {
             return;
         };
         let mut placed = None;
+        // A file's geo-location (IFC sites) is taken when the model has none.
+        let (geo, lat, lon) = (model.geo, model.shadows.latitude, model.shadows.longitude);
         doc.edit_model(|m, active| {
+            if !m.geo.located && m.geo.map_origin == glam::DVec3::ZERO {
+                if geo.located {
+                    m.shadows.latitude = lat;
+                    m.shadows.longitude = lon;
+                    m.geo = geo;
+                } else if geo.map_origin != glam::DVec3::ZERO || geo.epsg != 0 {
+                    m.geo.map_origin = geo.map_origin;
+                    m.geo.epsg = geo.epsg;
+                    m.geo.north_angle = geo.north_angle;
+                }
+            }
             let def = mt_kernel::import::merge_as_definition(m, model, name);
             active.instances.push(mt_kernel::Instance {
                 definition: def,

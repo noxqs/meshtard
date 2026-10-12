@@ -847,6 +847,19 @@ impl App {
                 .lost_focus();
             ui.end_row();
         });
+        if m.geo.map_origin != glam::DVec3::ZERO || m.geo.epsg != 0 {
+            // From an IFC import: where the model origin lies on the map.
+            let o = m.geo.map_origin;
+            let crs = if m.geo.epsg != 0 {
+                format!(" (EPSG:{})", m.geo.epsg)
+            } else {
+                String::new()
+            };
+            ui.label(format!(
+                "Map origin{crs}: E {:.3} m, N {:.3} m, H {:.3} m",
+                o.x, o.y, o.z
+            ));
+        }
         let mut north = m.geo.north_angle;
         ui.horizontal(|ui| {
             ui.label("North angle");

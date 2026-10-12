@@ -7,7 +7,8 @@
 //! and whether every definition and the root pass `mt_kernel::validate` (`valid`, or
 //! `INVALID` with the first problem; `topology INVALID` when even
 //! `Checks::TOPOLOGY` fails). IFC files also print the importer's report.
-//! `--errors` also counts every problem `validate` reports, by kind.
+//! `--errors` also counts every problem `validate` reports, by kind. With
+//! `IFC_OUT=DIR` every model is also exported as IFC4 into DIR.
 
 use std::path::Path;
 
@@ -29,13 +30,29 @@ fn depth(model: &Model, ents: &Entities, seen: &mut Vec<DefinitionId>) -> usize 
     best
 }
 
-/// World bounds of the model's vertices (inches).
+thread_local! {
+    static VOLUME: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// World bounds of the model's vertices (inches), and the world faces' signed volume
+/// added to `VOLUME`.
 fn bounds(model: &Model, ents: &Entities, xf: glam::DMat4, depth: usize, b: &mut [glam::DVec3; 2]) {
     for v in ents.vertices.values() {
         let p = xf.transform_point3(v.pos);
         b[0] = b[0].min(p);
         b[1] = b[1].max(p);
     }
+    // Signed volume of the world faces (cubic inches), kept in b[2]'s x.
+    VOLUME.with(|vol| {
+        let mut v = vol.get();
+        for f in ents.faces.keys() {
+            for [p, q, r] in mt_kernel::tessellate::triangulate(ents, f) {
+                let [p, q, r] = [p, q, r].map(|x| xf.transform_point3(x));
+                v += p.dot(q.cross(r)) / 6.0;
+            }
+        }
+        vol.set(v);
+    });
     if depth > 32 {
         return;
     }
@@ -62,14 +79,30 @@ fn import(path: &Path) -> Result<Model, String> {
         }
         "gltf" | "glb" => mt_kernel::gltf_io::import(&bytes, &read, true),
         "ifc" | "ifczip" => {
-            let (model, report) = mt_kernel::formats::ifc::import(&bytes, &Default::default())?;
+            let (model, report) =
+                mt_kernel::formats::ifc::import_with(&bytes, &Default::default(), &read)?;
             println!(
                 "{}: {} ({} m per unit)",
                 path.display(),
                 report.summary(),
                 report.meters_per_unit
             );
-            println!("  cut {:?}; skipped {:?}", report.cut, report.skipped);
+            println!(
+                "  cut {:?}; joined {:?}; skipped {:?}",
+                report.cut, report.joined, report.skipped
+            );
+            let g = model.geo;
+            if g.located || g.map_origin != glam::DVec3::ZERO || g.north_angle != 0.0 {
+                println!(
+                    "  geo: located {} lat {:.6} lon {:.6} north {:.3} map origin {:.3?} EPSG {}",
+                    g.located,
+                    model.shadows.latitude,
+                    model.shadows.longitude,
+                    g.north_angle,
+                    g.map_origin,
+                    g.epsg
+                );
+            }
             Ok(model)
         }
         "fbx" => {
@@ -136,6 +169,20 @@ fn main() {
             }
         };
         let imported = start.elapsed().as_secs_f64();
+        // `IFC_OUT=DIR` also writes each model as IFC4 (millimeters) into DIR.
+        if let Some(dir) = std::env::var_os("IFC_OUT") {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+            let opts = mt_kernel::formats::ExportOptions {
+                units: mt_kernel::mesh_export::Units::Millimeters,
+                base_name: stem.to_owned(),
+                ..Default::default()
+            };
+            let files = mt_kernel::formats::ifc_export::to_ifc(&model, &opts);
+            let out = Path::new(&dir).join(format!("{stem}.ifc"));
+            if let Err(e) = std::fs::write(&out, files.main) {
+                println!("{}: ERROR {e}", out.display());
+            }
+        }
         let all: Vec<&Entities> = std::iter::once(&model.root)
             .chain(model.definitions.values().map(|d| &d.entities))
             .collect();
@@ -155,10 +202,16 @@ fn main() {
         }
         let components = model.definitions.values().filter(|d| !d.is_group).count();
         let mut b = [glam::DVec3::splat(f64::MAX), glam::DVec3::splat(f64::MIN)];
+        VOLUME.with(|v| v.set(0.0));
         bounds(&model, &model.root, glam::DMat4::IDENTITY, 0, &mut b);
         if b[0].x <= b[1].x {
             let m = 0.0254;
-            println!("{arg}: bounds {:.2} .. {:.2} m", b[0] * m, b[1] * m);
+            let vol = VOLUME.with(|v| v.get()) * m * m * m;
+            println!(
+                "{arg}: bounds {:.2} .. {:.2} m, face volume {vol:.6} m3",
+                b[0] * m,
+                b[1] * m
+            );
         }
         println!(
             "{arg}: {} components, {} groups, {} instances, depth {}, {} faces, {} edges, {} curves, {} texts, {} dimensions, {} materials, {} (import {:.1}s, total {:.1}s)",
