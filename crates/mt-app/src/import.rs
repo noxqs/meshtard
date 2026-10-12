@@ -21,11 +21,11 @@
 //!   ([`formats::Kind::default_hints`], unverified). Materials come with their colors
 //!   and PNG/JPEG textures (OBJ `map_Kd`, FBX, PLY, 3MF, 3DS); a textured material's
 //!   color becomes the image's average color. See [`mt_kernel::formats`].
-//! - PNG and JPEG images ask "Use as: Image / Texture" (SketchUp has this choice in its
-//!   import dialog; the default Image is from memory). Image: an image entity placed
-//!   with two clicks (`image_entity`). Texture: two clicks on a face set the size and
-//!   position of one tile; the face side gets a new material with the picture. Matched
-//!   Photo is not done.
+//! - PNG and JPEG images ask "Use as: Image / Texture / New Matched Photo" (SketchUp
+//!   has this choice in its import dialog; the default Image is from memory). Image: an
+//!   image entity placed with two clicks (`image_entity`). Texture: two clicks on a face
+//!   set the size and position of one tile; the face side gets a new material with the
+//!   picture. New Matched Photo: as Camera > Match New Photo (`match_photo`).
 
 use std::path::{Path, PathBuf};
 
@@ -62,6 +62,8 @@ pub(crate) struct MeshImport {
     layers: LayerMode,
     /// Images: "Use as texture" (else an image entity).
     as_texture: bool,
+    /// Images: "Use as new matched photo" (wins over `as_texture`).
+    as_photo: bool,
     /// PLY: vertex and face colors become materials.
     colors: bool,
 }
@@ -82,6 +84,7 @@ impl MeshImport {
             merge: true,
             layers: LayerMode::Groups,
             as_texture: false,
+            as_photo: false,
             colors: true,
         }
     }
@@ -366,8 +369,16 @@ impl App {
                     }
                     Kind::Image => {
                         ui.label("Use image as:");
-                        ui.radio_value(&mut d.as_texture, false, "Image");
-                        ui.radio_value(&mut d.as_texture, true, "Texture");
+                        let mut choice = if d.as_photo {
+                            2
+                        } else {
+                            usize::from(d.as_texture)
+                        };
+                        ui.radio_value(&mut choice, 0, "Image");
+                        ui.radio_value(&mut choice, 1, "Texture");
+                        ui.radio_value(&mut choice, 2, "New Matched Photo");
+                        d.as_texture = choice == 1;
+                        d.as_photo = choice == 2;
                     }
                 }
                 crate::presentation::ok_cancel(ui, "Import")
@@ -389,6 +400,7 @@ impl App {
                             Err(e) => self.file_error("import", &d.path, e),
                         },
                         Kind::Dxf => self.import_dxf(&d, &device),
+                        Kind::Image if d.as_photo => self.match_new_photo(&d.path),
                         Kind::Image => self.import_image(&d.path, d.as_texture),
                     }
                 }

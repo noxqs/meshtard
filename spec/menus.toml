@@ -180,6 +180,7 @@ items = [
   { id = "camera.two_point", label = "Two-Point Perspective" },
   { separator = true },
   { id = "camera.match_new_photo", label = "Match New Photo..." },
+  { id = "camera.edit_matched_photo", label = "Edit Matched Photo" },
   { separator = true },
   { id = "camera.orbit", label = "Orbit" },
   { id = "camera.pan", label = "Pan" },

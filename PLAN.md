@@ -205,7 +205,7 @@ Reading first means real SketchUp models are available for testing everything el
 
 ### M13: Presentation and the rest (FEATURES.md Tier 3)
 - [x] Sandbox From Scratch and From Contours (Delaunay TIN), 3D Text (ttf-parser outlines, bundled Ubuntu Light and Hack), image entities from File > Import (PNG/JPEG) with Explode to a textured face (FEATURES.md items 29, 31, 30 part 1).
-- Not done: Match New Photo, Smoove/Stamp/Drape, images saved as image entities (they are saved as groups).
+- Not done: Smoove/Stamp/Drape, images saved as image entities (they are saved as groups).
 - [x] Items 32-38: Export Section Slice (R12 DXF), Export Animation (numbered PNG/JPEG frames), Print Setup / Print Preview / Print (one-page PDF written directly, opened in the system viewer), templates (New from Template, Save As Template, default template for File > New), Generate Report (CSV/HTML), Manage Trays (named trays, one docked at a time), About; Help links open the project page.
 - Not done: DWG, MP4 (no small pure-Rust encoder), OS print dialog, tiled printing, several trays shown at once, report templates over attributes.
 

@@ -28,6 +28,7 @@ pub mod model_data;
 pub mod offset;
 pub mod ops;
 pub mod orient;
+pub mod photo_match;
 pub mod purge;
 pub mod push_pull;
 pub mod snaps;
