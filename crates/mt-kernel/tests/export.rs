@@ -463,6 +463,55 @@ fn annotations_round_trip() {
     assert!((d.offset - dim.offset).length() < 1e-12, "{:?}", d.offset);
 }
 
+/// Texts and dimensions keep their tags through save and reopen, and through File >
+/// Import into a model whose tags are numbered differently.
+#[test]
+fn annotation_tags_round_trip() {
+    use mt_kernel::annotation::{Dimension, Text};
+    let mut m = Model::default();
+    for name in ["Notes", "Dims"] {
+        m.layers.push(Layer {
+            name: name.into(),
+            ..Layer::default()
+        });
+    }
+    add_line(&mut m.root, DVec3::ZERO, DVec3::X * 10.0);
+    let mut tagged = Text::leader(DVec3::X * 5.0, DVec3::splat(10.0), "Edge".into());
+    tagged.layer = Some(1);
+    let plain = Text::leader(DVec3::ZERO, DVec3::Z, "Plain".into());
+    m.root.texts = vec![tagged, plain];
+    m.root.dimensions = vec![
+        Dimension::linear(DVec3::ZERO, DVec3::X * 10.0, DVec3::Y * 3.0),
+        Dimension {
+            layer: Some(2),
+            ..Dimension::linear(DVec3::ZERO, DVec3::Y * 4.0, DVec3::X * 2.0)
+        },
+    ];
+    let r = round_trip(&m);
+    let names = |m: &Model, l: Option<usize>| l.map(|i| m.layers[i].name.clone());
+    let texts: Vec<_> = r.root.texts.iter().map(|t| names(&r, t.layer)).collect();
+    assert_eq!(texts, [Some("Notes".into()), None]);
+    let dims: Vec<_> = r
+        .root
+        .dimensions
+        .iter()
+        .map(|d| names(&r, d.layer))
+        .collect();
+    assert_eq!(dims, [None, Some("Dims".into())]);
+
+    let mut dst = Model::default();
+    dst.layers.push(Layer {
+        name: "Dims".into(),
+        ..Layer::default()
+    });
+    let def = import::merge_as_definition(&mut dst, r, "Imported");
+    let e = &dst.definitions[def].entities;
+    let texts: Vec<_> = e.texts.iter().map(|t| names(&dst, t.layer)).collect();
+    assert_eq!(texts, [Some("Notes".into()), None]);
+    let dims: Vec<_> = e.dimensions.iter().map(|d| names(&dst, d.layer)).collect();
+    assert_eq!(dims, [None, Some("Dims".into())]);
+}
+
 /// The model's face colors survive save and reopen (written into the file's style).
 #[test]
 fn face_colors_round_trip() {

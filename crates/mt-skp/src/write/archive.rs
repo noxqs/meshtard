@@ -66,7 +66,8 @@ const DIM_FONT_PAYLOAD: [u8; 34] = hex_bytes(concat!(
 ));
 /// Leader-text delimiter: `[u32 1][u8 flag=1][u8 0][u32 arrow=3 closed][u8 1]`.
 const TEXT_DELIM: [u8; 11] = hex_bytes("0100000001000300000001");
-/// Drawbase used by texts, dimensions and guides.
+/// Drawbase used by guides and section planes (texts and dimensions write theirs
+/// with their layer).
 const DIM_DRAWBASE: [u8; 10] = hex_bytes("00000001010000000000");
 
 /// Persistent-ID encoding: a mask byte (bit i set when byte i of the id is
@@ -729,17 +730,19 @@ impl ArchiveWriter {
         }
     }
 
-    /// A leader text pinned at `p` with its label at `label`.
+    /// A leader text pinned at `p` with its label at `label`, on layer slot
+    /// `layer` (0 = Layer0) in its drawbase like an edge's.
     pub fn text(
         &mut self,
         text: &str,
         p: Point3,
         label: Point3,
+        layer: u32,
         font_slot: &mut Option<u32>,
     ) -> Result<(), WriteError> {
         self.new_object("CText", 9);
         self.preamble();
-        self.raw(&DIM_DRAWBASE);
+        self.drawbase(0, layer, false, EdgeFlags::default());
         self.font(font_slot);
         self.f64s(&[0.0, 0.0]); // screen-fraction slot (unused)
         self.u32(1); // free connection
@@ -779,17 +782,18 @@ impl ArchiveWriter {
         self.f64s(&plane);
     }
 
-    /// A free linear dimension between `a` and `b`.
+    /// A free linear dimension between `a` and `b`, on layer slot `layer`.
     pub fn dimension(
         &mut self,
         a: Point3,
         b: Point3,
         offset: f64,
+        layer: u32,
         font_slot: &mut Option<u32>,
     ) -> Result<(), WriteError> {
         self.new_object("CDimensionLinear", 6);
         self.preamble();
-        self.raw(&DIM_DRAWBASE);
+        self.drawbase(0, layer, false, EdgeFlags::default());
         self.string("")?; // auto-computed measurement text
         self.font(font_slot);
         // connection 1: [u8 0][u32 0][u32 type=1][u32 4][point A], null ref

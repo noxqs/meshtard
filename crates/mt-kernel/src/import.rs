@@ -33,6 +33,13 @@ struct Maps<'a> {
     definitions: HashMap<i64, DefinitionId>,
 }
 
+impl Maps<'_> {
+    /// The tag of a file layer name (`None` for Layer0 and unknown names).
+    fn layer(&self, name: &str) -> Option<LayerId> {
+        self.layers.get(name).copied().filter(|&l| l != 0)
+    }
+}
+
 pub fn from_skp(src: &skp::Model) -> Model {
     let mut model = Model::default();
     // The working copy holds the settings the model displays (edits not yet
@@ -133,7 +140,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
     // Model-level dimensions are world space (VFF: including those inside components);
     // legacy files list the root's there too.
     if !src.dimensions.is_empty() {
-        model.root.dimensions = dimensions(&src.dimensions);
+        model.root.dimensions = dimensions(&src.dimensions, &maps);
     }
     // A section plane is stored as its plane only; SketchUp draws it around the
     // model, so its point is the model's bounding box center projected onto it.
@@ -339,6 +346,12 @@ pub fn merge_as_definition(dst: &mut Model, src: Model, name: &str) -> Definitio
             mat(&mut i.material);
             lay(&mut i.layer);
         }
+        for t in &mut ents.texts {
+            lay(&mut t.layer);
+        }
+        for d in &mut ents.dimensions {
+            lay(&mut d.layer);
+        }
     };
     for (old, mut d) in src_defs {
         remap(&mut d.entities);
@@ -362,7 +375,7 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
         vertices.insert(id, ents.add_vertex(DVec3::new(v.x, v.y, v.z)));
     }
     let mut edges: HashMap<i64, EdgeId> = HashMap::new();
-    let layer = |name: &str| maps.layers.get(name).copied().filter(|&l| l != 0);
+    let layer = |name: &str| maps.layer(name);
     // One kernel curve per file curve; arcs get their arc data below.
     let mut curves: HashMap<i64, crate::entities::CurveId> = HashMap::new();
     for (&id, e) in &d.edges {
@@ -454,8 +467,8 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             attrs: Default::default(),
         });
     }
-    ents.texts = texts(d);
-    ents.dimensions = dimensions(&d.dimensions);
+    ents.texts = texts(d, maps);
+    ents.dimensions = dimensions(&d.dimensions, maps);
     ents.guides = guides(d);
     // Drawn around the definition's own geometry (the root's are placed around the
     // whole model by the caller).
@@ -546,28 +559,38 @@ fn section_planes(
 /// Dimensions with known endpoints. A dimension whose offset direction the reader
 /// derived (legacy files) is built from it; the others go through
 /// [`dimensions_from_skp`](crate::annotation::dimensions_from_skp) (VFF plane fields).
-fn dimensions(dims: &[skp::Dimension]) -> Vec<crate::annotation::Dimension> {
+fn dimensions(dims: &[skp::Dimension], maps: &Maps) -> Vec<crate::annotation::Dimension> {
     dims.iter()
-        .flat_map(|d| match (d.a, d.b, d.offset_direction) {
-            (Some(a), Some(b), Some(dir)) => {
-                let (a, b) = (DVec3::from(a), DVec3::from(b));
-                (a.distance(b) > crate::TOL)
-                    .then(|| crate::annotation::Dimension {
-                        text: (!d.text.is_empty()).then(|| d.text.clone()),
-                        hidden: d.hidden,
-                        ..crate::annotation::Dimension::linear(a, b, DVec3::from(dir) * d.offset)
-                    })
-                    .into_iter()
-                    .collect()
+        .flat_map(|d| {
+            let mut out = dimension(d);
+            for x in &mut out {
+                x.layer = maps.layer(&d.layer);
             }
-            _ => crate::annotation::dimensions_from_skp(std::slice::from_ref(d)),
+            out
         })
         .collect()
 }
 
+fn dimension(d: &skp::Dimension) -> Vec<crate::annotation::Dimension> {
+    match (d.a, d.b, d.offset_direction) {
+        (Some(a), Some(b), Some(dir)) => {
+            let (a, b) = (DVec3::from(a), DVec3::from(b));
+            (a.distance(b) > crate::TOL)
+                .then(|| crate::annotation::Dimension {
+                    text: (!d.text.is_empty()).then(|| d.text.clone()),
+                    hidden: d.hidden,
+                    ..crate::annotation::Dimension::linear(a, b, DVec3::from(dir) * d.offset)
+                })
+                .into_iter()
+                .collect()
+        }
+        _ => crate::annotation::dimensions_from_skp(std::slice::from_ref(d)),
+    }
+}
+
 /// Leader and screen texts. A text anchored to an entity whose position is not
 /// decoded (e.g. a face) keeps its label position, without a leader.
-fn texts(d: &skp::Definition) -> Vec<crate::annotation::Text> {
+fn texts(d: &skp::Definition, maps: &Maps) -> Vec<crate::annotation::Text> {
     use crate::annotation::Text;
     d.texts
         .iter()
@@ -586,6 +609,7 @@ fn texts(d: &skp::Definition) -> Vec<crate::annotation::Text> {
                 (None, None, None) => return None,
             };
             out.hidden = t.hidden;
+            out.layer = maps.layer(&t.layer);
             Some(out)
         })
         .collect()

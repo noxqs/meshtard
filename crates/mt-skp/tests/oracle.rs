@@ -217,27 +217,80 @@ fn vff_matches_oracle() {
 
 #[test]
 fn legacy_matches_oracle() {
-    check(&[
-        "blank_v17.skp",
-        "capilla_quiroz_v17.skp",
-        "chair_and_table.skp",
-        "gondola_v20.skp",
-        "legacy_annotations.skp",
-        "legacy_v2014_synthetic.skp",
-        "legacy_v3_synthetic.skp",
-        "legacy_v6_synthetic.skp",
-        "legacy_v7_synthetic.skp",
-        "single_material_v17.skp",
-        "zero_material_custom_layer_v18.skp",
-        "create_arc.skp",
-        "create_attributes.skp",
-        "create_auto_triangulate.skp",
-        "create_circle.skp",
-        "create_holes.skp",
-        "create_materials_and_layers.skp",
-        "create_multi_face_shared_edge.skp",
-        "create_polyline.skp",
-        "create_single_face.skp",
-        "create_slot_boundary.skp",
-    ]);
+    check(LEGACY);
+}
+
+const LEGACY: &[&str] = &[
+    "blank_v17.skp",
+    "capilla_quiroz_v17.skp",
+    "chair_and_table.skp",
+    "gondola_v20.skp",
+    "legacy_annotations.skp",
+    "legacy_v2014_synthetic.skp",
+    "legacy_v3_synthetic.skp",
+    "legacy_v6_synthetic.skp",
+    "legacy_v7_synthetic.skp",
+    "single_material_v17.skp",
+    "zero_material_custom_layer_v18.skp",
+    "create_arc.skp",
+    "create_attributes.skp",
+    "create_auto_triangulate.skp",
+    "create_circle.skp",
+    "create_holes.skp",
+    "create_materials_and_layers.skp",
+    "create_multi_face_shared_edge.skp",
+    "create_polyline.skp",
+    "create_single_face.skp",
+    "create_slot_boundary.skp",
+];
+
+/// Texts' and dimensions' layers, which `tools/oracle_dump.py` leaves out (OpenSKP
+/// keeps them in its archive only): `tests/oracle/read_annotation_layers.py` reads
+/// them. Compared as sorted `(text, layer)` lists over the whole file (root and
+/// definitions). No corpus file has an annotation off Layer0 (the writer test
+/// `annotation_tags_round_trip` covers tagged ones).
+#[test]
+fn legacy_annotation_layers_match_oracle() {
+    if !oracle_available() {
+        eprintln!("SKIPPED: python3 with openskp not available (see tools/README.md)");
+        return;
+    }
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/oracle/read_annotation_layers.py");
+    for name in LEGACY {
+        let file = repo().join("tests/corpus/openskp").join(name);
+        let out = Command::new("python3")
+            .arg("-I")
+            .arg(&script)
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let j: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let theirs = |k: &str| {
+            let mut v: Vec<(String, Option<String>)> =
+                serde_json::from_value(j[k].clone()).unwrap();
+            v.sort();
+            v
+        };
+        let m = mt_skp::read(&file).unwrap();
+        let defs = || std::iter::once(&m.root).chain(m.definitions.values());
+        let tag = |l: &str| (!l.is_empty()).then(|| l.to_owned());
+        let mut texts: Vec<_> = defs()
+            .flat_map(|d| &d.texts)
+            .map(|t| (t.text.clone(), tag(&t.layer)))
+            .collect();
+        texts.sort();
+        let mut dims: Vec<_> = defs()
+            .flat_map(|d| &d.dimensions)
+            .map(|d| (d.text.clone(), tag(&d.layer)))
+            .collect();
+        dims.sort();
+        assert_eq!(texts, theirs("text"), "{name}: text layers");
+        assert_eq!(dims, theirs("dimension"), "{name}: dimension layers");
+    }
 }

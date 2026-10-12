@@ -1477,15 +1477,17 @@ impl SkpBuilder {
         text: &str,
         point: Point3,
         leader: Point3,
+        layer: Option<LayerId>,
     ) -> Result<(), WriteError> {
         check_string(text)?;
         check_points(&[point, leader])?;
+        let layer = self.layer_slot(layer)?;
         if s == Section::Root {
             self.ensure_geometry_writer()?;
         }
         let label = [0, 1, 2].map(|i| point[i] + leader[i]);
         let mut font = self.font_slot;
-        self.writer(s).text(text, point, label, &mut font)?;
+        self.writer(s).text(text, point, label, layer, &mut font)?;
         self.font_slot = font;
         body.new_entities += 1;
         Ok(())
@@ -1658,14 +1660,26 @@ impl SkpBuilder {
     /// A free linear dimension between two points; `offset` is the signed
     /// distance of the dimension line from the measured segment.
     pub fn add_dimension(&mut self, p1: Point3, p2: Point3, offset: f64) -> Result<(), WriteError> {
+        self.add_dimension_on(p1, p2, offset, None)
+    }
+
+    /// [`add_dimension`](Self::add_dimension) on a layer (`None` = Layer0).
+    pub fn add_dimension_on(
+        &mut self,
+        p1: Point3,
+        p2: Point3,
+        offset: f64,
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
         check_points(&[p1, p2, [offset; 3]])?;
+        let layer = self.layer_slot(layer)?;
         self.ensure_geometry_writer()?;
         if p1 == p2 {
             return Err(invalid("dimension endpoints coincide"));
         }
         let mut font = self.font_slot;
         self.writer(Section::Root)
-            .dimension(p1, p2, offset, &mut font)?;
+            .dimension(p1, p2, offset, layer, &mut font)?;
         self.font_slot = font;
         self.body.new_entities += 1;
         self.root_items += 1;
@@ -1680,7 +1694,18 @@ impl SkpBuilder {
         point: Point3,
         leader: Point3,
     ) -> Result<(), WriteError> {
-        self.with_root(|s, b| s.text_op(Section::Root, b, text, point, leader))?;
+        self.add_text_on(text, point, leader, None)
+    }
+
+    /// [`add_text`](Self::add_text) on a layer (`None` = Layer0).
+    pub fn add_text_on(
+        &mut self,
+        text: &str,
+        point: Point3,
+        leader: Point3,
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
+        self.with_root(|s, b| s.text_op(Section::Root, b, text, point, leader, layer))?;
         self.root_items += 1;
         Ok(())
     }
@@ -2069,8 +2094,25 @@ impl DefinitionBuilder<'_> {
         point: Point3,
         leader: Point3,
     ) -> Result<(), WriteError> {
-        self.skp
-            .text_op(Section::Definition, &mut self.body, text, point, leader)
+        self.add_text_on(text, point, leader, None)
+    }
+
+    /// [`add_text`](Self::add_text) on a layer (`None` = Layer0).
+    pub fn add_text_on(
+        &mut self,
+        text: &str,
+        point: Point3,
+        leader: Point3,
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
+        self.skp.text_op(
+            Section::Definition,
+            &mut self.body,
+            text,
+            point,
+            leader,
+            layer,
+        )
     }
 
     pub fn add_construction_point(&mut self, position: Point3) -> Result<(), WriteError> {
