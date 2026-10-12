@@ -142,6 +142,57 @@ impl Dimension {
     }
 }
 
+/// How much of segment `a`-`b`'s length shows when seen along the unit direction
+/// `view`: 1 seen square on, 0 end-on (the sine of the angle between them).
+pub fn foreshortening(a: DVec3, b: DVec3, view: DVec3) -> f64 {
+    let d = (b - a).normalize_or_zero();
+    let v = view.normalize_or_zero();
+    if d == DVec3::ZERO || v == DVec3::ZERO {
+        return 1.0;
+    }
+    d.cross(v).length().min(1.0)
+}
+
+/// Whether `d` is associated with geometry of `ents` (Model Info > Dimensions >
+/// Expert Settings): the points it measures lie on vertices or edges there or in the
+/// groups and components placed in it (through their transforms). A radius
+/// dimension's center counts when its point on the arc does. Meshtard does not
+/// store which entities a dimension is attached to, so this is a geometric test.
+pub fn dimension_associated(model: &crate::Model, ents: &crate::Entities, d: &Dimension) -> bool {
+    let on = |p: DVec3| on_geometry(model, ents, glam::DMat4::IDENTITY, p, 0);
+    match d.kind {
+        DimensionKind::Radius => on(d.b),
+        DimensionKind::Linear | DimensionKind::Diameter => on(d.a) && on(d.b),
+    }
+}
+
+/// `p` (in the coordinates `xf` maps `ents` to) lies on a vertex or edge of `ents`
+/// or of what is nested in it (a few levels deep).
+fn on_geometry(
+    model: &crate::Model,
+    ents: &crate::Entities,
+    xf: glam::DMat4,
+    p: DVec3,
+    depth: usize,
+) -> bool {
+    let on_edge = ents.edges.values().any(|e| {
+        let (a, b) = (
+            xf.transform_point3(ents.pos(e.start)),
+            xf.transform_point3(ents.pos(e.end)),
+        );
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.length_squared().max(1e-24)).clamp(0.0, 1.0);
+        (a + ab * t).distance(p) <= crate::TOL
+    });
+    on_edge
+        || (depth < 8
+            && ents.instances.iter().any(|inst| {
+                model.definitions.get(inst.definition).is_some_and(|def| {
+                    on_geometry(model, &def.entities, xf * inst.transform, p, depth + 1)
+                })
+            }))
+}
+
 /// A text: a leader text pointing at `point` with its label at `point + leader`, or a
 /// screen text fixed in the view.
 #[derive(Debug, Clone, PartialEq)]
@@ -273,6 +324,66 @@ mod tests {
         assert_eq!(d.line(), [DVec3::ZERO, DVec3::X * 5.0]);
         assert_eq!(d.label_point(), DVec3::new(7.0, 2.0, 0.0));
         assert_eq!(d.segments(1.0).len(), 2);
+    }
+
+    #[test]
+    fn foreshortening_is_the_sine_to_the_view() {
+        let (a, b) = (DVec3::ZERO, DVec3::X * 10.0);
+        assert!((foreshortening(a, b, DVec3::Z) - 1.0).abs() < 1e-12);
+        assert!(foreshortening(a, b, DVec3::X) < 1e-12);
+        let k = foreshortening(a, b, DVec3::new(1.0, 1.0, 0.0).normalize());
+        assert!((k - 0.5f64.sqrt()).abs() < 1e-12);
+        assert_eq!(foreshortening(a, a, DVec3::Z), 1.0);
+        let ex = crate::model_data::DimensionExpert::default();
+        assert!(ex.hidden(a, b, DVec3::X, Some(100.0)), "end-on");
+        assert!(ex.hidden(a, b, DVec3::Z, Some(3.0)), "too small");
+        assert!(!ex.hidden(a, b, DVec3::Z, Some(100.0)));
+        assert!(!ex.hidden(a, b, DVec3::Z, None));
+        let off = crate::model_data::DimensionExpert {
+            hide_foreshortened: false,
+            hide_small: false,
+            ..ex
+        };
+        assert!(!off.hidden(a, b, DVec3::X, Some(1.0)));
+    }
+
+    #[test]
+    fn association_with_edges_and_nested_geometry() {
+        let mut m = crate::Model::default();
+        crate::add_line(&mut m.root, DVec3::ZERO, DVec3::X * 10.0);
+        let d = Dimension::linear(DVec3::ZERO, DVec3::X * 10.0, DVec3::Y * 3.0);
+        assert!(dimension_associated(&m, &m.root, &d));
+        // A point along an edge counts; one off it does not.
+        let mid = Dimension::linear(DVec3::X * 4.0, DVec3::X * 10.0, DVec3::Y);
+        assert!(dimension_associated(&m, &m.root, &mid));
+        let free = Dimension::linear(DVec3::ZERO, DVec3::new(10.0, 5.0, 0.0), DVec3::Y);
+        assert!(!dimension_associated(&m, &m.root, &free));
+        // Geometry inside a group, moved by its transform.
+        let mut inner = crate::Entities::new();
+        crate::add_line(&mut inner, DVec3::ZERO, DVec3::Y * 5.0);
+        let def = m.definitions.insert(crate::Definition {
+            name: "g".into(),
+            entities: inner,
+            is_group: true,
+            ..Default::default()
+        });
+        m.root.instances.push(crate::Instance {
+            definition: def,
+            transform: glam::DMat4::from_translation(DVec3::X * 10.0),
+            name: String::new(),
+            hidden: false,
+            locked: false,
+            layer: None,
+            material: None,
+            attrs: Default::default(),
+        });
+        assert!(dimension_associated(&m, &m.root, &free));
+        // A radius dimension needs only its point on the arc.
+        let r = Dimension {
+            kind: DimensionKind::Radius,
+            ..Dimension::linear(DVec3::new(3.0, 3.0, 3.0), DVec3::X * 2.0, DVec3::Y)
+        };
+        assert!(dimension_associated(&m, &m.root, &r));
     }
 
     #[test]

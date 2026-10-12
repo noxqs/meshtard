@@ -212,6 +212,8 @@ pub struct StyleSettings {
     /// Overlays and underlays, bottom first. Model-only.
     pub watermarks: Vec<crate::style_extras::Watermark>,
     pub modeling_colors: crate::style_extras::ModelingColors,
+    /// Modeling Settings: hidden geometry and inference colors. Model-only.
+    pub modeling_extras: crate::style_extras::ModelingExtras,
 }
 
 /// Window > Fog. Distances are fractions of the model's depth as seen from the camera
@@ -273,6 +275,7 @@ impl Default for StyleSettings {
             background: Default::default(),
             watermarks: Vec::new(),
             modeling_colors: Default::default(),
+            modeling_extras: Default::default(),
         }
     }
 }
@@ -354,6 +357,8 @@ pub struct Model {
     /// Model Info > Dimensions and Text: styles of new dimensions and texts.
     pub dimension_style: crate::model_data::DimensionStyle,
     pub text_style: crate::model_data::TextStyle,
+    /// Model Info > Dimensions > Expert Settings. Model-only.
+    pub dimension_expert: crate::model_data::DimensionExpert,
     /// Model Info > Geo-location.
     pub geo: crate::model_data::GeoLocation,
     /// Environments panel.
@@ -387,6 +392,7 @@ impl Default for Model {
             edit_fade: Default::default(),
             dimension_style: Default::default(),
             text_style: Default::default(),
+            dimension_expert: Default::default(),
             geo: Default::default(),
             environment: Default::default(),
             rendering: Default::default(),

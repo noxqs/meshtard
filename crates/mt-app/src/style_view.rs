@@ -49,12 +49,14 @@ pub(crate) fn watermark_row(w: &Watermark) -> WatermarkRow {
         lock_aspect,
         scale: (scale * 100.0).round().clamp(10.0, 400.0) as u16,
         anchor,
+        mask: w.mask,
     }
 }
 
 /// Applies a panel row's settings to a watermark (its image stays).
 pub(crate) fn apply_watermark_row(w: &mut Watermark, r: &WatermarkRow) {
     w.overlay = r.overlay;
+    w.mask = r.mask;
     w.opacity = f32::from(r.opacity.min(100)) / 100.0;
     let scale = f32::from(r.scale.clamp(10, 400)) / 100.0;
     w.mode = match r.mode {
@@ -111,6 +113,11 @@ pub(crate) fn tray_extras(m: &Model) -> (StyleExtras, Vec<WatermarkRow>) {
         section_active: mc.section_active,
         section_inactive: mc.section_inactive,
         section_cut: mc.section_cut,
+        hidden_geometry: s.modeling_extras.hidden_geometry,
+        inference: {
+            let i = &s.modeling_extras.inference;
+            [i.endpoint, i.midpoint, i.on_edge, i.on_face]
+        },
     };
     (extras, s.watermarks.iter().map(watermark_row).collect())
 }
@@ -155,6 +162,14 @@ pub(crate) fn apply_extras(m: &mut Model, x: &StyleExtras) {
     mc.section_active = x.section_active;
     mc.section_inactive = x.section_inactive;
     mc.section_cut = x.section_cut;
+    let me = &mut s.modeling_extras;
+    me.hidden_geometry = x.hidden_geometry;
+    [
+        me.inference.endpoint,
+        me.inference.midpoint,
+        me.inference.on_edge,
+        me.inference.on_face,
+    ] = x.inference;
 }
 
 /// The renderer's style from the model's extras (on top of the spec defaults and the
@@ -193,6 +208,8 @@ pub(crate) fn apply_render(m: &Model, style: &mut mt_render::Style) {
             image: w.image.clone(),
             overlay: w.overlay,
             opacity: w.opacity,
+            // A mask shows the background color.
+            mask: w.mask.then_some(bg.color),
             placement: match w.mode {
                 WatermarkMode::Stretched { lock_aspect } => {
                     mt_render::WatermarkPlacement::Stretched { lock_aspect }
@@ -278,8 +295,15 @@ impl App {
                     overlay: false,
                     opacity: 0.5,
                     mode: WatermarkMode::Stretched { lock_aspect: true },
+                    mask: false,
                 });
                 true
+            }
+            Event::WatermarkMove(i, up) => {
+                let Some(doc) = self.document.as_mut() else {
+                    return false;
+                };
+                Watermark::reorder(&mut doc.model.style.watermarks, i, up).is_some()
             }
             Event::WatermarkRemove(i) => {
                 let Some(doc) = self.document.as_mut() else {
@@ -327,7 +351,11 @@ mod tests {
         x.ambient_occlusion = true;
         x.transparency = false;
         x.front_color = [1, 2, 3];
+        x.hidden_geometry = [9, 8, 7];
+        x.inference[2] = [1, 1, 1];
         apply_extras(&mut m, &x);
+        assert_eq!(m.style.modeling_extras.hidden_geometry, [9, 8, 7]);
+        assert_eq!(m.style.modeling_extras.inference.on_edge, [1, 1, 1]);
         assert_eq!(tray_extras(&m).0, x);
         assert_eq!(m.front_color, [1, 2, 3]);
         let spec = mt_spec::Spec::builtin().unwrap().default_model;
@@ -368,6 +396,7 @@ mod tests {
                 anchor: [1.0, 1.0],
                 scale: 2.0,
             },
+            mask: false,
         };
         let row = watermark_row(&w);
         assert_eq!(
@@ -376,8 +405,10 @@ mod tests {
         );
         let mut r2 = row.clone();
         r2.mode = 1;
+        r2.mask = true;
         apply_watermark_row(&mut w, &r2);
         assert_eq!(w.mode, WatermarkMode::Tiled { scale: 2.0 });
+        assert!(w.mask && watermark_row(&w).mask);
         assert_eq!(watermark_row(&w).mode, 1);
     }
 }

@@ -78,6 +78,22 @@ pub fn bundled() -> Vec<FontEntry> {
     ]
 }
 
+/// Names of the bundled and system fonts (Model Info > Dimensions and Text fonts).
+pub(crate) fn font_names() -> Vec<String> {
+    (bundled().into_iter().map(|e| e.name))
+        .chain(system_fonts().iter().map(|e| e.name.clone()))
+        .collect()
+}
+
+/// The data and face index of the bundled or system font named `name`.
+pub(crate) fn font_data(name: &str) -> Option<(Vec<u8>, u32)> {
+    let e = bundled()
+        .into_iter()
+        .chain(system_fonts().iter().cloned())
+        .find(|e| e.name == name)?;
+    Some((e.data().ok()?.into_owned(), e.index()))
+}
+
 /// Name of face `index` of a font file.
 fn font_name(data: &[u8], index: u32) -> Option<String> {
     let face = ttf_parser::Face::parse(data, index).ok()?;

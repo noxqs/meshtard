@@ -79,6 +79,17 @@ impl TextureImage {
         }
     }
 
+    /// Turns the image into a mask (Styles > Watermark > Create Mask): every pixel
+    /// becomes `color`, its brightness (Rec. 601 luma) times its alpha the opacity.
+    pub fn mask(&mut self, color: [u8; 3]) {
+        for p in self.rgba.as_chunks_mut::<4>().0 {
+            let luma =
+                (299 * u32::from(p[0]) + 587 * u32::from(p[1]) + 114 * u32::from(p[2])) / 1000;
+            let a = luma * u32::from(p[3]) / 255;
+            *p = [color[0], color[1], color[2], a as u8];
+        }
+    }
+
     /// Decoded and colorized as `source` says.
     fn load(source: &TextureSource) -> Option<Self> {
         let mut img = Self::decode(&source.data)?;
@@ -388,6 +399,19 @@ mod tests {
         let mut out = std::io::Cursor::new(Vec::new());
         img.write_to(&mut out, image::ImageFormat::Png).unwrap();
         out.into_inner()
+    }
+
+    #[test]
+    fn mask_uses_brightness_as_opacity_of_the_color() {
+        let mut img = TextureImage {
+            width: 3,
+            height: 1,
+            rgba: vec![255, 255, 255, 255, 0, 0, 0, 255, 128, 128, 128, 128],
+        };
+        img.mask([10, 20, 30]);
+        assert_eq!(&img.rgba[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&img.rgba[4..8], &[10, 20, 30, 0]);
+        assert_eq!(&img.rgba[8..12], &[10, 20, 30, 64]);
     }
 
     #[test]

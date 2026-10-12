@@ -65,7 +65,14 @@ pub struct StyleExtras {
     pub section_active: [u8; 3],
     pub section_inactive: [u8; 3],
     pub section_cut: [u8; 3],
+    /// Hidden geometry color.
+    pub hidden_geometry: [u8; 3],
+    /// Inference marker colors: endpoint, midpoint, on edge, on face.
+    pub inference: [[u8; 3]; 4],
 }
+
+/// The inference colors of [`StyleExtras::inference`], in order.
+pub const INFERENCE_COLORS: [&str; 4] = ["Endpoint", "Midpoint", "On Edge", "On Face"];
 
 impl Default for StyleExtras {
     fn default() -> Self {
@@ -99,6 +106,8 @@ impl Default for StyleExtras {
             section_active: [242, 102, 13],
             section_inactive: [217, 140, 51],
             section_cut: [0, 0, 0],
+            hidden_geometry: [115, 115, 115],
+            inference: [[0, 200, 0], [0, 200, 220], [230, 0, 0], [0, 0, 230]],
         }
     }
 }
@@ -119,6 +128,8 @@ pub struct WatermarkRow {
     pub scale: u16,
     /// Positioned: index into [`WATERMARK_ANCHORS`].
     pub anchor: usize,
+    /// Create Mask: the image's brightness is the opacity of the background color.
+    pub mask: bool,
 }
 
 /// Which extra rows the current Edit tab page shows.
@@ -238,7 +249,12 @@ impl Shell {
                     ("Active section", &mut s.section_active),
                     ("Inactive section", &mut s.section_inactive),
                     ("Section cuts", &mut s.section_cut),
+                    ("Hidden geometry", &mut s.hidden_geometry),
                 ] {
+                    color_row(ui, label, c);
+                }
+                ui.label(RichText::new("Inferences").strong());
+                for (label, c) in INFERENCE_COLORS.iter().zip(&mut s.inference) {
                     color_row(ui, label, c);
                 }
             }
@@ -249,8 +265,9 @@ impl Shell {
         }
     }
 
-    /// The Watermark page: the list (overlays first, as SketchUp lists them above the
-    /// model space), add and remove buttons, and the selected watermark's settings.
+    /// The Watermark page: the list (overlays first, top one first, as SketchUp lists
+    /// them above the model space, then the backgrounds), add, remove and move
+    /// buttons, and the selected watermark's settings.
     fn watermarks_ui(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
         ui.label(RichText::new("Watermark Settings").strong());
         ui.horizontal(|ui| {
@@ -270,20 +287,45 @@ impl Shell {
                 self.pending.push(Event::WatermarkRemove(i));
                 self.tray_ui.more.watermark_selected = None;
             }
+            // Move within the overlays or within the backgrounds (the app answers with
+            // the new list; the selection follows the moved watermark).
+            for (up, label, tip) in [
+                (true, "⏶", "Move watermark up"),
+                (false, "⏷", "Move watermark down"),
+            ] {
+                let target = sel.and_then(|i| watermark_neighbor(&data.watermarks, i, up));
+                if ui
+                    .add_enabled(target.is_some(), egui::Button::new(label))
+                    .on_hover_text(tip)
+                    .clicked()
+                    && let (Some(i), Some(j)) = (sel, target)
+                {
+                    self.pending.push(Event::WatermarkMove(i, up));
+                    self.tray_ui.more.watermark_selected = Some(j);
+                }
+            }
         });
         if data.watermarks.is_empty() {
             ui.weak("No watermarks.");
             return;
         }
-        for (i, w) in data.watermarks.iter().enumerate() {
-            let label = format!(
-                "{} ({})",
-                w.name,
-                if w.overlay { "overlay" } else { "background" }
-            );
-            let on = self.tray_ui.more.watermark_selected == Some(i);
-            if ui.selectable_label(on, label).clicked() {
-                self.tray_ui.more.watermark_selected = Some(i);
+        for overlay in [true, false] {
+            if !overlay {
+                ui.weak("Model Space");
+            }
+            for (i, w) in data.watermarks.iter().enumerate().rev() {
+                if w.overlay != overlay {
+                    continue;
+                }
+                let label = format!(
+                    "{} ({})",
+                    w.name,
+                    if w.overlay { "overlay" } else { "background" }
+                );
+                let on = self.tray_ui.more.watermark_selected == Some(i);
+                if ui.selectable_label(on, label).clicked() {
+                    self.tray_ui.more.watermark_selected = Some(i);
+                }
             }
         }
         let Some(i) = self
@@ -301,6 +343,8 @@ impl Shell {
             ui.radio_value(&mut w.overlay, false, "Background");
             ui.radio_value(&mut w.overlay, true, "Overlay");
         });
+        ui.checkbox(&mut w.mask, "Create Mask")
+            .on_hover_text("Use the image's brightness as the opacity of the background color");
         ui.horizontal(|ui| {
             ui.label("Blend");
             ui.add(egui::Slider::new(&mut w.opacity, 0..=100).suffix("%"));
@@ -333,5 +377,42 @@ impl Shell {
         if *w != before {
             self.pending.push(Event::WatermarkChanged(i, w.clone()));
         }
+    }
+}
+
+/// The watermark that watermark `i` swaps with when moved up (drawn later) or down:
+/// the next one of its own kind (overlay or background) in that direction.
+pub(crate) fn watermark_neighbor(list: &[WatermarkRow], i: usize, up: bool) -> Option<usize> {
+    let overlay = list.get(i)?.overlay;
+    if up {
+        (i + 1..list.len()).find(|&j| list[j].overlay == overlay)
+    } else {
+        (0..i).rev().find(|&j| list[j].overlay == overlay)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neighbors_stay_within_overlays_or_backgrounds() {
+        let row = |overlay| WatermarkRow {
+            name: String::new(),
+            overlay,
+            opacity: 50,
+            mode: 0,
+            lock_aspect: true,
+            scale: 100,
+            anchor: 4,
+            mask: false,
+        };
+        let l = [row(false), row(true), row(false), row(true)];
+        assert_eq!(watermark_neighbor(&l, 0, true), Some(2));
+        assert_eq!(watermark_neighbor(&l, 1, true), Some(3));
+        assert_eq!(watermark_neighbor(&l, 3, true), None);
+        assert_eq!(watermark_neighbor(&l, 2, false), Some(0));
+        assert_eq!(watermark_neighbor(&l, 1, false), None);
+        assert_eq!(watermark_neighbor(&l, 9, false), None);
     }
 }

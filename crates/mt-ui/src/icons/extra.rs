@@ -54,6 +54,7 @@ pub const KNOWN: &[&str] = &[
     "tool.sandbox_drape",
     "tool.sandbox_add_detail",
     "tool.sandbox_flip_edge",
+    "help.search",
 ];
 
 /// Paints `id` if this module has it; false otherwise (nothing painted).
@@ -70,6 +71,7 @@ pub(super) fn paint(p: &Pen, id: &str) -> bool {
         "edit.undo" => turn_arrow(p, false),
         "edit.redo" => turn_arrow(p, true),
         "window.model_info" => model_info(p),
+        "help.search" => search(p),
         "camera.view_iso" => view_iso(p),
         "camera.view_top" => view_box(p, Side::Top),
         "camera.view_bottom" => view_box(p, Side::Bottom),
@@ -378,6 +380,18 @@ fn model_info(p: &Pen) {
     p.circle(c, 5.5, p.c.accent, Some((1.0, p.c.ink)));
     p.dot((c.0, c.1 - 2.6), 1.0, p.c.paper);
     p.line(&[(c.0, c.1 - 0.8), (c.0, c.1 + 3.2)], 1.8, p.c.paper);
+}
+
+/// Help > Search: a search field with text lines and a magnifier over its end (the
+/// Zoom icon's magnifier has a plus instead).
+fn search(p: &Pen) {
+    p.poly(
+        &[(1.5, 2.5), (20.5, 2.5), (20.5, 9.5), (1.5, 9.5)],
+        p.c.paper,
+    );
+    p.line(&[(4.0, 6.0), (11.0, 6.0)], 1.6, p.c.face_dark);
+    p.magnifier((13.0, 14.0), 5.5);
+    p.line(&[(10.5, 14.0), (15.5, 14.0)], 1.2, p.c.accent);
 }
 
 // ---------------------------------------------------------------- Views
