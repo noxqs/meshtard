@@ -26,6 +26,10 @@ Still not saved: scenes, shadow settings, fog, model axes, locks, the active sec
 - Shift+F1 (Help > Context Help) opens the Instructor panel for the active tool.
 - Tool modifier keys follow SketchUp 2026's Quick Reference Card: Orbit suspends gravity with Alt (was Ctrl); Eraser unsoftens with Alt; Alt + plus / minus change segments; Lasso adds with Alt, adds and subtracts with Shift, subtracts with Shift+Alt. New: Rectangle Alt draws from the center, Follow Me Alt uses a face's perimeter as the path (Alt-click the profile, then click the face), Protractor Ctrl turns guide creation off and on.
 
+## Linux
+
+- Alt + drag tools (Orbit without gravity, Lasso, Eraser and others) work on Cinnamon, GNOME and MATE, whose window managers otherwise take Alt + drag to move windows. On the first start Meshtard asks once whether to turn the desktop's Alt + drag window move off while Meshtard is in front; your setting comes back when you switch to another window or quit (or at the next start if Meshtard was killed). Preferences > General > Linux turns it on or off. On KDE and Xfce the page says where to change the key by hand.
+
 ## macOS
 
 - The menu bar follows SketchUp for Mac: a Meshtard application menu with About Meshtard, Settings... (Cmd+,), the system's Services/Hide/Show All, and Quit Meshtard (Cmd+Q); Preferences, Exit and About leave the Window, File and Help menus. The Window menu starts with Minimize and Zoom and lists the panels directly (Show Dialogs replaces the Default Tray submenu).
