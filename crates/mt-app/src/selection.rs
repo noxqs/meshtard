@@ -52,11 +52,91 @@ impl Mode {
     }
 }
 
+/// A set of owners, faster than a hash set for the large ones Select All makes: each
+/// kind has a table by index (faces and edges by their key's slot, holding the key's
+/// version, so a stale key never matches a live one). An owner whose place is taken
+/// (another version of the slot) or far out goes to a hash set.
+#[derive(Debug, Clone, Default)]
+pub struct OwnerSet {
+    /// Per kind (see `place`), by index: the version stored there (0: none).
+    tables: [Vec<u32>; 6],
+    other: mt_kernel::spatial::FxSet<Owner>,
+}
+
+/// Indices at or past this go to the hash set (bounds a table's size).
+const TABLE_MAX: usize = 1 << 24;
+
+impl OwnerSet {
+    /// Kind, index and version of `o`.
+    fn place(o: &Owner) -> (usize, usize, u32) {
+        use slotmap::Key;
+        let key = |k: slotmap::KeyData| {
+            let ffi = k.as_ffi();
+            ((ffi & 0xffff_ffff) as usize, (ffi >> 32) as u32)
+        };
+        let ((i, v), kind) = match *o {
+            Owner::Face(f) => (key(f.data()), 0),
+            Owner::Edge(e) => (key(e.data()), 1),
+            Owner::Instance(i) => ((i, 1), 2),
+            Owner::Section(i) => ((i, 1), 3),
+            Owner::Dimension(i) => ((i, 1), 4),
+            Owner::Text(i) => ((i, 1), 5),
+        };
+        // Versions of live keys are never 0; a null key goes to the hash set.
+        (kind, if v == 0 { TABLE_MAX } else { i }, v)
+    }
+
+    pub fn contains(&self, o: &Owner) -> bool {
+        let (kind, i, v) = Self::place(o);
+        self.tables[kind].get(i).is_some_and(|&x| x == v)
+            || (!self.other.is_empty() && self.other.contains(o))
+    }
+
+    /// Adds `o`; false when it was there.
+    pub fn insert(&mut self, o: Owner) -> bool {
+        let (kind, i, v) = Self::place(&o);
+        if i >= TABLE_MAX {
+            return self.other.insert(o);
+        }
+        let table = &mut self.tables[kind];
+        if table.len() <= i {
+            table.resize((i + 1).max(table.len() * 3 / 2), 0);
+        }
+        match table[i] {
+            0 => {
+                table[i] = v;
+                true
+            }
+            x if x == v => false,
+            _ => self.other.insert(o),
+        }
+    }
+
+    /// Removes `o`; false when it was not there.
+    pub fn remove(&mut self, o: &Owner) -> bool {
+        let (kind, i, v) = Self::place(o);
+        match self.tables[kind].get_mut(i) {
+            Some(x) if *x == v => {
+                *x = 0;
+                true
+            }
+            _ => self.other.remove(o),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for t in &mut self.tables {
+            t.clear();
+        }
+        self.other.clear();
+    }
+}
+
 /// Selected top-level entities in selection order.
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
     items: Vec<Owner>,
-    set: mt_kernel::spatial::FxSet<Owner>,
+    set: OwnerSet,
 }
 
 impl Selection {
@@ -64,10 +144,20 @@ impl Selection {
         if mode == Mode::Replace {
             self.clear();
         }
+        let items = items.into_iter();
+        if matches!(mode, Mode::Replace | Mode::Add) {
+            self.items.reserve(items.size_hint().0);
+        }
         for o in items {
+            if matches!(mode, Mode::Replace | Mode::Add) {
+                // One lookup: insert reports whether it was there.
+                if self.set.insert(o) {
+                    self.items.push(o);
+                }
+                continue;
+            }
             let has = self.set.contains(&o);
             match mode {
-                Mode::Replace | Mode::Add if !has => self.insert(o),
                 Mode::Toggle if has => self.remove(o),
                 Mode::Toggle => self.insert(o),
                 Mode::Remove if has => self.remove(o),
@@ -102,7 +192,10 @@ impl Selection {
     /// Keeps the items for which `keep` is true (e.g. those that still exist).
     pub fn retain(&mut self, mut keep: impl FnMut(&Owner) -> bool) {
         self.items.retain(|o| keep(o));
-        self.set.retain(|o| keep(o));
+        self.set.clear();
+        for o in &self.items {
+            self.set.insert(*o);
+        }
     }
 }
 
@@ -686,6 +779,30 @@ mod tests {
         }
         best.map(|(_, o)| o)
             .or_else(|| face_hit.and_then(|h| scene.tri_owner[h.triangle]))
+    }
+
+    /// A stale key (an erased edge) and the live one reusing its slot are different
+    /// owners, as in a hash set.
+    #[test]
+    fn owner_set_tells_key_versions_apart() {
+        let mut ents = Entities::default();
+        let old = add_line(&mut ents, DVec3::ZERO, DVec3::X)[0];
+        mt_kernel::erase_edge(&mut ents, old);
+        let new = add_line(&mut ents, DVec3::ZERO, DVec3::Y)[0];
+        assert_ne!(old, new);
+        let mut set = OwnerSet::default();
+        assert!(set.insert(Owner::Edge(old)));
+        assert!(!set.contains(&Owner::Edge(new)));
+        assert!(set.insert(Owner::Edge(new)));
+        assert!(!set.insert(Owner::Edge(new)));
+        assert!(set.contains(&Owner::Edge(old)) && set.contains(&Owner::Edge(new)));
+        assert!(set.remove(&Owner::Edge(old)));
+        assert!(!set.contains(&Owner::Edge(old)) && set.contains(&Owner::Edge(new)));
+        assert!(set.insert(Owner::Instance(usize::MAX)));
+        assert!(set.contains(&Owner::Instance(usize::MAX)));
+        assert!(!set.contains(&Owner::Instance(7)));
+        set.clear();
+        assert!(!set.contains(&Owner::Edge(new)));
     }
 
     /// With many edges `pick` culls them with an index and still picks what testing

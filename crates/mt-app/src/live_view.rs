@@ -59,11 +59,18 @@ impl Highlight<'_> {
         });
         let mut edges = Vec::with_capacity(scene.edges.len());
         let mut copies = Vec::new();
-        // Locked groups and components are highlighted red instead of blue.
-        let highlight = |o: &Option<Owner>| match (o, self.document) {
-            (Some(o), Some(doc)) if doc.is_locked(*o) => lock_color,
+        // Locked groups and components are highlighted red instead of blue (only
+        // instances lock; the active context is looked up once).
+        let active = self.document.map(Document::active);
+        let highlight = |o: &Option<Owner>| match (o, active) {
+            (Some(o @ Owner::Instance(_)), Some(ents))
+                if mt_kernel::visibility::is_locked(ents, o.item()) =>
+            {
+                lock_color
+            }
             _ => sel_color,
         };
+        let stretching = !self.stretch.owners.is_empty();
         // Compatibility > Bounding box only: selected groups and components show
         // their box, not their edges.
         let box_only = self.box_only;
@@ -77,7 +84,8 @@ impl Highlight<'_> {
             } else {
                 sel_color
             };
-            if let Some(o) = owner
+            if stretching
+                && let Some(o) = owner
                 && let (Some(a), Some(b)) = (self.stretch.map(o, seg.a), self.stretch.map(o, seg.b))
             {
                 (seg.a, seg.b) = (a, b);
@@ -104,18 +112,36 @@ impl Highlight<'_> {
             edges.push(seg);
         }
         edges.extend(copies);
-        let mut vertices: Vec<FaceVertex> = Vec::new();
+        // Selected faces' triangles. A face's triangles are consecutive: its owner is
+        // looked up once.
+        let mut selected = Vec::new();
+        let mut last: Option<(Option<Owner>, bool)> = None;
         for (t, owner) in scene.tri_owner.iter().enumerate() {
-            let Some(owner @ Owner::Face(_)) = owner.filter(|o| self.selection.contains(o)) else {
-                continue;
+            let hit = match last {
+                Some((o, hit)) if o == *owner => hit,
+                _ => {
+                    let hit =
+                        matches!(owner, Some(o @ Owner::Face(_)) if self.selection.contains(o));
+                    last = Some((*owner, hit));
+                    hit
+                }
             };
+            if hit {
+                selected.push(t);
+            }
+        }
+        let mut vertices: Vec<FaceVertex> = Vec::with_capacity(3 * selected.len());
+        for t in selected {
+            let owner = scene.tri_owner[t].expect("a selected face");
             let xf = moved(&Some(owner)).map(|(xf, _)| xf);
             for k in 0..3 {
                 let mut v = scene.vertices[scene.indices[3 * t + k] as usize];
                 if let Some(xf) = xf {
                     v.position = tp(xf, v.position);
                 }
-                v.position = self.stretch.map(&owner, v.position).unwrap_or(v.position);
+                if stretching {
+                    v.position = self.stretch.map(&owner, v.position).unwrap_or(v.position);
+                }
                 vertices.push(v);
             }
         }
@@ -200,12 +226,47 @@ pub fn preview_faces(
 
 /// Every selectable entity drawn, each once, in drawing order (Edit > Select All).
 pub fn all_owners(scene: &Scene) -> Vec<Owner> {
-    let mut seen = FxSet::default();
+    let mut seen = selection::OwnerSet::default();
+    // A face's triangles are consecutive: repeats of the previous owner are skipped
+    // before the lookup.
+    let mut last = None;
     scene
         .tri_owner
         .iter()
         .chain(&scene.edge_owner)
+        .filter(|o| std::mem::replace(&mut last, **o) != **o)
         .filter_map(|o| *o)
         .filter(|o| seen.insert(*o))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bit sets give what a hash set gives, for every corpus file (with hidden
+    /// geometry shown: hidden faces add edges owned by their face).
+    #[test]
+    fn all_owners_matches_a_hash_set() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/openskp");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "skp") {
+                continue;
+            }
+            let Ok(mut doc) = Document::open(&path) else {
+                continue;
+            };
+            doc.model.style.hidden_geometry = true;
+            let scene = doc.scene();
+            let mut seen = FxSet::default();
+            let want: Vec<Owner> = (scene.tri_owner.iter())
+                .chain(&scene.edge_owner)
+                .filter_map(|o| *o)
+                .filter(|o| seen.insert(*o))
+                .collect();
+            assert_eq!(all_owners(&scene), want, "{}", path.display());
+        }
+    }
 }

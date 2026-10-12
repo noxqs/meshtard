@@ -53,8 +53,8 @@ Each model is saved to `.skp` and opened again, then:
 | hover pick, hover inference | `selection::pick` and `Engine::infer` at 48 cursor positions over the view (mean) | every mouse move (Select tool / drawing tools) |
 | select all, selection highlight | Edit > Select All and the highlight it draws (`live_view::Highlight`) | selection changes |
 | move preview (1/10) | one mouse move of Move with a tenth of everything selected: stretch of connected geometry, the kept and moved triangles, the highlight | every mouse move while Move, Rotate or Scale runs |
-| undo snapshot, move commit | `Model::clone` alone, and the Move itself (`Document::edit`, which takes the undo snapshot) | every edit |
-| rebuild after move, undo | `Document::scene` after the move, then Edit > Undo | after an edit |
+| undo snapshot (first), move commit, undo snapshot (after an edit) | `Document::snapshot` alone (the first undo step copies everything), the Move itself (`Document::edit`, which takes an undo step), and the undo step the next edit would take (it copies only what the Move changed) | every edit |
+| rebuild after move, undo | `Document::scene` after the move (with the triangles kept from the first build), then Edit > Undo | after an edit |
 
 Each model also prints a checksum of its scene (every vertex, index, edge, owner,
 material, hidden edge and container) and of the pick and inference answers at the 48
@@ -165,6 +165,82 @@ tests that compare each fast path with the code it replaces.
 The app was also checked by hand under Xvfb with the car model: hover, Select All with
 its highlight, and a Move with its live preview and inference tooltip draw as before.
 
+## Second round: undo steps, scene rebuilds, Select All
+
+A later change took on three items of the list below. The scene and hover checksums
+are again the same before and after for every model.
+
+### Results
+
+Same machine and setup as above, without the GPU stages (`MESHTARD_BENCH_NO_GPU=1`);
+"before" is the commit this change started from (where the undo step stage timed
+`Model::clone`), "after" this change, run right after it. The machine was shared with
+other builds, so differences under about 1.3x are noise (the grid's rebuild after move
+measured 0.93 to 1.15 s on either side over several runs).
+
+| stage | grid 1M edges | instances 10k | groups 5k | nested 4^6 | coedge_orientation_regression.skp | gondola_v20.skp | Sponza.gltf | bridge.ifc | landscaping.ifc |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| undo snapshot (after an edit) | 575 ms → 328 ms (1.8x) | 1.8 ms → 1.1 ms (1.6x) | 65 ms → 27 ms (2.4x) | 0.05 ms → 0.04 ms (~) | 50 ms → 8.2 ms (6.1x) | 2.9 ms → 0.84 ms (3.5x) | 380 ms → 30 ms (12.6x) | 12 ms → 1.1 ms (11.5x) | 11 ms → 2.2 ms (4.9x) |
+| undo snapshot (first) | 575 ms → 253 ms (2.3x) | 1.8 ms → 1.1 ms (1.5x) | 65 ms → 55 ms (~) | 0.05 ms → 0.21 ms (~) | 50 ms → 28 ms (1.8x) | 2.9 ms → 3.4 ms (~) | 380 ms → 77 ms (4.9x) | 12 ms → 3.7 ms (3.3x) | 11 ms → 7.4 ms (1.4x) |
+| move commit | 7.73 s → 7.55 s (~) | 1.0 ms → 2.6 ms (0.40x) | 50 ms → 66 ms (0.75x) | 0.02 ms → 0.06 ms (~) | 32 ms → 6.1 ms (5.2x) | 1.7 ms → 1.0 ms (1.6x) | 222 ms → 31 ms (7.0x) | 10 ms → 1.4 ms (7.8x) | 7.1 ms → 2.8 ms (2.5x) |
+| undo | 0.03 ms → 0.24 ms (~) | 0.05 ms → 0.92 ms (~) | 0.06 ms → 19 ms (slower) | 0.05 ms → 0.19 ms (~) | 1.1 ms → 6.3 ms (slower) | 0.07 ms → 1.3 ms (slower) | 0.05 ms → 23 ms (slower) | 0.04 ms → 1.4 ms (slower) | 0.05 ms → 2.5 ms (slower) |
+| scene build | 1.03 s → 917 ms (~) | 53 ms → 49 ms (~) | 66 ms → 78 ms (~) | 35 ms → 23 ms (1.5x) | 267 ms → 214 ms (~) | 37 ms → 29 ms (1.3x) | 642 ms → 350 ms (1.8x) | 25 ms → 18 ms (1.4x) | 23 ms → 26 ms (~) |
+| rebuild after move | 929 ms → 1.15 s (~) | 50 ms → 48 ms (~) | 97 ms → 72 ms (1.4x) | 22 ms → 22 ms (~) | 214 ms → 199 ms (~) | 38 ms → 26 ms (1.5x) | 357 ms → 324 ms (~) | 17 ms → 8.9 ms (1.9x) | 21 ms → 20 ms (~) |
+| select all | 684 ms → 66 ms (10.3x) | 5.9 ms → 1.2 ms (4.8x) | 2.6 ms → 0.64 ms (4.1x) | 1.6 ms → 0.37 ms (4.4x) | 4.5 ms → 0.90 ms (5.0x) | 1.2 ms → 0.41 ms (2.9x) | 6.4 ms → 1.2 ms (5.4x) | 0.56 ms → 0.10 ms (~) | 0.85 ms → 0.15 ms (~) |
+| selection highlight | 1.10 s → 243 ms (4.5x) | 17 ms → 11 ms (1.6x) | 8.3 ms → 5.6 ms (1.5x) | 4.2 ms → 2.9 ms (1.4x) | 9.7 ms → 2.7 ms (3.6x) | 2.0 ms → 1.4 ms (1.4x) | 15 ms → 7.5 ms (1.9x) | 1.0 ms → 0.63 ms (1.7x) | 2.0 ms → 1.6 ms (1.3x) |
+
+### What changed
+
+1. **Undo steps share unchanged entities collections** (`mt-app/src/undo.rs`). An undo
+   step holds the model's settings (everything but the geometry, small: copied each
+   time) and one `Arc<Entities>` per collection (the root's, each definition's).
+   `undo::Shared` keeps the copy each collection had in the last step; the next step
+   reuses it after checking it still equals the model's collection (an exact
+   comparison, `impl PartialEq for Entities`, on several threads for big ones), so only
+   what changed is copied. The comparison, rather than trusting which context an edit
+   names, is what keeps changes made without an undo step (Scenes applying their
+   hidden geometry, Texture Position's preview, tests) from being lost. `Document::edit`
+   drops the edited collection's copy (it is bound to differ). Undo and redo keep
+   collections the two states share in place (with their spatial index) and move the
+   others; they now compare the shared collections, which costs a few milliseconds to
+   ~25 ms on big models (the "undo" row) instead of nothing. Old steps are freed on
+   another thread. Kernel types are unchanged apart from new `PartialEq` derives, so no
+   importer changed.
+2. **Big collections are copied on three threads** (`impl Clone for Entities`: vertices,
+   edges and faces at once from 50,000 entities): the grid's single million-edge root,
+   which every edit there must copy, in about half the time.
+3. **Faces' triangles are kept between scene builds** (`mt-app/src/tess_cache.rs`). Each
+   collection with 16 faces or more keeps its faces' triangles in flat lists, in face
+   order, with what they were computed from (loop vertices, positions, normal: all that
+   `tessellate::triangulate` reads). The next build reuses an entry only when those
+   are unchanged, so an edit re-tessellates only the faces it changed. Faces with fewer
+   than 4 vertices and no holes are not kept: checking them costs about what
+   tessellating them does (the grid's triangles), and per-collection bookkeeping made
+   models of many tiny definitions slower (groups 5k), hence the 16-face floor. Faces
+   with "cut opening" components glued to them are not kept either. The gain is
+   modest (up to ~1.5x on rebuilds of real files): tessellation is about half of a
+   scene build, and the rest (colors, texture coordinates, transforms) is still done
+   for the whole model.
+4. **Select All** uses a set of owners stored as tables by index (`selection::OwnerSet`:
+   faces and edges by their key's slot, holding the key's version so a stale key never
+   matches a live one; anything else in a hash set) for the selection and the
+   de-duplication in `live_view::all_owners`, which also skips a face's repeated
+   triangles before looking them up. Grid: 0.68 s to 0.07 s.
+5. **The selection highlight** looks each selected face up once (its triangles are
+   consecutive), sizes its vertex list from the count, checks locks only for groups and
+   components (once per highlight, not once per edge) and skips the stretch lookups when
+   nothing stretches. Grid: 1.1 s to 0.24 s. The selection's set lookups per edge got
+   faster with item 4.
+
+Tests: `undo_and_redo_restore_the_exact_model_after_many_edit_kinds` (16 kinds of edit
+plus changes without an undo step in between, then undo all, redo all and a new edit
+part way, comparing full `Debug` dumps of the model, context, units and state id, slot
+maps' free lists included, and the scene against a new document's after every step),
+`kept_triangles_follow_every_edit`, `undo::tests::steps_share_what_did_not_change`,
+`selection::tests::owner_set_tells_key_versions_apart` and
+`live_view::tests::all_owners_matches_a_hash_set`. The app was checked under Xvfb:
+draw a rectangle, Push/Pull it, Edit > Undo, Edit > Redo.
+
 ## Left to do
 
 Measured but not changed here, biggest first:
@@ -175,19 +251,20 @@ Measured but not changed here, biggest first:
 - **Move commit on huge flat contexts** (grid: 7-8 s for 100k faces). Spread over
   `transform_vertices`' welding: building the spatial index (`Entities::build_index`),
   `set_vertex_positions` and its `edges_in` / `faces_in` / `edges_near_segment` queries.
-- **Undo snapshots copy the whole model** (grid: 0.6-0.7 s, Sponza 0.3 s per edit).
-  Structural sharing needs shared ownership inside `Model` / `Definition`, whose
-  struct literals are also built by the importers (`formats/`, `gltf_io.rs`); and the
-  app changes some model settings directly without an undo step (view toggles, style
-  and shadow settings), so a snapshot cannot assume only the edited context changed.
-- **Whole-scene rebuilds after small edits.** `App::rebuild` rebuilds the scene, pick
-  index, snap geometry and GPU buffers for the whole model after every edit. An
-  incremental rebuild (only the edited context's part) would need the scene split per
-  context, with owners and indices kept stable.
+- **Undo steps of huge flat contexts** (grid: ~0.3 s per edit, down from 0.6 s): an
+  edit of a collection copies all of it. Sharing below the collection (per entity, or
+  per chunk of each slot map) would need the kernel's entity storage to change.
+  Undo itself now compares the collections it keeps in place (up to ~25 ms).
+- **Whole-scene rebuilds after small edits.** `App::rebuild` still rebuilds the scene
+  (except the kept triangles of unchanged faces), pick index, snap geometry and GPU
+  buffers for the whole model after every edit. Going further needs the scene split
+  per context, with owners and indices kept stable, and the GPU buffers updated in
+  place. The first scene build of a model also fills the kept triangles (first builds
+  measured up to ~20% slower, within noise on most models).
 - **No GPU instancing.** Each instance's triangles are copied into the vertex buffer
   (instances 10k: 120k triangles where 12 would do with per-instance transforms).
-- **Select All and the highlight on huge models** (grid: ~0.6 s and ~0.9 s): the
-  highlight rebuilds and re-uploads the whole edge list on every selection change.
+- **The highlight on huge models** (grid: ~0.25 s): it still rebuilds and re-uploads
+  the whole edge list on every selection change.
 - **Frame time** on llvmpipe grows with edges (grid ~3 s per frame); not measured on a
   real GPU here.
 - Opening a file without a saved view builds the scene twice (once for Zoom Extents in

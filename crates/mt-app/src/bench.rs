@@ -438,14 +438,18 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         let h = highlight(&selection, Some(&live), &stretch);
         std::hint::black_box((kept, faces, h));
     });
-    report.time(name, "undo snapshot (clone)", || {
-        std::hint::black_box(doc.model.clone());
+    // The first undo step copies everything; later ones only what changed since.
+    report.time(name, "undo snapshot (first)", || {
+        std::hint::black_box(doc.snapshot());
     });
     report.time(name, "move commit", || {
         doc.edit(|ents| {
             crate::modify::apply(ents, &targets, xf, false);
             true
         });
+    });
+    report.time(name, "undo snapshot (after an edit)", || {
+        std::hint::black_box(doc.snapshot());
     });
     report.time(name, "rebuild after move", || {
         std::hint::black_box(doc.scene());

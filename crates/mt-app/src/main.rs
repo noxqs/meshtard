@@ -68,6 +68,7 @@ mod splash;
 mod spring;
 mod style_view;
 mod templates;
+mod tess_cache;
 mod text3d;
 mod texture_position;
 mod tool_extra;
@@ -75,6 +76,7 @@ mod tools;
 mod tray;
 mod tray_extra;
 mod tray_more;
+mod undo;
 mod welcome;
 #[cfg(target_os = "linux")]
 mod wm_modifier;
