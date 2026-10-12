@@ -16,7 +16,7 @@ inferred, unverified. Code: `crates/mt-kernel/src/formats/` (new formats),
 | DWG / DXF | yes [doc] | yes (2D and 3D) [doc] | separate work item |
 | FBX | no [inf] (the help only has an export page [doc]) | yes [doc] | Export Only Current Selection, Triangulate All Faces, Export Two-Sided Faces, Separate Disconnected Faces, Export Texture Maps, Swap YZ Coordinates (Y Is Up), Units (default Model Units) [doc] |
 | glTF / GLB | yes (2025+) [inf] | yes [doc] | separate work item |
-| IFC / IFCZIP | yes [inf] | yes [inf] | not planned (BIM schema) |
+| IFC / IFCZIP | yes [inf] | yes [inf] | Classifier and property sets not planned; geometry-only import and export done (see below) |
 | KMZ (Google Earth) | yes [inf] | yes [inf] | geo-located model as COLLADA in a ZIP [inf] |
 | OBJ | yes (2024+) [inf] | yes [doc] | Export: current selection, triangulate, two-sided faces [doc], texture maps, swap YZ, units [inf] |
 | PLY | no [inf] | no [inf] | (not a SketchUp format; common for scans and point clouds) |
@@ -40,6 +40,7 @@ inferred, unverified. Code: `crates/mt-kernel/src/formats/` (new formats),
 | USDZ | no | yes | own `usda` writer; ZIP via `zip` (stored, 64-byte aligned) | own; Pixar's USDZ spec and `UsdPreviewSurface` spec | flattened; one `Mesh` per material with face-varying `st`, `UsdPreviewSurface` (linear diffuse color or `UsdUVTexture`, opacity, roughness 1, metallic 0), `doubleSided` unless two-sided faces are written; `metersPerUnit` and `upAxis` from the units and Y up options (default Y up). The layer is text (`usda`, allowed by the spec); Apple Quick Look versions that need binary `usdc` may not open it (writing Pixar's crate format is not done). Checked with `usd-core` 26.8: opens, materials bound, textures resolve, all 28 built-in validators (incl. the USDZ package rules) pass |
 | VRML 2.0 | no | yes | own | own; ISO/IEC 14772 node layout | one `Shape` per material, `IndexedFaceSet` triangles, Material diffuse/transparency, ImageTexture with coordinates; options texture maps, ignore back of face material (`solid FALSE`), standard orientation (Y up); no edges, cameras, mirrored-component or material-override options |
 | KMZ | no | yes | own (KML 2.2 + COLLADA from `to_dae` in a ZIP) | own | placed at the model's latitude/longitude, heading = north angle, relative to ground; COLLADA in inches |
+| IFC | yes (`.ifc`, `.ifczip`) | yes (IFC4) | own STEP Part 21 reader (`formats::step`), importer (`formats::ifc`) and writer (`formats::ifc_export`) | own; ISO 10303-21 and the buildingSMART IFC2x3 / IFC4 / IFC4.3 schema docs. No crate fitted: `ruststep` (Apache-2.0) generates code per schema and has none for IFC, `ifc-lite-*` is MPL-2.0, `oxideav-ifc` (MIT) is a 0.0.x preview tied to its own framework, `openbim-step` is AGPL | Import (geometry only, IFC2X3 / IFC4 / IFC4X3): spatial structure and elements (aggregation, containment, nesting) as nested groups (instance named after the entity Name or its class, definition Type = IFC class, description = GlobalId; spaces hidden; openings left out), `IfcLocalPlacement` chains, body items `IfcFacetedBrep` (with voids), shell / face based surface models, `IfcTriangulatedFaceSet`, `IfcPolygonalFaceSet` (with voids), `IfcExtrudedAreaSolid` (rectangle, rounded / hollow rectangle, circle, hollow circle, ellipse, I / L / T / U, arbitrary closed profiles with voids from polylines, indexed poly curves with arcs, composite curves of polylines and trimmed circles / lines, derived profiles), `IfcSweptDiskSolid` (mitered tube), `IfcMappedItem` (a component per representation map, named after its type), `IfcBooleanResult` (first operand only: openings and clippings are not cut), surface style colors and transparency on items, `IfcIndexedColourMap` face colors, material colors through `IfcRelAssociatesMaterial` (painted on the group), length unit (SI prefixes, conversion based) and plane angle unit; everything else is counted by class and shown in the status bar (e.g. `IfcAdvancedBrep`, `IfcRevolvedAreaSolid`, half spaces). One dialog option: merge coplanar faces. Export: IFC4 with one site / building / storey, every visible group or component instance an `IfcBuildingElementProxy` (named after the instance or definition, nested ones aggregated under their parent), groups as `IfcTriangulatedFaceSet` per material, components as representation maps of an `IfcBuildingElementProxyType` named after the definition placed by `IfcMappedItem` (scale and mirroring kept, shear lost), loose root faces as one proxy, materials as `IfcSurfaceStyle` (color, transparency), units option; textures, edges and hidden entities left out; GlobalIds made from the file name (same model, same file) |
 
 Every 3D export has SketchUp's "Export only current selection" option: the selected
 entities of the open context, in model coordinates (the app copies them as Edit > Copy
@@ -69,6 +70,23 @@ TransmissionTest, SpecGlossVsMetalRough, VirtualCity, NegativeScaleTest,
 OrientationTest). Every DXF and FBX import and every hierarchy group is valid; some
 glTF meshes import with invalid faces (crossing edges, overlaps), the known mesh
 healing gap (LEFTOVERS 3), unrelated to the hierarchy.
+
+## IFC checks
+
+`import_check` also reads `.ifc` / `.ifczip` (prints the importer's report and world
+bounds). Files: buildingSMART `Sample-Test-Files` (IFC 2x3, IFC4 ADD2 TC1 and IFC4.3
+ADD2 Simple-Scene sets, IFC4 Reference View samples) and `youshengCode/IfcSampleFiles`
+(Duplex architecture, SampleCastle 49 MB, Revit ARC / STR, SampleHouse,
+WallElementedCase, BasinFacetedBrep, CubeAdvancedBrep). Every import passes
+`validate` with `Checks::TOPOLOGY`; with `Checks::ALL` the multi-item elements fail
+where their solids overlap or touch (items are not unioned), as files authored that
+way do. The per-element world bounding boxes were compared with IfcOpenShell 0.9
+(`use-world-coords`): equal within 1 cm for every element of all files except
+boolean-clipped walls (2 in Duplex, first operand only), `wall-with-opening-and-window`
+(IfcOpenShell ignores the file's millimeters) and WallElementedCase's non-uniform
+mapped items (ours fit the wall, IfcOpenShell's stick out of it). Exports of four of
+these imports pass `ifcopenshell.validate` (schema) with the same bounds. SampleCastle
+imports in about 2 s (release).
 
 ## Test files used (downloaded to a scratch folder, not in the repository)
 

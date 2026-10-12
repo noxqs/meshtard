@@ -1,6 +1,7 @@
 //! Other 3D exchange formats, next to OBJ/STL/COLLADA ([`crate::mesh_import`],
 //! [`crate::mesh_export`]): FBX (import and export), PLY (import and export), 3MF
-//! (import and export), 3DS (import and export), KMZ, VRML 2.0 and USDZ (export). See
+//! (import and export), 3DS (import and export), IFC (import [`ifc`], export
+//! [`ifc_export`]), KMZ, VRML 2.0 and USDZ (export). See
 //! `spec/parity/FORMATS.md` for what SketchUp supports and the sources followed.
 //!
 //! - Importers read a file into a [`Mesh`] (file units, the file's axes unless a
@@ -23,10 +24,13 @@ use crate::model::{Material, Model};
 
 pub mod fbx;
 pub mod fbx_export;
+pub mod ifc;
+pub mod ifc_export;
 pub mod kmz;
 pub mod obj;
 pub mod ply;
 pub mod scene;
+pub mod step;
 pub mod threeds;
 pub mod threemf;
 pub mod usdz;
@@ -302,10 +306,11 @@ pub enum ExportKind {
     Kmz,
     ThreeDs,
     Usdz,
+    Ifc,
 }
 
 impl ExportKind {
-    pub const ALL: [ExportKind; 7] = [
+    pub const ALL: [ExportKind; 8] = [
         Self::Fbx,
         Self::Ply,
         Self::ThreeMf,
@@ -313,6 +318,7 @@ impl ExportKind {
         Self::Kmz,
         Self::ThreeDs,
         Self::Usdz,
+        Self::Ifc,
     ];
 
     pub fn extension(self) -> &'static str {
@@ -324,6 +330,7 @@ impl ExportKind {
             Self::Kmz => "kmz",
             Self::ThreeDs => "3ds",
             Self::Usdz => "usdz",
+            Self::Ifc => "ifc",
         }
     }
 }
@@ -352,6 +359,7 @@ pub fn export(kind: ExportKind, model: &Model, opts: &ExportOptions) -> Result<F
         },
         ExportKind::ThreeDs => threeds::to_3ds(model, opts),
         ExportKind::Usdz => usdz::to_usdz(model, opts)?,
+        ExportKind::Ifc => ifc_export::to_ifc(model, opts),
     })
 }
 

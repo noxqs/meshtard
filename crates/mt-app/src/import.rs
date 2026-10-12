@@ -1,5 +1,5 @@
-//! File > Import: SketchUp models, glTF/GLB, DXF, OBJ, STL, FBX, PLY, 3MF, 3DS and
-//! images.
+//! File > Import: SketchUp models, glTF/GLB, DXF, IFC, OBJ, STL, FBX, PLY, 3MF, 3DS
+//! and images.
 //!
 //! - A `.skp` becomes a component definition of the open model (with the imported
 //!   model's own components, materials and tags; see
@@ -15,6 +15,12 @@
 //!   becomes one component instance at the origin of the open context (drawings are
 //!   often far from the origin), selected, in one undo step. DWG is a closed format and
 //!   is not read; PDF import is not done.
+//! - IFC / IFCZIP ([`formats::ifc`], geometry only) asks whether to merge coplanar
+//!   faces (units come from the file), then becomes one component instance at the
+//!   open context's origin, selected, in one undo step, like DXF: the project, site,
+//!   building, storey and element hierarchy as nested groups, mapped items as
+//!   components. The status bar says how many objects had geometry and what was
+//!   skipped.
 //! - Mesh files (OBJ, STL, FBX, PLY, 3MF, 3DS) ask for options (units, Y up, merge
 //!   coplanar faces; PLY: colors as materials), then become one group at the open
 //!   context's origin, in one undo step, selected; an FBX file's models become groups
@@ -48,6 +54,7 @@ pub(crate) enum Kind {
     Mesh(formats::Kind),
     Gltf,
     Dxf,
+    Ifc,
     Image,
 }
 
@@ -75,7 +82,7 @@ impl MeshImport {
         let (units, y_up) = match kind {
             Kind::Mesh(k) => k.default_hints(),
             Kind::Dxf => (Units::Millimeters, false),
-            Kind::Gltf | Kind::Image => (Units::Meters, false),
+            Kind::Gltf | Kind::Ifc | Kind::Image => (Units::Meters, false),
         };
         Self {
             path,
@@ -92,17 +99,18 @@ impl MeshImport {
     }
 }
 
-const FILTERS: [(&str, &[&str]); 11] = [
+const FILTERS: [(&str, &[&str]); 12] = [
     (
         "All Supported Types",
         &[
-            "skp", "gltf", "glb", "dxf", "obj", "stl", "fbx", "ply", "3mf", "3ds", "png", "jpg",
-            "jpeg",
+            "skp", "gltf", "glb", "dxf", "ifc", "ifczip", "obj", "stl", "fbx", "ply", "3mf", "3ds",
+            "png", "jpg", "jpeg",
         ],
     ),
     ("Meshtard Models (*.skp)", &["skp"]),
     ("glTF Files (*.gltf, *.glb)", &["gltf", "glb"]),
     ("AutoCAD DXF Files (*.dxf)", &["dxf"]),
+    ("IFC Files (*.ifc, *.ifczip)", &["ifc", "ifczip"]),
     ("OBJ Files (*.obj)", &["obj"]),
     ("STL Files (*.stl)", &["stl"]),
     ("FBX Files (*.fbx)", &["fbx"]),
@@ -233,6 +241,7 @@ impl App {
             "png" | "jpg" | "jpeg" => Kind::Image,
             "gltf" | "glb" => Kind::Gltf,
             "dxf" => Kind::Dxf,
+            "ifc" | "ifczip" => Kind::Ifc,
             "dwg" => {
                 self.message =
                     Some("DWG is a closed format and cannot be imported; save it as DXF.".into());
@@ -331,6 +340,7 @@ impl App {
             Kind::Mesh(k) => format!("{} Import Options", k.name()),
             Kind::Gltf => "glTF Import Options".into(),
             Kind::Dxf => "DXF Import Options".into(),
+            Kind::Ifc => "IFC Import Options".into(),
             Kind::Image => "Import Image".into(),
         };
         let r = mt_ui::Dialog::new("import_mesh", &title)
@@ -356,6 +366,10 @@ impl App {
                     Kind::Gltf => {
                         ui.checkbox(&mut d.merge, "Merge coplanar faces");
                         ui.weak("glTF is in meters, Y up.");
+                    }
+                    Kind::Ifc => {
+                        ui.checkbox(&mut d.merge, "Merge coplanar faces");
+                        ui.weak("Units come from the file. Openings are not cut.");
                     }
                     Kind::Dxf => {
                         units_row(ui, &mut d.units, Some(&mut d.units_from_file));
@@ -397,6 +411,7 @@ impl App {
                             Err(e) => self.file_error("import", &d.path, e),
                         },
                         Kind::Dxf => self.import_dxf(&d, &device),
+                        Kind::Ifc => self.import_ifc(&d, &device),
                         Kind::Image if d.as_photo => self.match_new_photo(&d.path),
                         Kind::Image => self.import_image(&d.path, d.as_texture),
                     }
@@ -418,13 +433,52 @@ impl App {
             self.message = Some(format!("Nothing to import in {}.", d.path.display()));
             return;
         }
-        let name = file_stem(&d.path);
+        self.add_at_origin(model, &file_stem(&d.path), device);
+        self.message = Some(format!("Imported {}.", d.path.display()));
+    }
+
+    fn import_ifc(&mut self, d: &MeshImport, device: &egui_wgpu::wgpu::Device) {
+        let read = std::fs::read(&d.path).map_err(|e| e.to_string());
+        let opts = formats::ifc::IfcOptions {
+            merge_coplanar: d.merge,
+        };
+        let (model, report) = match read.and_then(|b| formats::ifc::import(&b, &opts)) {
+            Ok(x) => x,
+            Err(e) => {
+                self.file_error("import", &d.path, e);
+                return;
+            }
+        };
+        if model.root.instances.is_empty() {
+            self.message = Some(format!(
+                "No geometry in {} ({}).",
+                d.path.display(),
+                report.summary()
+            ));
+            return;
+        }
+        self.add_at_origin(model, &file_stem(&d.path), device);
+        self.message = Some(format!(
+            "Imported {}: {}.",
+            d.path.display(),
+            report.summary()
+        ));
+    }
+
+    /// Adds `model` as a component definition named `name` with one instance at the
+    /// open context's origin, selected, in one undo step.
+    fn add_at_origin(
+        &mut self,
+        model: mt_kernel::Model,
+        name: &str,
+        device: &egui_wgpu::wgpu::Device,
+    ) {
         let Some(doc) = &mut self.document else {
             return;
         };
         let mut placed = None;
         doc.edit_model(|m, active| {
-            let def = mt_kernel::import::merge_as_definition(m, model, &name);
+            let def = mt_kernel::import::merge_as_definition(m, model, name);
             active.instances.push(mt_kernel::Instance {
                 definition: def,
                 transform: glam::DMat4::IDENTITY,
@@ -443,7 +497,6 @@ impl App {
             self.selection.apply(Mode::Replace, [Owner::Instance(i)]);
         }
         self.rebuild(device);
-        self.message = Some(format!("Imported {}.", d.path.display()));
     }
 
     fn import_mesh(&mut self, d: &MeshImport, device: &egui_wgpu::wgpu::Device) {

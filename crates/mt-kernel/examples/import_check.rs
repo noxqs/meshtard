@@ -1,10 +1,11 @@
-//! Imports DXF, glTF / GLB and FBX files the way File > Import does and prints what
+//! Imports DXF, glTF / GLB, FBX and IFC files the way File > Import does and prints what
 //! came in: `cargo run -p mt-kernel --example import_check -- FILE...`.
 //!
 //! For each file: definitions (components and groups), instances, faces, edges,
 //! curves, texts, dimensions and materials over the whole model, the nesting depth,
 //! and whether every definition and the root pass `mt_kernel::validate` (`valid`, or
-//! `INVALID` with the first problem).
+//! `INVALID` with the first problem; `topology INVALID` when even
+//! `Checks::TOPOLOGY` fails). IFC files also print the importer's report.
 
 use std::path::Path;
 
@@ -26,6 +27,23 @@ fn depth(model: &Model, ents: &Entities, seen: &mut Vec<DefinitionId>) -> usize 
     best
 }
 
+/// World bounds of the model's vertices (inches).
+fn bounds(model: &Model, ents: &Entities, xf: glam::DMat4, depth: usize, b: &mut [glam::DVec3; 2]) {
+    for v in ents.vertices.values() {
+        let p = xf.transform_point3(v.pos);
+        b[0] = b[0].min(p);
+        b[1] = b[1].max(p);
+    }
+    if depth > 32 {
+        return;
+    }
+    for i in &ents.instances {
+        if let Some(d) = model.definitions.get(i.definition) {
+            bounds(model, &d.entities, xf * i.transform, depth + 1, b);
+        }
+    }
+}
+
 fn import(path: &Path) -> Result<Model, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -41,6 +59,16 @@ fn import(path: &Path) -> Result<Model, String> {
             Ok(mt_kernel::dxf::to_model(&d, &Default::default()))
         }
         "gltf" | "glb" => mt_kernel::gltf_io::import(&bytes, &read, true),
+        "ifc" | "ifczip" => {
+            let (model, report) = mt_kernel::formats::ifc::import(&bytes, &Default::default())?;
+            println!(
+                "{}: {} ({} m per unit)",
+                path.display(),
+                report.summary(),
+                report.meters_per_unit
+            );
+            Ok(model)
+        }
         "fbx" => {
             let (scene, _) = mt_kernel::formats::fbx::parse_scene(&bytes, &read)?;
             let mut model = Model::default();
@@ -91,7 +119,21 @@ fn main() {
                 .into_iter()
                 .next()
         });
+        let topology = all.iter().find_map(|e| {
+            mt_kernel::validate(e, mt_kernel::Checks::TOPOLOGY)
+                .into_iter()
+                .next()
+        });
+        if let Some(p) = topology {
+            println!("{arg}: topology INVALID: {p}");
+        }
         let components = model.definitions.values().filter(|d| !d.is_group).count();
+        let mut b = [glam::DVec3::splat(f64::MAX), glam::DVec3::splat(f64::MIN)];
+        bounds(&model, &model.root, glam::DMat4::IDENTITY, 0, &mut b);
+        if b[0].x <= b[1].x {
+            let m = 0.0254;
+            println!("{arg}: bounds {:.2} .. {:.2} m", b[0] * m, b[1] * m);
+        }
         println!(
             "{arg}: {} components, {} groups, {} instances, depth {}, {} faces, {} edges, {} curves, {} texts, {} dimensions, {} materials, {} ({:.1}s)",
             components,
