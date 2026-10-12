@@ -49,6 +49,11 @@ pub const KNOWN: &[&str] = &[
     "view.shadows",
     "tool.sandbox_from_contours",
     "tool.sandbox_from_scratch",
+    "tool.sandbox_smoove",
+    "tool.sandbox_stamp",
+    "tool.sandbox_drape",
+    "tool.sandbox_add_detail",
+    "tool.sandbox_flip_edge",
 ];
 
 /// Paints `id` if this module has it; false otherwise (nothing painted).
@@ -93,6 +98,11 @@ pub(super) fn paint(p: &Pen, id: &str) -> bool {
         "view.shadows" => display_shadows(p),
         "tool.sandbox_from_contours" => from_contours(p),
         "tool.sandbox_from_scratch" => from_scratch(p),
+        "tool.sandbox_smoove" => smoove(p),
+        "tool.sandbox_stamp" => stamp(p),
+        "tool.sandbox_drape" => drape(p),
+        "tool.sandbox_add_detail" => add_detail(p),
+        "tool.sandbox_flip_edge" => flip_edge(p),
         _ => return false,
     }
     true
@@ -773,4 +783,89 @@ fn from_scratch(p: &Pen) {
         p.line(&[at(k, 0.0), at(k, 1.0)], 1.0, p.c.green);
         p.line(&[at(0.0, k), at(1.0, k)], 1.0, p.c.green);
     }
+}
+
+/// A terrain patch seen at an angle: `n` x `n` grid lines lifted by `bump` (icon units
+/// up for grid parameters `s`, `t` in 0..1).
+fn terrain(p: &Pen, bump: impl Fn(f32, f32) -> f32, color: Color32) {
+    let (o, u, v) = ((2.0, 16.0), (10.0, -5.0), (10.0, 5.0));
+    let at = |s: f32, t: f32| {
+        (
+            o.0 + u.0 * s + v.0 * t,
+            o.1 + u.1 * s + v.1 * t - bump(s, t),
+        )
+    };
+    let n = 4;
+    for i in 0..=n {
+        let k = i as f32 / n as f32;
+        let a: Vec<Pt> = (0..=12).map(|j| at(k, j as f32 / 12.0)).collect();
+        let b: Vec<Pt> = (0..=12).map(|j| at(j as f32 / 12.0, k)).collect();
+        p.line(&a, 1.0, color);
+        p.line(&b, 1.0, color);
+    }
+}
+
+fn hill(s: f32, t: f32) -> f32 {
+    let d = ((s - 0.5).powi(2) + (t - 0.5).powi(2)).sqrt() / 0.45;
+    if d >= 1.0 {
+        0.0
+    } else {
+        5.0 * 0.5 * (1.0 + (std::f32::consts::PI * d).cos())
+    }
+}
+
+fn smoove(p: &Pen) {
+    // A grid pushed up into a smooth hill, with the arrow pulling it.
+    terrain(p, hill, p.c.green);
+    p.arrow((12.0, 9.0), (12.0, 1.5), W, p.c.accent);
+}
+
+fn stamp(p: &Pen) {
+    // A level pad pressed into gently rolling ground.
+    terrain(p, |s, t| 1.2 * (s * 6.0).sin() * (t * 4.0).cos(), p.c.green);
+    let pad = [(8.0, 12.0), (12.0, 10.0), (16.0, 12.0), (12.0, 14.0)];
+    p.poly(&pad, p.c.face);
+    p.outline(&pad, W, p.c.ink);
+    p.arrow((12.0, 1.5), (12.0, 8.5), W, p.c.accent);
+}
+
+fn drape(p: &Pen) {
+    // A line above the ground dropped onto it.
+    terrain(p, hill, mix(p.c.green, p.c.paper, 0.4));
+    p.dashed((3.0, 4.0), (21.0, 4.0), 2.0, W, p.c.ink);
+    for x in [7.0, 17.0] {
+        p.arrow((x, 5.0), (x, 10.5), 1.0, p.c.accent);
+    }
+    let curve: Vec<Pt> = (0..=12)
+        .map(|j| {
+            let s = j as f32 / 12.0;
+            (3.0 + 18.0 * s, 16.0 - hill(s, 0.5))
+        })
+        .collect();
+    p.line(&curve, W + 0.4, p.c.ink);
+}
+
+fn add_detail(p: &Pen) {
+    // A triangle split into four through its midpoints.
+    let (a, b, c) = ((2.0, 20.0), (22.0, 20.0), (12.0, 3.0));
+    let mid = |x: Pt, y: Pt| ((x.0 + y.0) / 2.0, (x.1 + y.1) / 2.0);
+    let (ab, bc, ca) = (mid(a, b), mid(b, c), mid(c, a));
+    p.poly(&[a, b, c], mix(p.c.green, p.c.paper, 0.7));
+    p.outline(&[a, b, c], W, p.c.green);
+    p.outline(&[ab, bc, ca], 1.0, p.c.ink);
+    for d in [ab, bc, ca] {
+        p.dot(d, 1.6, p.c.accent);
+    }
+}
+
+fn flip_edge(p: &Pen) {
+    // Two triangles with their shared diagonal turned the other way.
+    let q = [(3.0, 12.0), (12.0, 4.0), (21.0, 12.0), (12.0, 20.0)];
+    p.poly(&q, mix(p.c.green, p.c.paper, 0.7));
+    p.outline(&q, W, p.c.green);
+    p.dashed(q[0], q[2], 1.5, 1.0, p.c.ink);
+    p.line(&[q[1], q[3]], W, p.c.ink);
+    // Turning clockwise (angles in degrees, counter-clockwise from the right).
+    p.arc((12.0, 12.0), 6.0, 150.0, 75.0, 1.2, p.c.accent);
+    p.head((15.0, 6.8), (0.87, 0.5), 2.6, p.c.accent);
 }

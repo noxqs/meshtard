@@ -234,7 +234,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.axes" => Box::new(crate::component_dialog::AxesPick::model_axes()),
         "tool.sandbox_from_scratch" => Box::new(crate::sandbox::FromScratch::default()),
         "tool.snaps" => Box::new(crate::component_snaps::EditSnaps::default()),
-        _ => return None,
+        _ => return crate::sandbox_tools::for_command(id),
     })
 }
 

@@ -323,6 +323,11 @@ visible = false
 items = [
   { id = "tool.sandbox_from_contours", tooltip = "From Contours" },
   { id = "tool.sandbox_from_scratch", tooltip = "From Scratch" },
+  { id = "tool.sandbox_smoove", tooltip = "Smoove" },
+  { id = "tool.sandbox_stamp", tooltip = "Stamp" },
+  { id = "tool.sandbox_drape", tooltip = "Drape" },
+  { id = "tool.sandbox_add_detail", tooltip = "Add Detail" },
+  { id = "tool.sandbox_flip_edge", tooltip = "Flip Edge" },
 ]
 
 [[toolbar]]
