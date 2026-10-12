@@ -23,3 +23,9 @@ Changes since 0.1.1, grouped by area (each area under its own `##` heading).
 - Styles Mix tab: drag a style from the list onto Edge, Face, Background, Watermark or Modeling Settings to take that group; picking a style and clicking a group still works.
 - Materials: textured materials show their texture, on a cube or flat by the Auto / Cube / Flat thumbnail setting (collection images too). Images are decoded in the background.
 - Components: rendered thumbnails for the model's components (again after each change) and for `.skp` files in collections (read in the background), one per frame while the panel is open.
+
+## Performance
+
+- Opening big `.skp` files is about 4x faster (a million-edge model: 23 s → 6 s; a 5,000-group model: 0.7 s → 0.35 s; files from SketchUp 2021 and later about 3x faster to read). The model read is exactly the same as before.
+- Saving `.skp` is up to 1.7x faster (a million-edge model: 3.7 s → 2.4 s), with the same bytes written.
+- Opening a file without a saved view no longer builds the drawn scene twice.

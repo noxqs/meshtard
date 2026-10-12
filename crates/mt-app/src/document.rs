@@ -1441,21 +1441,22 @@ impl Document {
             visibility::unlock_all(model) | visibility::set_locked(ents, &all, false)
         })
     }
+}
 
-    pub fn extents_camera(&self, fov_deg: f64) -> Option<Camera> {
-        let (min, max) = crate::camera_cmd::scene_bounds(&self.scene())?;
-        let center = (min + max) / 2.0;
-        let radius = ((max - min).length() / 2.0).max(1.0);
-        let distance = radius / (fov_deg.to_radians() / 2.0).sin();
-        let dir = DVec3::new(-0.5, -0.8, 0.35).normalize();
-        Some(Camera {
-            eye: center + dir * distance,
-            target: center,
-            fov_deg,
-            perspective: true,
-            two_point: false,
-        })
-    }
+/// Zoom Extents: a perspective camera looking at everything `scene` draws.
+pub fn extents_camera_of(scene: &Scene, fov_deg: f64) -> Option<Camera> {
+    let (min, max) = crate::camera_cmd::scene_bounds(scene)?;
+    let center = (min + max) / 2.0;
+    let radius = ((max - min).length() / 2.0).max(1.0);
+    let distance = radius / (fov_deg.to_radians() / 2.0).sin();
+    let dir = DVec3::new(-0.5, -0.8, 0.35).normalize();
+    Some(Camera {
+        eye: center + dir * distance,
+        target: center,
+        fov_deg,
+        perspective: true,
+        two_point: false,
+    })
 }
 
 #[cfg(test)]

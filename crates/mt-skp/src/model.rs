@@ -417,6 +417,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
     let b = r.builder;
     let vertices = b
         .vertices
+        .into_sorted()
         .into_iter()
         .map(|(id, p)| {
             let v = Vertex {
@@ -430,6 +431,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
         .collect();
     let edges = b
         .edges
+        .into_sorted()
         .into_iter()
         .map(|(id, (v1, v2))| {
             let flags = b.edge_flags.get(&id).copied().unwrap_or(0);
@@ -448,6 +450,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
         .collect();
     let faces = b
         .faces
+        .into_sorted()
         .into_iter()
         .map(|(id, f)| {
             let face = Face {

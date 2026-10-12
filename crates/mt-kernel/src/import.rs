@@ -13,6 +13,7 @@ use crate::entities::{
     MaterialId, VertexId,
 };
 use crate::model::{Definition, Layer, Material, Model};
+use crate::spatial::FxMap;
 
 /// SketchUp's 13-double transform (row-major 3x3, translation) as a matrix.
 pub fn transform_from_skp(m: &[f64]) -> DMat4 {
@@ -144,14 +145,16 @@ pub fn from_skp(src: &skp::Model) -> Model {
     }
     // A section plane is stored as its plane only; SketchUp draws it around the
     // model, so its point is the model's bounding box center projected onto it.
-    let all = crate::group::Selection {
-        edges: model.root.edges.keys().collect(),
-        faces: model.root.faces.keys().collect(),
-        instances: (0..model.root.instances.len()).collect(),
-    };
-    let center = crate::group::bounds(&model.root, &all, &model.definitions)
-        .map_or(DVec3::ZERO, |(lo, hi)| (lo + hi) / 2.0);
-    model.root.section_planes = section_planes(&src.root.section_planes, center);
+    if !src.root.section_planes.is_empty() {
+        let all = crate::group::Selection {
+            edges: model.root.edges.keys().collect(),
+            faces: model.root.faces.keys().collect(),
+            instances: (0..model.root.instances.len()).collect(),
+        };
+        let center = crate::group::bounds(&model.root, &all, &model.definitions)
+            .map_or(DVec3::ZERO, |(lo, hi)| (lo + hi) / 2.0);
+        model.root.section_planes = section_planes(&src.root.section_planes, center);
+    }
     for p in &src.pages {
         let (Some(eye), Some(target)) = (p.eye, p.target) else {
             continue;
@@ -370,11 +373,13 @@ pub fn merge_as_definition(dst: &mut Model, src: Model, name: &str) -> Definitio
 
 fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
     let mut ents = Entities::new();
-    let mut vertices: HashMap<i64, VertexId> = HashMap::new();
+    let mut vertices: FxMap<i64, VertexId> = FxMap::default();
+    vertices.reserve(d.vertices.len());
     for (&id, v) in &d.vertices {
         vertices.insert(id, ents.add_vertex(DVec3::new(v.x, v.y, v.z)));
     }
-    let mut edges: HashMap<i64, EdgeId> = HashMap::new();
+    let mut edges: FxMap<i64, EdgeId> = FxMap::default();
+    edges.reserve(d.edges.len());
     let layer = |name: &str| maps.layer(name);
     // One kernel curve per file curve; arcs get their arc data below.
     let mut curves: HashMap<i64, crate::entities::CurveId> = HashMap::new();

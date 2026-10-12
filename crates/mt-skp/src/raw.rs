@@ -76,11 +76,54 @@ pub struct RawInstance {
     pub is_group: bool,
 }
 
+/// Entries by id, collected as a list and sorted once at the end
+/// ([`Keyed::into_sorted`]): a big model has a million of them, which a map would
+/// sort one insertion at a time. Inserting an id twice keeps the later value, as a
+/// map does.
+#[derive(Debug, Clone)]
+pub struct Keyed<T> {
+    items: Vec<(EntityId, T)>,
+}
+
+impl<T> Default for Keyed<T> {
+    fn default() -> Self {
+        Self { items: Vec::new() }
+    }
+}
+
+impl<T> Keyed<T> {
+    pub fn insert(&mut self, id: EntityId, value: T) {
+        self.items.push((id, value));
+    }
+
+    /// Every value inserted (an id inserted twice gives both).
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.items.iter_mut().map(|(_, v)| v)
+    }
+
+    /// The entries in id order, one per id (the last inserted).
+    pub fn into_sorted(mut self) -> Vec<(EntityId, T)> {
+        if !self.items.is_sorted_by(|a, b| a.0 < b.0) {
+            // Stable: the entries of one id stay in insertion order.
+            self.items.sort_by_key(|e| e.0);
+            let mut unique: Vec<(EntityId, T)> = Vec::with_capacity(self.items.len());
+            for item in self.items {
+                match unique.last_mut() {
+                    Some(last) if last.0 == item.0 => *last = item,
+                    _ => unique.push(item),
+                }
+            }
+            self.items = unique;
+        }
+        self.items
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GeometryBuilder {
-    pub vertices: BTreeMap<EntityId, Vec3>,
+    pub vertices: Keyed<Vec3>,
     /// Edge id to (start vertex, end vertex).
-    pub edges: BTreeMap<EntityId, (Option<EntityId>, Option<EntityId>)>,
+    pub edges: Keyed<(Option<EntityId>, Option<EntityId>)>,
     /// Display flag byte: +1 hidden, +8 soft, +16 smooth.
     pub edge_flags: BTreeMap<EntityId, i32>,
     /// Edge id to the id of the curve (arc, circle, polyline) it belongs to.
@@ -89,7 +132,7 @@ pub struct GeometryBuilder {
     pub edge_layers: BTreeMap<EntityId, String>,
     /// Curve id to its analytic arc, for `CArcCurve` curves.
     pub arc_curves: BTreeMap<EntityId, ArcCurve>,
-    pub faces: BTreeMap<EntityId, RawFace>,
+    pub faces: Keyed<RawFace>,
     pub instances: Vec<RawInstance>,
     pub section_planes: Vec<SectionPlane>,
     pub texts: Vec<TextEntity>,

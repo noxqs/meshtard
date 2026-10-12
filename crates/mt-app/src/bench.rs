@@ -341,7 +341,7 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         })
     });
 
-    let camera = doc.extents_camera(35.0).unwrap_or_else(|| {
+    let camera = crate::document::extents_camera_of(&scene, 35.0).unwrap_or_else(|| {
         mt_render::Camera::from_spec(&mt_spec::Spec::builtin().unwrap().default_model.camera)
     });
     let px = DVec2::new(f64::from(VIEWPORT[0]), f64::from(VIEWPORT[1]));

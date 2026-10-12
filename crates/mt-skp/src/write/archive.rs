@@ -6,7 +6,7 @@
 //! gets its own writer whose slot numbering starts where the previous
 //! section's ends, so references between sections stay valid.
 
-use std::collections::HashMap;
+use crate::fx::FxMap;
 
 use super::{AttributeDict, AttributeValue, LayerId, Point3, WriteError, hex_bytes};
 
@@ -71,20 +71,23 @@ const TEXT_DELIM: [u8; 11] = hex_bytes("0100000001000300000001");
 const DIM_DRAWBASE: [u8; 10] = hex_bytes("00000001010000000000");
 
 /// Persistent-ID encoding: a mask byte (bit i set when byte i of the id is
-/// nonzero) followed by the nonzero bytes.
-fn encode_pid(pid: u64) -> Vec<u8> {
-    let mut mask = 0u8;
-    let mut bytes = vec![0u8];
+/// nonzero) followed by the nonzero bytes. Returns the bytes and their count.
+fn encode_pid(pid: u64) -> ([u8; 9], usize) {
+    let mut bytes = [0u8; 9];
+    let mut n = 1;
     for bit in 0..8 {
         let b = (pid >> (8 * bit)) as u8;
         if b != 0 {
-            mask |= 1 << bit;
-            bytes.push(b);
+            bytes[0] |= 1 << bit;
+            bytes[n] = b;
+            n += 1;
         }
     }
-    bytes[0] = mask;
-    bytes
+    (bytes, n)
 }
+
+/// Class name to class slot, per section writer.
+pub(super) type ClassSlots = FxMap<String, u32>;
 
 /// Parameters of a `CArcCurve`: everything a circle or arc's edges share.
 #[derive(Debug, Clone, Copy)]
@@ -126,9 +129,9 @@ pub struct EdgeFlags {
 /// definition). Vertices are shared where coordinates are exactly equal.
 #[derive(Debug, Default)]
 pub(super) struct Body {
-    vertex_slots: HashMap<[u64; 3], u32>,
+    vertex_slots: FxMap<[u64; 3], u32>,
     /// Keyed by the (sorted) vertex slot pair; value is (edge slot, start vertex slot).
-    edges: HashMap<(u32, u32), (u32, u32)>,
+    edges: FxMap<(u32, u32), (u32, u32)>,
     /// Entities added to this list so far.
     pub new_entities: u32,
 }
@@ -171,13 +174,13 @@ pub(super) struct InstanceRecord<'a> {
 
 pub(super) struct ArchiveWriter {
     pub next_slot: u32,
-    pub class_slot: HashMap<String, u32>,
+    pub class_slot: ClassSlots,
     pub next_pid: u64,
     pub buf: Vec<u8>,
 }
 
 impl ArchiveWriter {
-    pub fn new(next_slot: u32, class_slot: HashMap<String, u32>, next_pid: u64) -> Self {
+    pub fn new(next_slot: u32, class_slot: ClassSlots, next_pid: u64) -> Self {
         Self {
             next_slot,
             class_slot,
@@ -268,8 +271,8 @@ impl ArchiveWriter {
     }
 
     fn pid(&mut self, pid: u64) {
-        let enc = encode_pid(pid);
-        self.raw(&enc);
+        let (enc, n) = encode_pid(pid);
+        self.raw(&enc[..n]);
     }
 
     /// Entity preamble: a null attribute container and a fresh persistent id.
@@ -850,14 +853,18 @@ mod tests {
 
     #[test]
     fn pid_encoding() {
-        assert_eq!(encode_pid(0), [0]);
-        assert_eq!(encode_pid(19), [1, 19]);
-        assert_eq!(encode_pid(0x0102_0003), [0b1101, 3, 2, 1]);
+        let enc = |pid| {
+            let (b, n) = encode_pid(pid);
+            b[..n].to_vec()
+        };
+        assert_eq!(enc(0), [0]);
+        assert_eq!(enc(19), [1, 19]);
+        assert_eq!(enc(0x0102_0003), [0b1101, 3, 2, 1]);
     }
 
     #[test]
     fn class_refs_and_backrefs_escape_at_0x7fff() {
-        let mut w = ArchiveWriter::new(0x7fff, HashMap::new(), 1);
+        let mut w = ArchiveWriter::new(0x7fff, ClassSlots::default(), 1);
         w.new_object("CEdge", 2);
         assert_eq!(w.class_slot["CEdge"], 0x7fff);
         w.buf.clear();

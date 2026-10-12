@@ -12,8 +12,19 @@ const CONTAINERS: &[&str] = &[
     "9113", "9213", "6942", "6C42", "6842",
 ];
 
+/// [`CONTAINERS`] as tags.
+const CONTAINER_TAGS: [Tag; CONTAINERS.len()] = {
+    let mut out = [Tag([0, 0]); CONTAINERS.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = Tag::new(CONTAINERS[i]);
+        i += 1;
+    }
+    out
+};
+
 fn is_container(t: Tag) -> bool {
-    CONTAINERS.iter().any(|c| Tag::new(c) == t)
+    CONTAINER_TAGS.contains(&t)
 }
 
 /// Parses `d[start..end]` into a tree, descending into container tags.
@@ -66,6 +77,7 @@ pub fn flat(d: &[u8]) -> Vec<(Tag, &[u8])> {
 }
 
 /// First payload with `tag` in a flat list.
+#[inline(always)]
 pub fn flat_find<'a>(items: &[(Tag, &'a [u8])], tag: &str) -> Option<&'a [u8]> {
     let t = Tag::new(tag);
     items.iter().find(|(k, _)| *k == t).map(|(_, v)| *v)
@@ -88,25 +100,33 @@ pub fn headers(d: &[u8], start: usize, end: usize) -> Vec<(usize, usize)> {
 }
 
 /// Depth-first search for the first node with `tag`.
+#[inline(always)]
 pub fn find<'a>(nodes: &'a [TlvNode], tag: &str) -> Option<&'a TlvNode> {
-    let t = Tag::new(tag);
+    find_tag(nodes, Tag::new(tag))
+}
+
+fn find_tag(nodes: &[TlvNode], t: Tag) -> Option<&TlvNode> {
     nodes.iter().find_map(|n| {
         if n.tag == t {
             Some(n)
         } else {
-            find(&n.children, tag)
+            find_tag(&n.children, t)
         }
     })
 }
 
 /// Every node with `tag`, depth-first.
+#[inline(always)]
 pub fn find_all<'a>(nodes: &'a [TlvNode], tag: &str, out: &mut Vec<&'a TlvNode>) {
-    let t = Tag::new(tag);
+    find_all_tag(nodes, Tag::new(tag), out);
+}
+
+fn find_all_tag<'a>(nodes: &'a [TlvNode], t: Tag, out: &mut Vec<&'a TlvNode>) {
     for n in nodes {
         if n.tag == t {
             out.push(n);
         }
-        find_all(&n.children, tag, out);
+        find_all_tag(&n.children, t, out);
     }
 }
 

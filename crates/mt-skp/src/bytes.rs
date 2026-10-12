@@ -69,6 +69,8 @@ pub struct Tag(pub [u8; 2]);
 
 impl Tag {
     /// Parses `"C409"` into bytes `C4 09`. Panics on malformed literals (programmer error).
+    /// Always inlined, so a literal folds to a constant at the call site.
+    #[inline(always)]
     pub const fn new(s: &str) -> Self {
         const fn nib(c: u8) -> u8 {
             match c {

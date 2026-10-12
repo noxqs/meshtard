@@ -8,13 +8,14 @@
 //! as the writer did (the "slot" numbering), starting at a base it has to
 //! recover first because the walk starts mid-file.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use regex::Regex;
 
 use crate::Error;
 use crate::bytes::{f64_at, i32_at, u16_at, u32_at, vec3_at};
+use crate::fx::FxMap;
 use crate::model::{
     AttrDicts, AttrValue, ConstructionLine, ConstructionPoint, Dimension, EntityId, SectionPlane,
     StyleItem, TextEntity, Vec3, ViewCamera, stringify_attr_dict,
@@ -182,6 +183,19 @@ impl<'a> R<'a> {
         Ok(v)
     }
 
+    fn f64a<const N: usize>(&mut self) -> Result<[f64; N], Error> {
+        self.need(8 * N)?;
+        let mut v = [0.0; N];
+        for (x, c) in v
+            .iter_mut()
+            .zip(self.d[self.p..self.p + 8 * N].as_chunks::<8>().0)
+        {
+            *x = f64::from_le_bytes(*c);
+        }
+        self.p += 8 * N;
+        Ok(v)
+    }
+
     fn raw(&mut self, n: usize) -> Result<&'a [u8], Error> {
         self.need(n)?;
         let v = &self.d[self.p..self.p + n];
@@ -229,39 +243,63 @@ fn decode_utf16le(b: &[u8]) -> String {
 }
 
 /// One decoded entity (material/layer/component/edge/face/... - `k` says which).
-#[derive(Debug, Clone)]
+///
+/// Millions of these are read from a big model, nearly all vertices, edges, edge
+/// uses, loops and faces, so the fields those need are kept here and the others
+/// (names, transforms, textures, annotations...) sit in a [`VExt`] that is
+/// allocated only for the entities that set one of them. `V` dereferences to it:
+/// reading a field of an entity without one gives the default, writing one
+/// allocates it.
+#[derive(Debug, Clone, Default)]
 struct V {
     k: &'static str,
+    /// Vertices and guides: the position (`xyz()`); faces and section planes: the
+    /// stored plane.
+    plane: [f64; 4],
+    v1: u64,
+    v2: u64,
+    edge: u64,
+    /// Slot of this entity's CAttributeContainer, or `None` when it has none
+    /// (slot 0 is a legitimate real slot, so 0 can't be the sentinel).
+    attrs: Option<u64>,
+    /// Edge: slot of its CCurve / CArcCurve, 0 for none.
+    curve: u64,
+    sense: bool,
+    mat: i32,
+    back_mat: i32,
+    layer: i32,
+    hidden: u8,
+    soft: u8,
+    smooth: u8,
+    loops: Box<[Rc<V>]>,
+    /// Loop: the (edge slot, sense) of each edge use, all [`fill`] needs of them.
+    uses: Box<[(u64, bool)]>,
+    ents: Box<[Obj]>,
+    ext: Option<Box<VExt>>,
+}
+
+/// The fields of [`V`] few entities have.
+#[derive(Debug, Clone)]
+struct VExt {
     name: String,
     label: String,
     text: String,
     guid: String,
-    xyz: Vec3,
     /// Construction lines only: direction and bounded segment ends.
     direction: Vec3,
     start: Option<Vec3>,
     end: Option<Vec3>,
-    plane: Vec<f64>,
     xf: Vec<f64>,
     uvf: Vec<f64>,
     uvb: Vec<f64>,
     front_projected: bool,
     back_projected: bool,
-    v1: u64,
-    v2: u64,
-    edge: u64,
     def: u64,
-    /// Slot of this entity's CAttributeContainer, or `None` when it has none
-    /// (slot 0 is a legitimate real slot, so 0 can't be the sentinel).
-    attrs: Option<u64>,
     /// "dict" (CAttributeNamed) entities only.
     entries: crate::model::AttrDict,
     tex_dib: u64,
     /// SketchUp 3: the texture image sits inline (bytes in `blob`), no store slot.
     inline_tex: bool,
-    sense: bool,
-    /// Edge: slot of its CCurve / CArcCurve, 0 for none.
-    curve: u64,
     /// CArcCurve: the decoded arc.
     arc: Option<Box<crate::model::ArcCurve>>,
     faces_camera: bool,
@@ -269,12 +307,6 @@ struct V {
     group: bool,
     shadows_face_sun: bool,
     colorized: bool,
-    mat: i32,
-    back_mat: i32,
-    layer: i32,
-    hidden: i32,
-    soft: i32,
-    smooth: i32,
     r: i32,
     g: i32,
     b: i32,
@@ -284,11 +316,81 @@ struct V {
     th: f64,
     tex_file: String,
     blob: Vec<u8>,
-    loops: Vec<Rc<V>>,
-    uses: Vec<Rc<V>>,
-    ents: Vec<Obj>,
     /// Texts and dimensions only.
     annot: Option<Box<Annot>>,
+}
+
+impl VExt {
+    const DEFAULT: Self = Self {
+        name: String::new(),
+        label: String::new(),
+        text: String::new(),
+        guid: String::new(),
+        direction: [0.0; 3],
+        start: None,
+        end: None,
+        xf: Vec::new(),
+        uvf: Vec::new(),
+        uvb: Vec::new(),
+        front_projected: false,
+        back_projected: false,
+        def: 0,
+        entries: BTreeMap::new(),
+        tex_dib: 0,
+        inline_tex: false,
+        arc: None,
+        faces_camera: false,
+        group: false,
+        shadows_face_sun: false,
+        colorized: false,
+        r: 128,
+        g: 128,
+        b: 128,
+        a: 255,
+        opacity: 0.0,
+        tw: 0.0,
+        th: 0.0,
+        tex_file: String::new(),
+        blob: Vec::new(),
+        annot: None,
+    };
+}
+
+impl V {
+    fn xyz(&self) -> Vec3 {
+        [self.plane[0], self.plane[1], self.plane[2]]
+    }
+
+    fn set_xyz(&mut self, [x, y, z]: Vec3) {
+        self.plane = [x, y, z, 0.0];
+    }
+
+    /// The value a `CEdgeUse` record decodes to.
+    fn edge_use((edge, sense): (u64, bool)) -> Self {
+        Self {
+            k: "edgeuse",
+            edge,
+            sense,
+            ..Self::default()
+        }
+    }
+}
+
+/// What a [`V`] without its own [`VExt`] reads.
+static NO_EXT: VExt = VExt::DEFAULT;
+
+impl std::ops::Deref for V {
+    type Target = VExt;
+
+    fn deref(&self) -> &VExt {
+        self.ext.as_deref().unwrap_or(&NO_EXT)
+    }
+}
+
+impl std::ops::DerefMut for V {
+    fn deref_mut(&mut self) -> &mut VExt {
+        self.ext.get_or_insert_with(|| Box::new(VExt::DEFAULT))
+    }
 }
 
 /// The placement of a `CText` or `CDimensionLinear`.
@@ -307,62 +409,6 @@ struct Annot {
     label: Option<Vec3>,
     /// Text: screen position as fractions of the view, for a text without anchor.
     screen: Option<[f64; 2]>,
-}
-
-impl Default for V {
-    fn default() -> Self {
-        Self {
-            k: "",
-            name: String::new(),
-            label: String::new(),
-            text: String::new(),
-            guid: String::new(),
-            xyz: [0.0; 3],
-            direction: [0.0; 3],
-            start: None,
-            end: None,
-            plane: Vec::new(),
-            xf: Vec::new(),
-            uvf: Vec::new(),
-            uvb: Vec::new(),
-            front_projected: false,
-            back_projected: false,
-            v1: 0,
-            v2: 0,
-            edge: 0,
-            def: 0,
-            attrs: None,
-            entries: Default::default(),
-            tex_dib: 0,
-            inline_tex: false,
-            sense: false,
-            curve: 0,
-            arc: None,
-            faces_camera: false,
-            group: false,
-            shadows_face_sun: false,
-            colorized: false,
-            mat: 0,
-            back_mat: 0,
-            layer: 0,
-            hidden: 0,
-            soft: 0,
-            smooth: 0,
-            r: 128,
-            g: 128,
-            b: 128,
-            a: 255,
-            opacity: 0.0,
-            tw: 0.0,
-            th: 0.0,
-            tex_file: String::new(),
-            blob: Vec::new(),
-            loops: Vec::new(),
-            uses: Vec::new(),
-            ents: Vec::new(),
-            annot: None,
-        }
-    }
 }
 
 /// One object read: its slot, class name, and decoded value. A null tag is
@@ -393,6 +439,10 @@ struct Entry {
     #[allow(dead_code)]
     schema: i32,
     v: Option<Rc<V>>,
+    /// A `CEdgeUse` keeps only its edge slot and sense here (`v` stays `None`):
+    /// a big model has millions of them, and only their loop reads them (see
+    /// [`Entry::value`]).
+    edge_use: Option<(u64, bool)>,
 }
 
 impl Entry {
@@ -402,12 +452,99 @@ impl Entry {
             name,
             schema,
             v: None,
+            edge_use: None,
+        }
+    }
+
+    /// The decoded value, an edge use's rebuilt from what it keeps.
+    fn value(&self) -> Option<Rc<V>> {
+        match self.edge_use {
+            Some(u) => Some(Rc::new(V::edge_use(u))),
+            None => self.v.clone(),
         }
     }
 }
 
-type Slots = HashMap<u64, Entry>;
-type ClassSlots = HashMap<Rc<str>, u64>;
+/// The store map: slot to entry. The walk numbers slots one after another, so those
+/// sit in a list indexed from the first slot inserted (fast to look up, and freed in
+/// the order they were read); the few others (class slots learned from outside the
+/// walk, far-away numbers) go in a hash map.
+#[derive(Debug, Default)]
+struct Slots {
+    base: u64,
+    dense: Vec<Option<Entry>>,
+    sparse: FxMap<u64, Entry>,
+}
+
+/// How many missing slots `Slots::insert` fills with holes to keep a slot in the list.
+const SLOTS_MAX_GAP: u64 = 1024;
+
+impl Slots {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn index(&self, s: u64) -> Option<usize> {
+        let i = usize::try_from(s.checked_sub(self.base)?).ok()?;
+        (i < self.dense.len()).then_some(i)
+    }
+
+    fn get(&self, s: &u64) -> Option<&Entry> {
+        match self.index(*s).and_then(|i| self.dense[i].as_ref()) {
+            Some(e) => Some(e),
+            None => self.sparse.get(s),
+        }
+    }
+
+    fn get_mut(&mut self, s: &u64) -> Option<&mut Entry> {
+        match self.index(*s) {
+            Some(i) if self.dense[i].is_some() => self.dense[i].as_mut(),
+            _ => self.sparse.get_mut(s),
+        }
+    }
+
+    fn insert(&mut self, s: u64, e: Entry) {
+        if self.dense.is_empty() {
+            self.base = s;
+        }
+        let end = self.base + self.dense.len() as u64;
+        if s >= self.base && s < end + SLOTS_MAX_GAP {
+            let i = (s - self.base) as usize;
+            if i >= self.dense.len() {
+                self.dense.resize_with(i + 1, || None);
+            }
+            self.dense[i] = Some(e);
+            if !self.sparse.is_empty() {
+                self.sparse.remove(&s);
+            }
+        } else {
+            self.sparse.insert(s, e);
+        }
+    }
+
+    /// [`insert`](Self::insert) for a slot outside the walk's numbering.
+    fn insert_far(&mut self, s: u64, e: Entry) {
+        match self.index(s) {
+            Some(i) => self.dense[i] = Some(e),
+            None => {
+                self.sparse.insert(s, e);
+            }
+        }
+    }
+
+    /// Every slot and its entry, in no particular order.
+    fn iter(&self) -> impl Iterator<Item = (u64, &Entry)> {
+        let dense = (self.dense.iter().enumerate())
+            .filter_map(|(i, e)| Some((self.base + i as u64, e.as_ref()?)));
+        dense.chain(self.sparse.iter().map(|(&s, e)| (s, e)))
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Entry> {
+        self.iter().map(|(_, e)| e)
+    }
+}
+
+type ClassSlots = FxMap<Rc<str>, u64>;
 
 // True when the bytes at p are an MFC class-ref to class `slot`. Mirrors both
 // encodings `Archive::object` decodes: the short 16-bit form (0x8000|slot)
@@ -457,8 +594,8 @@ impl<'a> Archive<'a> {
             next: 0,
             base: 0,
             current_loop: 0,
-            slots: HashMap::new(),
-            class_slot: HashMap::new(),
+            slots: Slots::new(),
+            class_slot: FxMap::default(),
             burns: Vec::new(),
             cum_delta: 0,
             annot_watermark: None,
@@ -513,21 +650,19 @@ impl<'a> Archive<'a> {
     }
 
     fn new_class_ref(&mut self, s: u64, expect: Option<&str>) -> Result<Obj, Error> {
-        let e = match self.slots.entry(s) {
-            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-            std::collections::hash_map::Entry::Vacant(vac) => {
+        let name = match self.slots.get(&s) {
+            Some(e) if !e.cls => return Err(bad("class ref points to object")),
+            Some(e) => e.name.clone(),
+            None => {
                 let Some(expect) = expect else {
                     return Err(bad("unknown legacy class slot"));
                 };
                 let name: Rc<str> = Rc::from(expect);
                 self.class_slot.insert(name.clone(), s);
-                vac.insert(Entry::new(true, name, 0))
+                self.slots.insert_far(s, Entry::new(true, name.clone(), 0));
+                name
             }
         };
-        if !e.cls {
-            return Err(bad("class ref points to object"));
-        }
-        let name = e.name.clone();
         self.new_obj(name)
     }
 
@@ -581,7 +716,7 @@ impl<'a> Archive<'a> {
         Ok(Obj {
             slot: s,
             name: e.name.clone(),
-            v: e.v.clone(),
+            v: e.value(),
         })
     }
 
@@ -781,9 +916,9 @@ impl<'a> Archive<'a> {
         let b = self.r.raw(if v3 { 5 } else { 8 })?;
         if !v3 {
             v.mat = i32::from(b[0]) | i32::from(b[1]) << 8;
-            v.hidden = i32::from(b[2]);
-            v.soft = i32::from(b[5]);
-            v.smooth = i32::from(b[6]);
+            v.hidden = b[2];
+            v.soft = b[5];
+            v.smooth = b[6];
         }
         // The layer field is normally a u16 id, but an entity can carry the
         // layer BY OBJECT instead (seen on real 2018 instances): a full inline
@@ -916,7 +1051,11 @@ impl<'a> Archive<'a> {
         let slot = self.alloc(Entry::new(false, n.clone(), 0));
         let v = Rc::new(self.read(&n, slot)?);
         if let Some(e) = self.slots.get_mut(&slot) {
-            e.v = Some(v.clone());
+            if v.k == "edgeuse" {
+                e.edge_use = Some((v.edge, v.sense));
+            } else {
+                e.v = Some(v.clone());
+            }
         }
         if &*n == "CDimensionLinear" || &*n == "CText" {
             self.annot_watermark = Some(self.next);
@@ -934,8 +1073,7 @@ impl<'a> Archive<'a> {
             "CVertex" => {
                 self.early_preamble()?;
                 v.k = "vertex";
-                let a = self.r.f64s(3)?;
-                v.xyz = [a[0], a[1], a[2]];
+                v.set_xyz(self.r.f64a()?);
             }
             "CEdge" => {
                 self.preamble()?;
@@ -1014,11 +1152,13 @@ impl<'a> Archive<'a> {
                 self.early_preamble()?;
                 self.r.raw(2)?;
                 v.k = "loop";
+                let mut uses = Vec::new();
                 while self.r.p + 2 <= self.d().len() && u16_at(self.d(), self.r.p)? != 0 {
                     if let Some(q) = self.object(Some("CEdgeUse"))?.v {
-                        v.uses.push(q);
+                        uses.push((q.edge, q.sense));
                     }
                 }
+                v.uses = uses.into();
                 self.r.u16()?;
                 self.current_loop = old;
             }
@@ -1035,25 +1175,29 @@ impl<'a> Archive<'a> {
                         v.mat = a as i32;
                     }
                 }
-                v.plane = self.r.f64s(4)?;
+                v.plane = self.r.f64a()?;
                 let count = self.r.u32()?;
                 if count > 10000 {
                     return Err(bad("implausible loop count"));
                 }
+                let mut loops = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     if let Some(q) = self.object(Some("CLoop"))?.v {
-                        v.loops.push(q);
+                        loops.push(q);
                     }
                 }
+                v.loops = loops.into();
                 v.back_mat = i32::from(self.r.u16()?);
             }
             "CAttributeContainer" => {
                 self.preamble()?;
                 v.k = "attrs";
+                let mut ents = Vec::new();
                 while self.r.p + 2 <= self.d().len() && u16_at(self.d(), self.r.p)? != 0 {
                     let o = self.object(Some("CAttributeNamed"))?;
-                    v.ents.push(o);
+                    ents.push(o);
                 }
+                v.ents = ents.into();
                 self.r.u16()?;
             }
             "CAttributeNamed" => {
@@ -1088,7 +1232,7 @@ impl<'a> Archive<'a> {
                 while mid.len() < 8 && !self.r.marker() {
                     mid.push(self.r.u8()?);
                 }
-                v.hidden = mid.first().map_or(0, |&b| i32::from(b));
+                v.hidden = mid.first().copied().unwrap_or(0);
                 self.r.utf16()?;
                 let flags = self.r.u16()?;
                 if flags & 0x00ff != 0 {
@@ -1204,11 +1348,11 @@ impl<'a> Archive<'a> {
                 // direction marking where the visible segment starts/ends. A
                 // parameter magnitude past HUGE_PARAM means unbounded.
                 let lp = self.r.f64s(8)?;
-                v.xyz = [lp[0], lp[1], lp[2]];
+                v.set_xyz([lp[0], lp[1], lp[2]]);
                 v.direction = [lp[3], lp[4], lp[5]];
                 const HUGE_PARAM: f64 = 1e20;
                 let (start_param, end_param) = (lp[6], lp[7]);
-                let (p, dir) = (v.xyz, v.direction);
+                let (p, dir) = (v.xyz(), v.direction);
                 let at = |t: f64| [p[0] + dir[0] * t, p[1] + dir[1] * t, p[2] + dir[2] * t];
                 if start_param.abs() < HUGE_PARAM {
                     v.start = Some(at(start_param));
@@ -1249,7 +1393,7 @@ impl<'a> Archive<'a> {
                 v.k = "constructionpoint";
                 self.draw(&mut v)?;
                 let pos = self.r.f64s(3)?;
-                v.xyz = [pos[0], pos[1], pos[2]];
+                v.set_xyz([pos[0], pos[1], pos[2]]);
                 self.r.f64s(3)?; // reserved/unused (observed all-zero)
                 self.r.u8()?; // reserved/unused (observed 0)
             }
@@ -1261,7 +1405,7 @@ impl<'a> Archive<'a> {
                 if first.abs() > 1.0001 {
                     self.object(None)?;
                 }
-                v.plane = self.r.f64s(4)?;
+                v.plane = self.r.f64a()?;
                 if self.r.marker() {
                     v.name = self.r.utf16()?;
                     v.label = self.r.utf16()?;
@@ -1447,7 +1591,7 @@ impl<'a> Archive<'a> {
         if count > 5_000_000 {
             return Err(bad("implausible def entities"));
         }
-        v.ents = self.entity_list(count, false)?;
+        v.ents = self.entity_list(count, false)?.into();
         let mut nr = self.r.u32()?;
         if nr > 100_000
             && let Some(retry) = self.retry_count_after_v20_filler(self.r.p - 4, 100_000)
@@ -1909,19 +2053,59 @@ fn layer_id(layer: i32) -> String {
 
 fn vertex_at(slots: &Slots, slot: Option<u64>) -> Option<Vec3> {
     let v = slots.get(&slot?)?.v.as_ref()?;
-    (v.k == "vertex").then_some(v.xyz)
+    (v.k == "vertex").then(|| v.xyz())
 }
 
-fn add_edge(b: &mut GeometryBuilder, s: u64, e: &V, slots: &Slots) {
+/// A set of slots: a bit per slot of the walk's numbering, a hash set for the rest.
+struct SlotSet {
+    base: u64,
+    bits: Vec<u64>,
+    far: crate::fx::FxSet<u64>,
+}
+
+impl SlotSet {
+    fn new(slots: &Slots) -> Self {
+        Self {
+            base: slots.base,
+            bits: vec![0; slots.dense.len().div_ceil(64)],
+            far: Default::default(),
+        }
+    }
+
+    /// Adds `s`; false when it was already there.
+    fn insert(&mut self, s: u64) -> bool {
+        let i = s.wrapping_sub(self.base);
+        match self.bits.get_mut((i / 64) as usize) {
+            Some(word) if s >= self.base => {
+                let bit = 1 << (i % 64);
+                let new = *word & bit == 0;
+                *word |= bit;
+                new
+            }
+            _ => self.far.insert(s),
+        }
+    }
+}
+
+/// The vertices and edges [`fill`] has added to its builder.
+struct Seen {
+    vertices: SlotSet,
+    edges: SlotSet,
+}
+
+fn add_edge(seen: &mut Seen, b: &mut GeometryBuilder, s: u64, e: &V, slots: &Slots) {
     let id = s as EntityId;
-    if b.edges.contains_key(&id) {
+    if !seen.edges.insert(s) {
         return;
     }
     for vid in [e.v1, e.v2] {
         if let Some(v) = slots.get(&vid).and_then(|x| x.v.as_ref())
             && v.k == "vertex"
+            && seen.vertices.insert(vid)
         {
-            b.vertices.insert(vid as EntityId, v.xyz);
+            // A vertex's position never changes: inserting it again would not
+            // change the builder.
+            b.vertices.insert(vid as EntityId, v.xyz());
         }
     }
     b.edges
@@ -1972,11 +2156,15 @@ fn extract_legacy_attribute_dictionaries(attrs_slot: Option<u64>, slots: &Slots)
 }
 
 fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
+    let mut g = Seen {
+        vertices: SlotSet::new(slots),
+        edges: SlotSet::new(slots),
+    };
     for x in ents {
         let s = x.slot;
         let Some(v) = &x.v else { continue };
         match v.k {
-            "edge" => add_edge(b, s, v, slots),
+            "edge" => add_edge(&mut g, b, s, v, slots),
             "face" => {
                 let mut f = RawFace::default();
                 if let [x, y, z, ..] = v.plane[..] {
@@ -1996,12 +2184,12 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                 }
                 for lp in &v.loops {
                     let mut co = Vec::new();
-                    for u in &lp.uses {
-                        if let Some(ev) = slots.get(&u.edge).and_then(|e| e.v.as_ref()) {
-                            add_edge(b, u.edge, ev, slots);
+                    for &(edge, sense) in &lp.uses {
+                        if let Some(ev) = slots.get(&edge).and_then(|e| e.v.as_ref()) {
+                            add_edge(&mut g, b, edge, ev, slots);
                             co.push(CoEdge {
-                                edge_id: u.edge as EntityId,
-                                orientation: if u.sense { -1 } else { 1 },
+                                edge_id: edge as EntityId,
+                                orientation: if sense { -1 } else { 1 },
                             });
                         }
                     }
@@ -2119,14 +2307,14 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                 });
             }
             "constructionline" => b.construction_lines.push(ConstructionLine {
-                point: v.xyz,
+                point: v.xyz(),
                 direction: v.direction,
                 start: v.start,
                 end: v.end,
             }),
             "constructionpoint" => b
                 .construction_points
-                .push(ConstructionPoint { position: v.xyz }),
+                .push(ConstructionPoint { position: v.xyz() }),
             _ => {}
         }
     }
@@ -2607,7 +2795,7 @@ fn parse_into(data: &[u8], out: &mut RawParsed) -> Result<(), Error> {
         .filter(|e| !e.cls && &*e.name == "CImage")
         .filter_map(|e| e.v.as_ref().map(|v| v.def))
         .collect();
-    for (&slot, e) in &ar.slots {
+    for (slot, e) in ar.slots.iter() {
         if e.cls || &*e.name != "CComponentDefinition" {
             continue;
         }
@@ -2816,7 +3004,7 @@ mod tests {
     }
 
     fn scan(data: &[u8], slots: &mut Slots) -> Vec<RawPage> {
-        let mut class_slot = ClassSlots::new();
+        let mut class_slot = ClassSlots::default();
         let mut next = 0;
         let table = LegacySlotTable {
             slots,

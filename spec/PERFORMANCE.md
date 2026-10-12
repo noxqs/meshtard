@@ -165,13 +165,78 @@ tests that compare each fast path with the code it replaces.
 The app was also checked by hand under Xvfb with the car model: hover, Select All with
 its highlight, and a Move with its live preview and inference tooltip draw as before.
 
+## Opening and saving .skp
+
+A second pass on the `.skp` reader and writer (`mt-skp`) and the kernel's import and
+export (`mt-kernel/src/import.rs`, `export.rs`). Same machine and caveats as above
+(release build, `MESHTARD_BENCH_NO_GPU=1`; the times move by up to about 1.5x between
+runs). "Before" is the base commit, "after" this change.
+
+| model | save | open: parse .skp | open: build model | open |
+|---|---:|---:|---:|---:|
+| grid 1M edges | 3.73 s → 2.44 s | 23.56 s → 3.91 s (6.0x) | 3.03 s → 2.04 s | 22.66 s → 6.00 s (3.8x) |
+| instances 10k | 5.0 ms → 4.2 ms | 35 ms → 20 ms | 3.8 ms → 3.4 ms | 41 ms → 25 ms |
+| groups 5k | 165 ms → 97 ms | 823 ms → 213 ms (3.9x) | 108 ms → 76 ms | 728 ms → 348 ms |
+| coedge_orientation_regression.skp | 169 ms → 109 ms | 836 ms → 245 ms (3.4x) | 120 ms → 80 ms | 1.20 s → 311 ms (3.9x) |
+| gondola_v20.skp | 15 ms → 6.1 ms | 57 ms → 15 ms | 7.1 ms → 4.9 ms | 68 ms → 21 ms |
+
+"read file" (opening the original corpus file: SketchUp 2021+ format for the car):
+coedge_orientation_regression.skp 1.19 s → 785 ms, gondola_v20.skp 68 ms → 21 ms. The
+scene and hover checksums are unchanged for every model.
+
+The focused benchmark, `cargo test --release -p mt-skp --test bench -- --ignored
+--nocapture` (`crates/mt-skp/tests/bench.rs`), writes the million-edge grid with the
+writer alone and parses it back: write 1.84 s → 1.37 s, parse 23.65 s → 3.86 s; the
+car (original file) parses in 2.21 s → 0.62 s. It prints a checksum of the bytes
+written and of each model read (the same before and after).
+`MESHTARD_SKP_BENCH_GRID`, `_RUNS`, `_FILES` and `_CHECKSUM=0` tune it.
+
+What changed (`crates/mt-kernel/tests/skp_checksums.rs` checks that every corpus file,
+and a 90 x 90 grid written by the kernel, still parses to the same model, builds the
+same kernel model and saves to the same bytes; the writer's byte-for-byte test against
+OpenSKP and the round-trip tests are unchanged):
+
+1. **Legacy reader memory** (`legacy.rs`). Every object read was a 600-byte value
+   (every field any entity type has), so the grid's 4.7 million objects took gigabytes,
+   and most of the time went to page faults and the allocator. The rare fields
+   (names, transforms, textures, annotations) now sit in a box only the entities that
+   have them allocate; edge uses (2 million in the grid) keep only their edge and
+   sense in the slot table, and a loop keeps those pairs instead of the objects.
+2. **Slot table as a list** (`Slots`). The archive numbers objects one after another,
+   so the store map is a list indexed from the first slot (a hash map only for the few
+   slots outside the walk) instead of a SipHash map of millions of entries.
+3. **Faster hashing** (`mt-skp/src/fx.rs`) for the class-name tables, the writer's
+   vertex and edge sharing maps and the reader's leftover maps; the kernel import's
+   id maps use the kernel's `FxMap`. None is iterated in an order that matters.
+4. **Vertices, edges and faces collected as lists** (`raw::Keyed`) and sorted once
+   when the model is built, instead of a million map insertions; the legacy `fill`
+   tracks the vertices and edges it has added with bit sets.
+5. **VFF tags** (`tlv.rs`, `geometry.rs`): the tag literals were parsed from text on
+   every comparison (a sixth of the time to read a SketchUp 2021+ file); they are
+   constants now.
+6. **Writer**: persistent ids encoded without an allocation.
+7. **Kernel**: the import computes the root's bounding box only when the file has
+   section planes (it is only used to place them); the export finds a free definition
+   name with a set instead of comparing with every definition written so far
+   (quadratic in the number of groups).
+8. **Opening a file without a saved view builds the scene once** (`App::install`):
+   Zoom Extents now uses the scene the app builds anyway instead of building one of its
+   own first (a second build only for models with face-camera components, whose scene
+   depends on the view). Not in the benchmark (it times `Document::open` alone); on the
+   grid it saves one scene build, about 1 s.
+
 ## Left to do
 
 Measured but not changed here, biggest first:
 
-- **Opening and saving `.skp`** (grid: ~21 s to parse, ~3.5 s to write; groups 5k:
-  0.7 s to parse). The time is in `mt-skp` (`legacy::fill`, `Archive::read`, its hash
-  maps and many small allocations), which this change did not touch.
+- **Opening and saving `.skp`, what remains** (grid: ~4 s to parse, ~2 s to build the
+  kernel model, ~2.4 s to save). The legacy walk still allocates one object per
+  vertex, edge, loop and face and keeps them all until the end (a per-kind arena, or
+  filling the builder during the walk, would avoid most of it); building the public
+  `mt_skp::Model` maps and then the kernel's slot maps copies every face twice more;
+  the kernel import is bound by the kernel's own per-vertex and per-edge lists. VFF
+  files copy every TLV leaf's payload (`tlv::parse_recursive`) and walk the tree
+  several times (`geometry::collect_*`).
 - **Move commit on huge flat contexts** (grid: 7-8 s for 100k faces). Spread over
   `transform_vertices`' welding: building the spatial index (`Entities::build_index`),
   `set_vertex_positions` and its `edges_in` / `faces_in` / `edges_near_segment` queries.
@@ -190,5 +255,3 @@ Measured but not changed here, biggest first:
   highlight rebuilds and re-uploads the whole edge list on every selection change.
 - **Frame time** on llvmpipe grows with edges (grid ~3 s per frame); not measured on a
   real GPU here.
-- Opening a file without a saved view builds the scene twice (once for Zoom Extents in
-  `Document::extents_camera`, once in `App::rebuild`).
