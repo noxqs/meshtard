@@ -225,7 +225,17 @@ Reading first means real SketchUp models are available for testing everything el
 ### M18: occasional gaps (FEATURES.md 65-67)
 
 ### M19: Libraries and extensions (FEATURES.md 68-69)
-- [ ] Model library browser with pluggable sources (local folders, Poly Haven, others); extension system, Extension Manager, Meshtard Extension Warehouse.
+- [x] Model library browser with pluggable sources (local folders, Poly Haven, Sketchfab token), download cache with a size limit and recent downloads; Rhai extension system, Extension Manager, Meshtard Extension Warehouse, Extension Console. Also Match Photo (item 30). Left: Sketchfab OAuth, Ruby API compatibility, signed packages.
+
+### M20: Leftovers round (LEFTOVERS.md 2-15)
+- [x] Kernel grazing-edge fix, f64 glTF positions, Divide by length, Shift plane lock in 3-point tools (2-5).
+- [x] Component Cut Opening / Always Face Camera / Shadows Face Sun (6); Sandbox Smoove, Stamp, Drape, Add Detail, Flip Edge (7).
+- [x] Import: DXF blocks/text/dimensions/hatches, glTF and FBX hierarchy; export: 3DS, USDZ, selection only, ASCII STL/PLY, PLY UVs, FBX separate parts (8, 9).
+- [x] Tray panel collections, Statistics, Mix, .style files, tag multi-select, scene thumbnails (10); Model Info fonts, dimension expert settings, OpenStreetMap location snapshot (11); watermark masks and order, Modeling colors (13); Search button (14); Model Library cache and recent downloads (12).
+- [x] IFC import/export, openings and boolean differences cut (15); Preferences > Files folders used (FEATURES 43).
+- [x] `validate` geometry checks on a grid (about 80x faster).
+- [ ] Mesh import healing: imports valid with all geometry checks (in progress).
+- Waiting on the trial: LEFTOVERS 1 (model-only data in .skp, needs sample files) and 5 (Arc Side and Center, Intersection with Hidden Section).
 
 ## Risks
 
