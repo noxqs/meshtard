@@ -78,23 +78,54 @@ through `mesh_import::to_entities`, which heals the polygon soup into valid kern
 geometry (`mt_kernel::mesh_heal`) the way SketchUp's importers leave it: points within
 the tolerance weld (nearest earlier point); a vertex within 0.75 of the tolerance of a
 polygon side splits it, sides that pass that close to each other get a shared vertex
-(repeated until settled, at most 8 rounds, stopped when the splits grow); polygons that
-then visit a vertex twice or bend out of their plane are ear-clipped and slivers
-thinner than that distance are dropped; coplanar faces that overlap are replaced by
-the cells of their arrangement (`arrangement::cells`), each cell taking the material,
+(repeated until settled, at most 8 rounds, stopped when the splits grow or a round
+finds what an earlier one did); a polygon routed through one vertex twice is cut into
+its simple parts there, dropping spikes (two-vertex parts: slivers collapsed onto a
+side) and parts turned over, so a side the rerouting removed does not come back as a
+diagonal; parts that bend out of their plane are ear-clipped and slivers thinner than
+that distance are dropped. Where splitting still does not settle (tangles of vertices
+and nearly collinear long sides within the tolerance of each other, where rerouting a
+side through one vertex brings it back off another), the vertices still to be inserted
+are snapped onto the nearer end of their side when within twice the tolerance
+(iterated snap rounding onto the mesh's own vertices; at most 4 times, each removing
+vertices) and splitting runs again. Coplanar faces that overlap are replaced by the
+cells of their arrangement (`arrangement::cells`), each cell taking the material,
 texture position and side of the earliest face covering it (a face drawn on another
-takes that face's material in SketchUp); faces over the same edges are dropped. Faces
-of different planes that pass through each other are not intersected (SketchUp's
-importers do not either). `import_check` (now also reading OBJ, STL, PLY, 3MF and 3DS;
-`--errors` counts every problem by kind) over the 59 assimp / tinyobj / 3MF Consortium /
-Stanford bunny files of `formats_check`, the Khronos samples above and the IFC samples:
-invalid imports went from 16 to 3 in `formats_check` (`regr01.obj`, `Wuson.stl`,
-`heartgears.3mf`) and S_Office (web-ifc) has 3 of its ~3,760 meshes left, all sliver
-solids or bundles of nearly collinear long edges thinner than the tolerance, where
-splitting does not settle (LEFTOVERS 17). Times (release): TransmissionTest imports in
-about 2.5 s (1.0 s unhealed) and validates with `Checks::ALL` in 1.5 s (was 7 s: the
-validator's vertex grid now uses the edges' cell size); S_Office in about 4.5 s
-(2 s unhealed).
+takes that face's material in SketchUp); so are faces facing each other with every
+corner within the tolerance of the other's plane (normals within 0.8° of opposite: the
+two sides of a fold or of a solid thinner than the tolerance, which exports turn into
+the same triangles). A group's corners more than half the tolerance off its plane are
+first moved onto it (at most twice the tolerance, when no vertex comes within the
+tolerance of another or half of it of an edge and every other face at them stays
+planar), and each cell starts at its corner nearest the middle of its corners'
+heights (a face's plane goes through its first corner). Merged faces take their first
+face's plane, which can make them coplanar with a face they overlap; those overlaps are
+resolved after merging too. Faces over the same edges are dropped. Faces of different
+planes that pass through each other are not intersected (SketchUp's importers do not
+either). `import_check` (now also reading OBJ, STL, PLY, 3MF and 3DS; `--errors`
+counts every problem by kind) over the 59 assimp / tinyobj / 3MF Consortium / Stanford
+bunny files of `formats_check`, the Khronos samples above and the IFC samples: every
+`formats_check` import is valid with `Checks::ALL` (16 invalid before healing, 3 after
+its first version: `regr01.obj`, `Wuson.stl`, `heartgears.3mf`), and S_Office (web-ifc)
+has 1 of its ~3,760 meshes left (was 3): a window-frame slab whose two overlapping
+faces have corners 0.0007 in. out of each other's plane, where moving them would bend
+another face of the slab (LEFTOVERS 17). Times (release, same machine): TransmissionTest
+imports in about 2.9 s (2.4 s with the first healing, 1.0 s unhealed); S_Office 7.3 s
+(7.6 s), heartgears 1.4 s (1.0 s), bun_zipper 1.3 s (1.0 s).
+
+`formats_check` round trips went from 41 differences to 29 (33 before healing): the
+gears' and the bunny's double-sided folds no longer turn into duplicate triangles that
+re-import drops. Left (all other formats within their 1e-4 limit): the glTF round trips
+of Spider (STL, +9e-5), 3DSMaxExport (+3e-5), the low-res bunny (-2e-5) and the 3MF
+gears (-3e-5, heartgears -2e-4) against glTF's 1e-6, and `Wuson.stl` in every format
+(-8e-3). These are models a few hundred tolerances across (Spider and Wuson.stl are
+0.25 in. and 0.13 in. in their file units): their faces are planar only within the
+tolerance, so the area of their exported triangles depends on the diagonals chosen
+(1e-4 of it here), and re-import heals them again. A triangulation that avoids
+slivers (Lawson flips towards a constrained Delaunay triangulation, or maximizing the
+narrowest triangle) was tried in `tessellate` and made these round trips worse (29 to
+45 differences): earcut's slivers are ears of three consecutive corners, which
+re-import's side splitting absorbs exactly, while flipped ones are not; it is not used.
 
 ## IFC checks
 

@@ -303,7 +303,13 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
     }
     mesh_heal::resolve_overlaps(&mut ents);
     if opts.merge_coplanar {
-        merge_coplanar(&mut ents);
+        let merged = merge_coplanar(&mut ents);
+        // A merged face takes its first face's plane, which can make it coplanar with
+        // a face it overlaps (the other side of a solid thinner than the tolerance):
+        // resolve those overlaps too, and merge their cells.
+        if mesh_heal::resolve_overlaps_touching(&mut ents, Some(&merged)) > 0 {
+            merge_coplanar(&mut ents);
+        }
         // The two sides of a sliver can merge into faces over the same edges.
         mesh_heal::drop_repeated_faces(&mut ents);
     }
@@ -449,7 +455,9 @@ fn same_uv(a: &Option<Box<crate::FaceUv>>, b: &Option<Box<crate::FaceUv>>) -> bo
 }
 
 /// Joins each connected region of coplanar faces with the same material into one face.
-fn merge_coplanar(ents: &mut Entities) {
+/// Returns the faces made.
+fn merge_coplanar(ents: &mut Entities) -> BTreeSet<FaceId> {
+    let mut merged = BTreeSet::new();
     let faces: Vec<FaceId> = ents.faces.keys().collect();
     let mut done: BTreeSet<FaceId> = BTreeSet::new();
     for seed in faces {
@@ -495,13 +503,19 @@ fn merge_coplanar(ents: &mut Entities) {
         }
         done.extend(region.iter().copied());
         if region.len() > 1 {
-            merge_region(ents, &region, &members, plane);
+            merged.extend(merge_region(ents, &region, &members, plane));
         }
     }
+    merged
 }
 
 /// Replaces the faces of `region` by one face bounded by the region's boundary.
-fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceId>, plane: Plane) {
+fn merge_region(
+    ents: &mut Entities,
+    region: &[FaceId],
+    members: &BTreeSet<FaceId>,
+    plane: Plane,
+) -> Option<FaceId> {
     let interior = |ents: &Entities, e| {
         let faces = &ents.edges[e].faces;
         faces.len() == 2 && faces.iter().all(|f| members.contains(f))
@@ -516,7 +530,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
                 if !boundary.insert(c.edge) {
                     // Two faces of the region meet at an edge a third face uses too:
                     // the region would run along it both ways.
-                    return;
+                    return None;
                 }
                 next.entry(ents.coedge_ends(*c).0).or_default().push(*c);
                 count += 1;
@@ -530,7 +544,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
         let mut v = start;
         loop {
             let Some(c) = next.get_mut(&v).and_then(Vec::pop) else {
-                return; // Open boundary: leave the region alone.
+                return None; // Open boundary: leave the region alone.
             };
             coedges.push(c);
             used += 1;
@@ -542,7 +556,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
         loops.push(Loop { coedges });
     }
     if used != count {
-        return;
+        return None;
     }
     let area = |ents: &Entities, l: &Loop| {
         let pts: Vec<_> = ents
@@ -556,7 +570,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
         .filter(|&i| area(ents, &loops[i]) > 0.0)
         .collect();
     let [outer] = outer[..] else {
-        return; // Pinched or several regions: keep the triangles.
+        return None; // Pinched or several regions: keep the triangles.
     };
     // The merged face's plane goes through its first corner: every corner must be
     // in it, which faces each within the tolerance of the region's plane may not be.
@@ -569,7 +583,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
         .iter()
         .all(|l| ents.loop_points(l).iter().all(|&p| first.contains(p)))
     {
-        return;
+        return None;
     }
     let attrs = ents.faces[region[0]].attrs.clone();
     let mut interior_edges: BTreeSet<_> = BTreeSet::new();
@@ -590,7 +604,7 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
         ents.remove_vertex_if_unused(b);
     }
     let outer_loop = loops.remove(outer);
-    ents.add_raw_face(outer_loop, loops, normal, attrs);
+    Some(ents.add_raw_face(outer_loop, loops, normal, attrs))
 }
 
 #[cfg(test)]
