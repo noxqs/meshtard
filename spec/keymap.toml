@@ -3,16 +3,17 @@
 verified = false
 
 # Key syntax: modifiers joined with "+", in the order Ctrl, Shift, Alt. Keys use egui names.
+# A command takes one key or a list of keys; menus show the first.
 [bindings]
 "file.new" = "Ctrl+N"
 "file.open" = "Ctrl+O"
 "file.save" = "Ctrl+S"
 "file.print" = "Ctrl+P"
-"edit.undo" = "Ctrl+Z"
+"edit.undo" = ["Ctrl+Z", "Alt+Backspace"]
 "edit.redo" = "Ctrl+Y"
-"edit.cut" = "Ctrl+X"
-"edit.copy" = "Ctrl+C"
-"edit.paste" = "Ctrl+V"
+"edit.cut" = ["Ctrl+X", "Shift+Delete"]
+"edit.copy" = ["Ctrl+C", "Ctrl+Insert"]
+"edit.paste" = ["Ctrl+V", "Shift+Insert"]
 "edit.delete" = "Delete"
 "edit.select_all" = "Ctrl+A"
 "edit.select_none" = "Ctrl+T"
@@ -22,7 +23,7 @@ verified = false
 "camera.pan" = "H"
 "camera.zoom" = "Z"
 "camera.zoom_window" = "Ctrl+Shift+W"
-"camera.zoom_extents" = "Shift+Z"
+"camera.zoom_extents" = ["Shift+Z", "Ctrl+Shift+E"]
 "help.search" = "Shift+S"
 "view.anim_previous" = "PageUp"
 "view.anim_next" = "PageDown"
@@ -45,9 +46,12 @@ verified = false
 # above, Shift+Space, Shift+Z, G, Shift+S and adds K (Back Edges) and I (Image Igloo,
 # no command yet); the File/Edit/Zoom Window/scene keys above match a Windows
 # Preferences > Shortcuts export (forums.sketchup.com/t/36923, 2017) [inf].
-# Secondary keys of that export (Ctrl+Insert, Shift+Delete, Shift+Insert,
-# Alt+Backspace, Ctrl+Shift+E) need more than one key per command (FEATURES.md 75).
+# The second keys of Undo, Cut, Copy, Paste and Zoom Extents (Alt+Backspace,
+# Shift+Delete, Ctrl+Insert, Shift+Insert, Ctrl+Shift+E) are from that export too [inf].
 "view.back_edges" = "K"
+# Sketchup/Context Help in that export [inf]; no menu item in SketchUp. Meshtard
+# shows the Instructor panel for the active tool.
+"help.context_help" = "Shift+F1"
 # SketchUp 2026 for Windows binds these and does not let them change (forum reports
 # forums.sketchup.com/t/341060 and /t/342241) [inf].
 "file.exit" = "Ctrl+Q"

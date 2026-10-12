@@ -1,5 +1,5 @@
 //! Tool modifiers of FEATURES.md 57 and 62 that need the app: Ctrl for the drawing
-//! tools (Tape Measure's modes), Ctrl+plus / minus segments, double clicks of the
+//! tools (Tape Measure's modes), Alt or Ctrl + plus / minus segments, double clicks of the
 //! drawing tools (Tape Measure guide point, 2 Point Arc repeat, Text area label), the
 //! component name under the Text tool, Tape Measure rescale (confirmation dialog),
 //! the section plane name prompt, Orbit's double click and Undo cancelling a tool
@@ -19,8 +19,8 @@ use crate::nav::Tool;
 
 impl App {
     /// Before a drawing tool's click handling: Ctrl tapped (pressed and released with
-    /// no other key) goes to the tool, Ctrl+plus / minus change its segments, and the
-    /// tool learns what is under the cursor.
+    /// no other key) goes to the tool, Alt or Ctrl + plus / minus change its
+    /// segments, and the tool learns what is under the cursor.
     pub(crate) fn draw_tool_pre(
         &mut self,
         ui: &egui::Ui,
@@ -32,7 +32,9 @@ impl App {
                 .events
                 .iter()
                 .any(|e| matches!(e, egui::Event::Key { pressed: true, key, .. } if !matches!(key, egui::Key::Plus | egui::Key::Minus | egui::Key::Equals)));
-            let k = |key| i.modifiers.command && i.key_pressed(key);
+            // Alt +/- is the 2026 Quick Reference Card's key (3 Point Arc [doc],
+            // FEATURES.md 76); Ctrl +/- is Meshtard's earlier one, kept.
+            let k = |key| (i.modifiers.command || i.modifiers.alt) && i.key_pressed(key);
             (
                 i.modifiers.command,
                 any_key,

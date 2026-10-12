@@ -112,13 +112,13 @@ impl Tool {
                 "Select objects. Shift to extend select. Drag mouse to select multiple."
             }
             Self::Lasso => {
-                "Drag a lasso: clockwise selects what it touches, counterclockwise what is inside. Click points, double-click to finish."
+                "Drag a lasso: clockwise selects what it touches, counterclockwise what is inside. Click points, double-click to finish. Shift = add/subtract, Alt = add, Shift+Alt = subtract."
             }
             Self::Draw(_) | Self::Modify(_) | Self::Pick(_) => "",
             Self::Eraser => {
-                "Select objects to erase. Shift = Hide, Ctrl = Soften/Smooth, Ctrl+Shift = Unsoften."
+                "Select objects to erase. Shift = Hide, Ctrl = Soften/Smooth, Alt = Unsoften."
             }
-            Self::Orbit => "Drag in direction to orbit. Shift = Pan, Ctrl = suspend gravity.",
+            Self::Orbit => "Drag in direction to orbit. Shift = Pan, Alt = suspend gravity.",
             Self::Pan => "Drag in direction to pan.",
             Self::Zoom => "Drag up or down to zoom.",
             Self::ZoomWindow => "Drag a window around the area to zoom to.",
@@ -139,8 +139,9 @@ pub struct Input {
     pub left_drag: DVec2,
     pub middle_drag: DVec2,
     pub shift: bool,
-    /// Ctrl held: Orbit suspends gravity ([`Camera::orbit_free`]).
-    pub ctrl: bool,
+    /// Alt held: Orbit suspends gravity ([`Camera::orbit_free`]; 2026 Windows Quick
+    /// Reference Card [doc], FEATURES.md 76).
+    pub alt: bool,
     /// Wheel notches; positive zooms in.
     pub wheel: f64,
 }
@@ -167,7 +168,7 @@ pub fn apply(tool: Tool, camera: &mut Camera, input: &Input, viewport: DVec2) {
             | Tool::PositionCamera
             | Tool::Walk => {}
             Tool::Orbit if input.shift => camera.pan(input.left_drag, viewport),
-            Tool::Orbit if input.ctrl => {
+            Tool::Orbit if input.alt => {
                 camera.orbit_free(input.left_drag);
                 camera.two_point = false;
             }
@@ -252,6 +253,31 @@ mod tests {
         assert_ne!(panned.target, camera().target);
         let offset = panned.eye - panned.target;
         assert!((offset - (camera().eye - camera().target)).length() < 1e-9);
+    }
+
+    /// Alt suspends gravity (2026 Windows QRC [doc]); Ctrl no longer does.
+    #[test]
+    fn orbit_alt_suspends_gravity() {
+        let drag = DVec2::new(-30.0, 12.0);
+        let run = |alt: bool, f: fn(&mut Camera, DVec2)| {
+            let mut c = camera();
+            apply(
+                Tool::Orbit,
+                &mut c,
+                &Input {
+                    left_drag: drag,
+                    alt,
+                    ..Default::default()
+                },
+                VIEWPORT,
+            );
+            let mut want = camera();
+            f(&mut want, drag);
+            (c.eye - want.eye).length() < 1e-9
+        };
+        assert!(run(true, Camera::orbit_free));
+        assert!(run(false, Camera::orbit));
+        assert!(!run(true, Camera::orbit));
     }
 
     #[test]

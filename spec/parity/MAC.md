@@ -53,7 +53,9 @@ On Mac there are two kinds of shortcuts: menu key equivalents with Command, buil
 |---|---|---|---|---|
 | Redo | Ctrl+Y | Cmd+Shift+Z | [inf] | F7 and macOS convention (forum also reports Cmd+Y in the web app) |
 | Select None | Ctrl+T | Cmd+Shift+A | [inf] | F3 (Cmd+T opens the Fonts panel on Mac, F1) |
-| Delete | Delete | Backspace (the Mac "delete" key) | [inf] | F4 |
+| Delete | Delete | Backspace (the Mac "delete" key) and Delete (Forward Delete, fn+delete) | [inf] | F4; Forward Delete from macOS convention |
+| Undo, Cut, Copy, Paste second keys | Alt+Backspace, Shift+Delete, Ctrl+Insert, Shift+Insert | none (Cmd+Z, X, C, V only) | [inf] | Mac keyboards have no Insert key; Option+delete and Shift+fn+delete edit text on macOS |
+| Zoom Extents | Shift+Z, Ctrl+Shift+E | Shift+Z, Cmd+Shift+E (kept; the native menu shows Shift+Z, the app handles Cmd+Shift+E) | [inf] | |
 | Preferences / Settings | Ctrl+, (SketchUp 2026 Windows, forum t/342241; SHORTCUTS.md) | Cmd+, | [inf] | macOS convention |
 | Exit / Quit | Ctrl+Q (SketchUp 2026 Windows, F5; bound since 2026-10-12, SHORTCUTS.md) | Cmd+Q | [inf] | F5, macOS convention |
 | Entity Info | none | Cmd+I | [inf] | B1 |
@@ -62,10 +64,10 @@ On Mac there are two kinds of shortcuts: menu key equivalents with Command, buil
 | Invert Selection | Ctrl+Shift+I | Cmd+Shift+I (Ctrl read as Cmd) | [inf] | community posts only |
 | Everything else with Ctrl | Ctrl+... | Cmd+... (same key) | [inf] | |
 
-Not covered: forward Delete (fn+delete) also erasing on Mac (one key per command in the keymap); Hide Dialogs shortcut (one forum post says Shift+A shows/hides all palettes, unconfirmed); File > Close (Cmd+W) and other standard Mac menu items SketchUp has (Close, Minimize per document window); localized labels.
+Not covered: Hide Dialogs shortcut (one forum post says Shift+A shows/hides all palettes, unconfirmed); File > Close (Cmd+W) and other standard Mac menu items SketchUp has (Close, Minimize per document window); localized labels.
 
 ## How it is built
 
 - `spec/menus_mac.toml`: `app_menu` (label and items; its commands leave their Windows places), `flatten` (submenus replaced by their items), `relabel` (labels by command id). Separators left at a menu's start or end, or doubled, are dropped.
-- `spec/keymap_mac.toml`: bindings that replace the Windows ones (empty text unbinds); "Cmd" is accepted and stored as "Ctrl", which macOS reads as Command.
+- `spec/keymap_mac.toml`: bindings that replace all of a command's Windows keys (a key or a list of keys; empty text unbinds); "Cmd" is accepted and stored as "Ctrl", which macOS reads as Command.
 - `Spec::mac_layout()` builds the Mac variant; loading the spec builds and validates it on every system (each command exactly once, no shortcut bound twice, toolbar and tray commands present), and `mt-spec` tests compare both layouts. The app applies it only on macOS (`main.rs`), where the native menu bar puts the app menu first with the system items.

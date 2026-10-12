@@ -2,14 +2,23 @@
 # Sources and [doc]/[inf] marks: spec/parity/MAC.md. DRAFT: not checked in SketchUp for Mac.
 #
 # "Cmd" is the Command key (the same as "Ctrl" in keymap.toml, which macOS reads as
-# Command). An empty string removes the Windows default. Single-key tool shortcuts
+# Command). A key or a list of keys, as in keymap.toml; an empty string removes the
+# Windows default. Single-key tool shortcuts
 # are the same on both systems (Quick Reference Card 2026, Mac and Windows) [doc].
 verified = false
 
 [bindings]
 "edit.redo" = "Cmd+Shift+Z"          # [inf] forum + macOS convention; Windows Ctrl+Y
 "edit.select_none" = "Cmd+Shift+A"   # [inf] forum; Windows Ctrl+T (Cmd+T is the Fonts panel)
-"edit.delete" = "Backspace"          # [inf] the Mac "delete" key; Windows Delete
+# [inf] the Mac "delete" key, and Forward Delete (fn+delete, egui's Delete); Windows Delete
+"edit.delete" = ["Backspace", "Delete"]
+# A value replaces all of a command's Windows keys. These drop the Windows second keys
+# Alt+Backspace, Shift+Delete, Ctrl+Insert and Shift+Insert [inf]: Mac keyboards have
+# no Insert key, and Option+delete / Shift+fn+delete edit text on macOS.
+"edit.undo" = "Cmd+Z"
+"edit.cut" = "Cmd+X"
+"edit.copy" = "Cmd+C"
+"edit.paste" = "Cmd+V"
 "window.preferences" = "Cmd+Comma"   # [inf] macOS convention for Settings
 "file.exit" = "Cmd+Q"                # [inf] macOS convention for Quit
 "window.entity_info" = "Cmd+I"       # [inf] older Mac book (Missing Manual)

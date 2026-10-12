@@ -444,11 +444,18 @@ impl DrawTool for LineTool {
 
 // ------------------------------------------------------------------ Rectangle
 
+/// Alt toggles drawing from the center: the first click is then the rectangle's
+/// center (2026 Windows Quick Reference Card "Alt: draw from center" [doc],
+/// FEATURES.md 76). That the key toggles (rather than works while held) and stays
+/// on for the next rectangles is from memory, unverified.
 #[derive(Debug, Default)]
 pub struct Rectangle {
-    /// First corner and the normal of the face it was placed on (up off faces).
+    /// First corner (the center when drawing from the center) and the normal of
+    /// the face it was placed on (up off faces).
     first: Option<(DVec3, DVec3)>,
     lock: PlaneLock,
+    from_center: bool,
+    alt_was: bool,
 }
 
 impl Rectangle {
@@ -461,7 +468,12 @@ impl Rectangle {
 
     fn corners(&self, b: DVec3) -> Option<[DVec3; 4]> {
         let (a, n) = self.plane()?;
-        Some(rectangle_corners(a, b, n))
+        let k = rectangle_corners(a, b, n);
+        if !self.from_center {
+            return Some(k);
+        }
+        // `a` is the center: the corner at the cursor stays, the others mirror.
+        Some(k.map(|p| p * 2.0 - k[2]))
     }
 
     fn make(&mut self, ents: &mut Entities, c: [DVec3; 4]) -> bool {
@@ -479,6 +491,10 @@ impl Rectangle {
 
 impl DrawTool for Rectangle {
     fn hint(&self, cur: &Inference) -> Option<Inference> {
+        // The square / golden section hints are measured from a corner.
+        if self.from_center {
+            return None;
+        }
         let (a, n) = self.plane()?;
         let (u, v) = plane_axes(n);
         mt_infer::hints::rectangle(cur, a, u, v)
@@ -489,12 +505,22 @@ impl DrawTool for Rectangle {
     }
 
     fn status(&self) -> String {
-        if self.first.is_some() {
-            "Select opposite corner or enter value."
-        } else {
-            "Select first corner."
+        match (self.first.is_some(), self.from_center) {
+            (true, false) => "Select opposite corner or enter value. Alt = draw from center.",
+            (true, true) => {
+                "Select a corner or enter value (drawing from the center; Alt = from a corner)."
+            }
+            (false, false) => "Select first corner. Alt = draw from center.",
+            (false, true) => "Select the center (Alt = draw from a corner).",
         }
         .into()
+    }
+
+    fn hover(&mut self, h: &DrawHover) {
+        if h.alt && !self.alt_was {
+            self.from_center = !self.from_center;
+        }
+        self.alt_was = h.alt;
     }
 
     fn measurement(&self, cur: Option<&Inference>, units: LengthUnit) -> (&'static str, String) {
@@ -537,6 +563,12 @@ impl DrawTool for Rectangle {
             e1 = (k[1] - k[0]).normalize_or(u);
             e2 = (k[3] - k[0]).normalize_or(v);
         }
+        // From the center: `a` is the middle of a w by h rectangle.
+        let a = if self.from_center {
+            a - e1 * (w / 2.0) - e2 * (h / 2.0)
+        } else {
+            a
+        };
         self.make(ents, [a, a + e1 * w, a + e1 * w + e2 * h, a + e2 * h])
     }
 
@@ -1852,14 +1884,18 @@ pub fn parse_angle(text: &str) -> Option<f64> {
 ///
 /// Unverified against SketchUp: the protractor here is drawn at the radius of the
 /// start click (SketchUp's is a fixed screen size), angles snap to Model Info's
-/// snap angle only near its multiples, typed angles turn towards the side the cursor is on, and Ctrl (measure
-/// only, no guide) is not supported.
+/// snap angle only near its multiples, and typed angles turn towards the side the
+/// cursor is on. Ctrl (tapped) toggles guide creation (2026 Windows Quick Reference
+/// Card [doc], FEATURES.md 76): with it off the tool only measures angles; that the
+/// toggle lasts while the tool is active is unverified.
 #[derive(Debug, Default)]
 pub struct Protractor {
     center: Option<(DVec3, DVec3)>,
     /// Unit start direction in the plane, and the protractor radius.
     base: Option<(DVec3, f64)>,
     lock: PlaneLock,
+    /// Ctrl toggled guide creation off: measure only.
+    measure_only: bool,
 }
 
 /// Protractor ticks every 15 degrees (SketchUp's default angle snap).
@@ -1893,6 +1929,10 @@ impl Protractor {
         let (Some((c, _)), Some(dir)) = (self.center, self.direction(angle)) else {
             return false;
         };
+        if self.measure_only {
+            self.cancel();
+            return false;
+        }
         ents.guides.push(mt_kernel::Guide {
             point: c,
             dir: Some(dir.normalize()),
@@ -1908,12 +1948,19 @@ impl DrawTool for Protractor {
     }
 
     fn status(&self) -> String {
-        match (self.center, self.base) {
-            (None, _) => "Place the protractor center. Arrow keys or Shift on a face lock its orientation; Alt frees the center.",
+        let step = match (self.center, self.base) {
+            (None, _) => {
+                "Place the protractor center. Arrow keys or Shift on a face lock its orientation; Alt frees the center."
+            }
             (Some(_), None) => "Select the start of the angle.",
             _ => "Select the angle or enter value (degrees or rise:run).",
-        }
-        .into()
+        };
+        let guide = if self.measure_only { "off" } else { "on" };
+        format!("{step} Ctrl = toggle guide creation ({guide}).")
+    }
+
+    fn toggle_ctrl(&mut self) {
+        self.measure_only = !self.measure_only;
     }
 
     fn measurement(&self, cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
@@ -2548,6 +2595,61 @@ mod tests {
         assert!((c[1].z - c[0].z).abs() < 1e-9 && (c[2].z - c[3].z).abs() < 1e-9);
     }
 
+    /// FEATURES.md 76: Alt toggles drawing from the center.
+    #[test]
+    fn rectangle_alt_draws_from_the_center() {
+        let hover = |t: &mut Rectangle, alt: bool| {
+            t.hover(&DrawHover {
+                instance_name: None,
+                units: LengthUnit::Inch,
+                alt,
+            })
+        };
+        let mut e = Entities::new();
+        let mut t = Rectangle::default();
+        hover(&mut t, true);
+        // Holding Alt does not toggle again; releasing and pressing does.
+        hover(&mut t, true);
+        assert!(t.status().contains("center"));
+        t.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        assert!(t.click(&mut e, &inf(v(4.0, 3.0, 0.0))));
+        let mut xs: Vec<(i64, i64)> = (e.vertices.values())
+            .map(|x| (x.pos.x.round() as i64, x.pos.y.round() as i64))
+            .collect();
+        xs.sort();
+        assert_eq!(xs, [(-4, -3), (-4, 3), (4, -3), (4, 3)]);
+        // Typed sizes are the whole rectangle around the center.
+        let mut e = Entities::new();
+        t.click(&mut e, &inf(v(10.0, 0.0, 0.0)));
+        assert!(t.typed(
+            &mut e,
+            Some(&inf(v(12.0, 1.0, 0.0))),
+            "8,6",
+            LengthUnit::Inch
+        ));
+        assert!(
+            e.vertices
+                .values()
+                .any(|x| x.pos.distance(v(6.0, -3.0, 0.0)) < 1e-9)
+        );
+        assert!(
+            e.vertices
+                .values()
+                .any(|x| x.pos.distance(v(14.0, 3.0, 0.0)) < 1e-9)
+        );
+        // Alt again: from a corner.
+        hover(&mut t, false);
+        hover(&mut t, true);
+        let mut e = Entities::new();
+        t.click(&mut e, &inf(v(0.0, 0.0, 0.0)));
+        assert!(t.click(&mut e, &inf(v(4.0, 3.0, 0.0))));
+        assert!(
+            e.vertices
+                .values()
+                .all(|x| x.pos.x >= 0.0 && x.pos.y >= 0.0)
+        );
+    }
+
     #[test]
     fn rectangle_on_a_wall_runs_horizontal_and_vertical() {
         let mut e = Entities::new();
@@ -2787,6 +2889,27 @@ mod tests {
         ));
         let d = e.guides[1].dir.unwrap();
         assert!((d - v(3f64.sqrt() / 2.0, -0.5, 0.0)).length() < 1e-12);
+    }
+
+    /// FEATURES.md 76: Ctrl toggles guide creation.
+    #[test]
+    fn protractor_ctrl_toggles_guides() {
+        let mut e = Entities::new();
+        let mut t = Protractor::default();
+        assert!(t.status().contains("guide creation (on)"));
+        t.toggle_ctrl();
+        assert!(t.status().contains("guide creation (off)"));
+        t.click(&mut e, &inf(v(1.0, 1.0, 0.0)));
+        t.click(&mut e, &inf(v(11.0, 1.0, 0.0)));
+        assert!(!t.click(&mut e, &inf(v(1.0, 5.0, 0.0))));
+        assert!(e.guides.is_empty());
+        // The measurement is done: the next click is a new center.
+        assert!(t.anchor().is_none());
+        t.toggle_ctrl();
+        t.click(&mut e, &inf(v(1.0, 1.0, 0.0)));
+        t.click(&mut e, &inf(v(11.0, 1.0, 0.0)));
+        assert!(t.click(&mut e, &inf(v(1.0, 5.0, 0.0))));
+        assert_eq!(e.guides.len(), 1);
     }
 
     #[test]

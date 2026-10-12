@@ -230,7 +230,7 @@ pub fn for_command(id: &str) -> Option<Box<dyn ModifyTool>> {
         "tool.rotate" => Box::new(Transform::new(Kind::Rotate)),
         "tool.scale" => Box::new(Scale::default()),
         "tool.offset" => Box::new(Offset::default()),
-        "tool.follow_me" => Box::new(FollowMe),
+        "tool.follow_me" => Box::new(FollowMe::default()),
         "tool.paint_bucket" => Box::new(crate::paint::PaintBucket::default()),
         "tool.flip" => Box::new(crate::flip::Flip::default()),
         "tool.section_plane" => Box::new(SectionPlaneTool::default()),
@@ -1564,8 +1564,19 @@ impl ModifyTool for Offset {
 // ------------------------------------------------------------------ Follow Me
 
 /// Select the path edges first, then click the profile face.
-#[derive(Debug)]
-pub struct FollowMe;
+///
+/// Alt (2026 Windows Quick Reference Card "use face perimeter as extrusion path"
+/// [doc], FEATURES.md 76): click the profile with Alt held, then click a face; the
+/// profile follows that face's perimeter. SketchUp does this while dragging the
+/// profile over the face with Alt held; the two clicks here are Meshtard's,
+/// unverified.
+#[derive(Debug, Default)]
+pub struct FollowMe {
+    /// Alt held this frame.
+    alt: bool,
+    /// The profile picked with Alt, waiting for the face whose perimeter is the path.
+    profile: Option<FaceId>,
+}
 
 impl ModifyTool for FollowMe {
     fn direction_locks(&self) -> bool {
@@ -1573,7 +1584,12 @@ impl ModifyTool for FollowMe {
     }
 
     fn status(&self) -> String {
-        "Select a profile face to extrude along the selected path.".into()
+        if self.profile.is_some() {
+            "Select the face whose perimeter is the path."
+        } else {
+            "Select a profile face to extrude along the selected path. Alt = use a face perimeter as path."
+        }
+        .into()
     }
 
     fn measurement(&self, _cur: Option<&Inference>, _units: LengthUnit) -> (&'static str, String) {
@@ -1584,10 +1600,26 @@ impl ModifyTool for FollowMe {
         None
     }
 
+    fn input(&mut self, i: &Input) {
+        self.alt = i.held.alt;
+    }
+
     fn click(&mut self, ctx: &mut Ctx, _inf: &Inference) -> bool {
-        let Some(Owner::Face(profile)) = ctx.picked else {
+        let Some(Owner::Face(picked)) = ctx.picked else {
             return false;
         };
+        if let Some(profile) = self.profile.take() {
+            if picked == profile || !ctx.ents.faces.contains_key(profile) {
+                return false;
+            }
+            let path = perimeter_path(ctx.ents, picked, profile);
+            return !mt_kernel::follow_me::follow_me(ctx.ents, profile, &path).is_empty();
+        }
+        if self.alt {
+            self.profile = Some(picked);
+            return false;
+        }
+        let profile = picked;
         let path: Vec<EdgeId> = ctx
             .selection
             .iter()
@@ -1630,7 +1662,38 @@ impl ModifyTool for FollowMe {
         Vec::new()
     }
 
-    fn cancel(&mut self) {}
+    fn cancel(&mut self) {
+        self.profile = None;
+    }
+}
+
+/// The outer loop of `face` as a Follow Me path, starting at its corner nearest the
+/// profile and running the way that leaves the profile's plane the most (Follow Me
+/// sweeps from the path's start).
+fn perimeter_path(ents: &Entities, face: FaceId, profile: FaceId) -> Vec<EdgeId> {
+    let outer = &ents.faces[face].outer;
+    let edges: Vec<EdgeId> = outer.coedges.iter().map(|c| c.edge).collect();
+    let pts = ents.loop_points(outer);
+    let n = edges.len();
+    if n == 0 || pts.len() != n {
+        return edges;
+    }
+    let prof = ents.loop_points(&ents.faces[profile].outer);
+    let center = prof.iter().copied().sum::<DVec3>() / prof.len().max(1) as f64;
+    let normal = ents.face_plane(profile).normal;
+    let start = (0..n)
+        .min_by(|a, b| {
+            let d = |i: usize| pts[i].distance_squared(center);
+            d(*a).total_cmp(&d(*b))
+        })
+        .unwrap_or(0);
+    // Coedge i runs from pts[i] to pts[i + 1].
+    let leaves = |to: DVec3| (to - pts[start]).normalize_or_zero().dot(normal).abs();
+    if leaves(pts[(start + 1) % n]) >= leaves(pts[(start + n - 1) % n]) {
+        (0..n).map(|k| edges[(start + k) % n]).collect()
+    } else {
+        (1..=n).map(|k| edges[(start + n - k) % n]).collect()
+    }
 }
 
 // Paint Bucket: see `crate::paint`.
@@ -2061,6 +2124,64 @@ mod tests {
             mt_kernel::add_line(ents, p[i], p[(i + 1) % 4]);
         }
         ents.faces.keys().next().unwrap()
+    }
+
+    /// FEATURES.md 76: Alt-click the profile, then click a face: the profile follows
+    /// the face's perimeter.
+    #[test]
+    fn follow_me_alt_uses_a_face_perimeter() {
+        let mut ents = Entities::default();
+        let ground = square(&mut ents);
+        let c = mt_kernel::Arc {
+            center: DVec3::new(0.0, 0.0, 3.0),
+            normal: DVec3::X,
+            x_axis: DVec3::Y,
+            radius: 1.0,
+            start_angle: 0.0,
+            end_angle: std::f64::consts::TAU,
+            segments: 12,
+        };
+        mt_kernel::add_curve(&mut ents, &c.points(), Some(c));
+        let prof = (ents.faces.keys()).find(|f| *f != ground).unwrap();
+        let mut fm = FollowMe::default();
+        let held = |alt| Input {
+            held: crate::cursor::Mods {
+                alt,
+                ..Default::default()
+            },
+            press: false,
+            ray: None,
+            cur: None,
+            material: None,
+        };
+        fm.input(&held(true));
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: Some(Owner::Face(prof)),
+            selection: &[],
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
+        assert!(!fm.click(&mut ctx, &inf(DVec3::ZERO)));
+        assert!(fm.status().contains("perimeter"));
+        fm.input(&held(false));
+        ctx.picked = Some(Owner::Face(ground));
+        assert!(fm.click(&mut ctx, &inf(DVec3::ZERO)));
+        assert!(!ents.faces.contains_key(prof), "the profile is used up");
+        assert_eq!(ents.faces.len(), 4 * 12 + 1, "a ring around the square");
+        // Without Alt and without a selected path, a profile click does nothing.
+        let mut fm = FollowMe::default();
+        let mut ents = Entities::default();
+        let f = square(&mut ents);
+        let mut ctx = Ctx {
+            ents: &mut ents,
+            picked: Some(Owner::Face(f)),
+            selection: &[],
+            ctrl: false,
+            eye: DVec3::ZERO,
+        };
+        assert!(!fm.click(&mut ctx, &inf(DVec3::ZERO)));
+        assert!(fm.profile.is_none());
     }
 
     #[test]

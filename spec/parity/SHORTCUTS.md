@@ -44,7 +44,7 @@ unbound**, **command missing**.
 | H | Pan | Camera/Pan | `camera.pan` | HELP, QRC [doc] | bound |
 | Z | Zoom | Camera/Zoom | `camera.zoom` | HELP, QRC [doc] | bound |
 | Shift+Z | Zoom Extents | Camera/Zoom Extents | `camera.zoom_extents` | HELP [doc], EXP | bound |
-| Ctrl+Shift+E | Zoom Extents (second key) | Camera/Zoom Extents | `camera.zoom_extents` | EXP [inf] | bound differently (one key per command; FEATURES 75) |
+| Ctrl+Shift+E | Zoom Extents (second key) | Camera/Zoom Extents | `camera.zoom_extents` | EXP [inf] | bound (second key, since 2026-10-12; FEATURES 75) |
 | Ctrl+Shift+W | Zoom Window | Camera/Zoom Window | `camera.zoom_window` | EXP [inf] | bound |
 | G | Make Component | Edit/Make Component | `edit.make_component` | HELP [doc] | bound |
 | I | Image Igloo | Camera/Image Igloo | - | HELP [doc], EXP | command missing (FEATURES 73) |
@@ -57,28 +57,28 @@ unbound**, **command missing**.
 | Ctrl+Q | Exit | File/Exit | `file.exit` | FQ [inf] | bound (added 2026-10-12) |
 | Ctrl+, | Preferences | Window/Preferences | `window.preferences` | FQ [inf] | bound (added 2026-10-12, keymap name `Ctrl+Comma`) |
 | Ctrl+Z | Undo | Edit/Undo | `edit.undo` | EXP [inf] | bound |
-| Alt+Backspace | Undo (second key) | Edit/Undo | `edit.undo` | EXP [inf] | bound differently (one key per command; FEATURES 75) |
+| Alt+Backspace | Undo (second key) | Edit/Undo | `edit.undo` | EXP [inf] | bound (second key, since 2026-10-12; FEATURES 75) |
 | Ctrl+Y | Redo | Edit/Redo | `edit.redo` | EXP [inf] | bound |
 | Ctrl+X | Cut | Edit/Cut | `edit.cut` | EXP [inf] | bound |
-| Shift+Delete | Cut (second key) | Edit/Cut | `edit.cut` | EXP [inf] | bound differently (FEATURES 75) |
+| Shift+Delete | Cut (second key) | Edit/Cut | `edit.cut` | EXP [inf] | bound (second key, since 2026-10-12; FEATURES 75) |
 | Ctrl+C | Copy | Edit/Copy | `edit.copy` | EXP [inf] | bound |
-| Ctrl+Insert | Copy (second key) | Edit/Copy | `edit.copy` | EXP [inf] | bound differently (FEATURES 75) |
+| Ctrl+Insert | Copy (second key) | Edit/Copy | `edit.copy` | EXP [inf] | bound (second key, since 2026-10-12; FEATURES 75) |
 | Ctrl+V | Paste | Edit/Paste | `edit.paste` | EXP [inf] | bound |
-| Shift+Insert | Paste (second key) | Edit/Paste | `edit.paste` | EXP [inf] | bound differently (FEATURES 75) |
+| Shift+Insert | Paste (second key) | Edit/Paste | `edit.paste` | EXP [inf] | bound (second key, since 2026-10-12; FEATURES 75) |
 | Delete | Delete | Edit/Delete | `edit.delete` | EXP [inf] | bound |
 | Ctrl+A | Select All | Edit/Select All | `edit.select_all` | SEL [doc], EXP | bound |
 | Ctrl+T | Select None (Deselect All) | Edit/Select None | `edit.select_none` | SEL [doc], EXP | bound |
 | Ctrl+Shift+I | Invert Selection | Edit/Invert Selection | `edit.invert_selection` | INV [inf] | bound |
 | PageUp | Previous Scene | View/Animation/Previous Scene | `view.anim_previous` | EXP [inf] | bound |
 | PageDown | Next Scene | View/Animation/Next Scene | `view.anim_next` | EXP [inf] | bound |
-| Shift+F1 | Context Help | Shortcuts list "Sketchup/Context Help" (no menu item) | - | EXP [inf] | command missing (FEATURES 74) |
+| Shift+F1 | Context Help | Shortcuts list "Sketchup/Context Help" (no menu item) | `help.context_help` (Help/Context Help in Meshtard) | EXP [inf] | bound (since 2026-10-12; opens the Instructor panel, FEATURES 74) |
 | (none) | Purge Unused | Edit/Purge Unused | `edit.purge_unused` | RN [doc] | command exists unbound (same as SketchUp) |
 | (none) | Environments panel | Window/Environments | `window.environments` | RN [doc] | command exists unbound (same as SketchUp) |
 
-Totals: 48 rows, 46 default keys: 39 keys of 39 commands Meshtard has, all bound
-in `keymap.toml` (36 before 2026-10-12, plus K, Ctrl+Q, Ctrl+,); 5 second keys
-Meshtard cannot hold (one key per command); 2 keys of missing commands (Image Igloo,
-Context Help). The last two rows are commands with no default key.
+Totals: 48 rows, 46 default keys: 45 bound in `keymap.toml` (36 before 2026-10-12,
+plus K, Ctrl+Q, Ctrl+,, Shift+F1 and the 5 second keys, which needed several keys per
+command, FEATURES 75); 1 key of a missing command (Image Igloo). The last two rows are
+commands with no default key.
 
 ## Mouse (QRC [doc])
 
@@ -97,28 +97,28 @@ unverified against the real app), "differs" means another key does it.
 | Tool | Key / input | Operation | Meshtard |
 |---|---|---|---|
 | 2 Point Arc | number Enter / number R Enter / number S Enter | bulge / radius / segments | present |
-| 3 Point Arc | Alt + / Alt - | segments up / down | differs: Ctrl+plus / minus (FEATURES 76) |
+| 3 Point Arc | Alt + / Alt - | segments up / down | present since 2026-10-12 (Ctrl +/- also works; FEATURES 76) |
 | drawing tools | Arrows | lock direction (up blue, right red, left green, down parallel/perpendicular) | present |
 | Circle | Shift | lock current inference | present |
 | Circle | number Enter / number S Enter | radius / segments | present |
-| Eraser | Ctrl / Shift / Alt | soften / hide / unsoften | differs: unsoften is Ctrl+Shift (FEATURES 76) |
+| Eraser | Ctrl / Shift / Alt | soften / hide / unsoften | present since 2026-10-12 (Ctrl+Shift also unsoftens; FEATURES 76) |
 | Field of View | drag, typed value | change field of view | present |
-| Follow Me | Alt | face perimeter as path | missing (FEATURES 76) |
+| Follow Me | Alt | face perimeter as path | present since 2026-10-12: Alt-click the profile, then click the face (SketchUp drags; FEATURES 76) |
 | Flip | Ctrl | toggle flip / copy | present |
-| Lasso | Shift / Alt / Shift+Alt | add-subtract / add / subtract | differs: Ctrl / Shift / Ctrl+Shift as Select (FEATURES 76) |
+| Lasso | Shift / Alt / Shift+Alt | add-subtract / add / subtract | present since 2026-10-12 (Select's Ctrl / Ctrl+Shift also work; FEATURES 76) |
 | Line | Alt | lock current inference direction | differs: Alt cycles inference modes per the 2026 drawing-basics help page; the two official pages disagree (check in the trial) |
 | Line | number Enter | length | present |
 | Look Around | number Enter | eye height | present |
 | Move | Ctrl / Shift / Alt | copy / lock direction / auto-fold | present |
 | Move | number X Enter, number / Enter | external / internal copy array | present |
 | Offset | Alt | allow overlap | present |
-| Orbit | Alt held | suspend gravity-weighted orbit | differs: Ctrl (FEATURES 76) |
+| Orbit | Alt held | suspend gravity-weighted orbit | present since 2026-10-12 (was Ctrl; FEATURES 76) |
 | Orbit | Shift held | Pan | present |
 | Paint Bucket | Ctrl / Shift / Ctrl+Shift / Alt | fill adjacent / replace in model / replace on object / sample | present |
-| Protractor | Ctrl | toggle guide creation | missing (FEATURES 76) |
+| Protractor | Ctrl | toggle guide creation | present since 2026-10-12 (tap; FEATURES 76) |
 | Protractor | Arrows | lock rotation plane | present |
 | Push/Pull | Ctrl / double-click / number Enter | copy face / repeat last / distance | present |
-| Rectangle | Alt | draw from center | missing (FEATURES 76) |
+| Rectangle | Alt | draw from center | present since 2026-10-12 (a toggle; FEATURES 76) |
 | Rectangle | w,h Enter | dimensions | present |
 | Rotated Rectangle | Shift / Alt | lock direction-plane / lock plane for first edge | not checked |
 | Rotate | Ctrl / number Enter / rise:run Enter | copy / angle / slope | present |
@@ -139,7 +139,8 @@ keys reserved by the OS are refused.
 
 Meshtard (`crates/mt-app/src/preferences.rs`, `shortcut_list.rs`): Filter (function,
 id or key); Function / Assigned list of every menu-bar, right-click and extension
-command by menu path; the key is recorded by pressing it; Keep Original / Replace on a
-conflict; Remove; Reset All; Import... / Export... (the preferences TOML with the
+command by menu path, every key of a command under Assigned; a selected command's keys
+each with Remove (SketchUp's -) and Add... (+), the key recorded by pressing it; Keep
+Original / Replace on a conflict; Reset All; Import... / Export... (the preferences TOML with the
 shortcuts); Show All... opens Help > Keyboard Shortcuts, a list grouped by menu with
 Copy and Save as text (Meshtard's own; SketchUp has no such list).
