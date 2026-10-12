@@ -40,6 +40,8 @@ serde_json = "1"
 rhai = "1.23"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+# Key slots of the kernel's entity ids (dense sets in Edit > Select All).
+slotmap = "1"
 
 [dev-dependencies]
 # The large-model benchmark (`src/bench.rs`): a headless wgpu device and scene checksums.

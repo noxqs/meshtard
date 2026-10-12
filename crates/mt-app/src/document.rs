@@ -27,6 +27,8 @@ pub struct Document {
     pub unit_options: mt_infer::units::UnitsOptions,
     /// The model and edit context before each edit, most recent last (Edit > Undo).
     undo: Vec<Snapshot>,
+    /// Copies of entities collections that undo steps share (see `undo`).
+    shared: crate::undo::Shared,
     /// Undone states, most recent last (Edit > Redo).
     redo: Vec<Snapshot>,
     /// Id of the current model state, and of the last saved one (unsaved changes when
@@ -57,11 +59,13 @@ pub struct Document {
     /// Settings, as sorted (open context or not, index) keys (see `annot`). Set by the
     /// app before the scene is built; not part of the model.
     pub dims_hidden: Vec<(bool, usize)>,
+    /// Faces' triangles from earlier scene builds, reused while the face is unchanged.
+    tess: std::sync::Mutex<crate::tess_cache::TessCache>,
 }
 
 /// A state Undo and Redo go back to: the model, the edit context, the state id and
 /// the units.
-type Snapshot = (Model, Vec<usize>, u64, Units);
+type Snapshot = (crate::undo::Step, Vec<usize>, u64, Units);
 type Units = (mt_infer::units::LengthUnit, mt_infer::units::UnitsOptions);
 
 /// Undo steps kept.
@@ -202,7 +206,9 @@ enum Level<'a> {
 
 /// State of one walk over the model ([`Document::collect`]).
 #[derive(Default)]
-struct Walk {
+struct Walk<'a> {
+    /// Triangles kept between scene builds (`None`: compute them all).
+    tess: Option<&'a mut crate::tess_cache::TessCache>,
     /// Definitions being walked (a definition containing itself is skipped).
     active: HashSet<DefinitionId>,
     /// Times each entities collection (by address) has been reached so far.
@@ -413,6 +419,7 @@ impl Document {
             saved_camera: src.camera,
             unit_options,
             undo: Vec::new(),
+            shared: Default::default(),
             redo: Vec::new(),
             context: Vec::new(),
             state: 0,
@@ -425,6 +432,7 @@ impl Document {
             operation: String::new(),
             view: None,
             dims_hidden: Vec::new(),
+            tess: Default::default(),
         })
     }
 
@@ -453,6 +461,7 @@ impl Document {
             units: mt_infer::units::LengthUnit::Inch,
             unit_options: Default::default(),
             undo: Vec::new(),
+            shared: Default::default(),
             redo: Vec::new(),
             context: Vec::new(),
             state: 0,
@@ -465,6 +474,7 @@ impl Document {
             operation: String::new(),
             view: None,
             dims_hidden: Vec::new(),
+            tess: Default::default(),
         }
     }
 
@@ -515,6 +525,8 @@ impl Document {
     /// not mark the model modified: a live preview the caller reverts, or records
     /// afterwards with [`Document::edit`] (Texture Position).
     pub fn active_mut_untracked(&mut self) -> &mut Entities {
+        let ctx = self.active_ctx();
+        self.shared.changed(ctx);
         match Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied()) {
             Some(d) => &mut self.model.definitions[d].entities,
             None => &mut self.model.root,
@@ -567,6 +579,25 @@ impl Document {
         }
     }
 
+    /// The current state as an undo step (copies only the entities collections that
+    /// changed since the last step, see `undo`).
+    pub(crate) fn snapshot(&mut self) -> Snapshot {
+        (
+            self.shared.take(&mut self.model),
+            self.context.clone(),
+            self.state,
+            (self.units, self.unit_options),
+        )
+    }
+
+    /// The entities collection being edited.
+    fn active_ctx(&self) -> crate::undo::Ctx {
+        match Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied()) {
+            Some(d) => crate::undo::Ctx::Def(d),
+            None => crate::undo::Ctx::Root,
+        }
+    }
+
     /// Runs an edit of the active context; when `f` reports a change, the state before
     /// it becomes an undo step.
     pub fn edit(&mut self, f: impl FnOnce(&mut Entities) -> bool) -> bool {
@@ -576,12 +607,7 @@ impl Document {
     /// Like `edit`, with the rest of the model too. The active context's entities are
     /// taken out of the model while `f` runs (the model holds an empty one there).
     pub fn edit_model(&mut self, f: impl FnOnce(&mut Model, &mut Entities) -> bool) -> bool {
-        let before = (
-            self.model.clone(),
-            self.context.clone(),
-            self.state,
-            (self.units, self.unit_options),
-        );
+        let before = self.snapshot();
         let def =
             Self::path_definitions(&self.model, &self.context).and_then(|d| d.last().copied());
         let mut ents = match def {
@@ -589,6 +615,11 @@ impl Document {
             None => std::mem::take(&mut self.model.root),
         };
         let changed = f(&mut self.model, &mut ents);
+        // Even an edit reporting no change may have touched the collection.
+        self.shared.changed(match def {
+            Some(d) => crate::undo::Ctx::Def(d),
+            None => crate::undo::Ctx::Root,
+        });
         match def.and_then(|d| self.model.definitions.get_mut(d)) {
             Some(d) => d.entities = ents,
             None if def.is_none() => self.model.root = ents,
@@ -604,12 +635,7 @@ impl Document {
     /// An edit of the whole model (every definition, materials, tags) as one undo
     /// step, whatever context is open.
     pub fn edit_whole(&mut self, f: impl FnOnce(&mut Model) -> bool) -> bool {
-        let before = (
-            self.model.clone(),
-            self.context.clone(),
-            self.state,
-            (self.units, self.unit_options),
-        );
+        let before = self.snapshot();
         let changed = f(&mut self.model);
         if changed {
             self.record(before);
@@ -626,11 +652,16 @@ impl Document {
     fn record(&mut self, before: Snapshot) {
         self.undo.push(before);
         self.undo_names.push(self.operation.clone());
+        // Old steps are freed on another thread (a big model's take a while).
         if self.undo.len() > UNDO_LIMIT {
-            self.undo.remove(0);
+            let step = self.undo.remove(0);
+            let size = step.0.size();
+            crate::undo::discard(step, size);
             self.undo_names.remove(0);
         }
-        self.redo.clear();
+        let redo = std::mem::take(&mut self.redo);
+        let size = redo.iter().map(|s| s.0.size()).sum();
+        crate::undo::discard(redo, size);
         self.redo_names.clear();
         self.state = self.next_state;
         self.next_state += 1;
@@ -646,12 +677,7 @@ impl Document {
         if (units, options) == (self.units, self.unit_options) {
             return false;
         }
-        let before = (
-            self.model.clone(),
-            self.context.clone(),
-            self.state,
-            (self.units, self.unit_options),
-        );
+        let before = self.snapshot();
         self.units = units;
         self.unit_options = options;
         self.record(before);
@@ -705,11 +731,11 @@ impl Document {
     }
 
     /// Makes `snapshot` current; returns the state it replaced.
-    fn restore(&mut self, (model, context, state, units): Snapshot) -> Snapshot {
+    fn restore(&mut self, (step, context, state, units): Snapshot) -> Snapshot {
         let old_units = (self.units, self.unit_options);
         (self.units, self.unit_options) = units;
         (
-            std::mem::replace(&mut self.model, model),
+            self.shared.restore(&mut self.model, step),
             std::mem::replace(&mut self.context, context),
             std::mem::replace(&mut self.state, state),
             old_units,
@@ -769,14 +795,22 @@ impl Document {
             scene.texture_of.push(layer);
         }
         let root = &self.model.root;
+        let mut tess = (self.tess.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        tess.begin();
         self.collect(
             root,
+            Some(crate::undo::Ctx::Root),
             DMat4::IDENTITY,
             Inherited::default(),
             Level::Context(&self.context),
-            &mut Walk::default(),
+            &mut Walk {
+                tess: Some(&mut tess),
+                ..Default::default()
+            },
             &mut scene,
         );
+        tess.end();
+        drop(tess);
         let f = |p: DVec3| p.as_vec3().to_array();
         self.section_planes(&mut scene);
         crate::annot::collect(self, &mut scene);
@@ -832,6 +866,7 @@ impl Document {
             .collect();
         self.collect(
             ents,
+            None,
             DMat4::IDENTITY,
             Inherited::default(),
             // Owners are not used: the ghost is not pickable.
@@ -949,9 +984,12 @@ impl Document {
             .map_or(0.0, |x| x.dashes.length())
     }
 
+    /// Draws `ents`, collection `ctx` of the model (`None`: entities outside it).
+    #[allow(clippy::too_many_arguments)]
     fn collect(
         &self,
         ents: &Entities,
+        ctx: Option<crate::undo::Ctx>,
         xf: DMat4,
         inherited: Inherited,
         level: Level,
@@ -1088,6 +1126,16 @@ impl Document {
         let visit = walk.visits.entry(key).or_insert(0);
         *visit += 1;
         let reused = *visit > 1;
+        // Triangles kept from the last scene build (openings depend on more than the
+        // face: not kept).
+        let mut kept = match (&mut walk.tess, ctx) {
+            (Some(cache), Some(ctx))
+                if openings.is_empty() && ents.faces.len() >= crate::tess_cache::KEEP_MIN_FACES =>
+            {
+                Some(cache.visit(ctx))
+            }
+            _ => None,
+        };
         for (f, face) in &ents.faces {
             let hidden = ghost || face.attrs.hidden;
             if rest_here
@@ -1148,11 +1196,13 @@ impl Document {
                     .unwrap_or_else(|| tessellate::triangulate(ents, f))
             };
             let own;
-            let tris: &[[DVec3; 3]] = if reused {
-                walk.triangles.entry((key, f)).or_insert_with(tessellate)
-            } else {
-                own = tessellate();
-                &own
+            let tris: &[[DVec3; 3]] = match kept.as_mut().and_then(|v| v.triangles(ents, f)) {
+                Some(tris) => tris,
+                None if reused => walk.triangles.entry((key, f)).or_insert_with(tessellate),
+                None => {
+                    own = tessellate();
+                    &own
+                }
             };
             for &local in tris {
                 let [a, b, c] = local.map(|p| xf.transform_point3(p));
@@ -1197,6 +1247,9 @@ impl Document {
                 out.tri_owner.push(owner_of(Owner::Face(f)));
                 out.tri_material.push([front_material, back_material]);
             }
+        }
+        if let (Some(visit), Some(cache)) = (kept, &mut walk.tess) {
+            cache.finish(visit);
         }
 
         for (index, i) in ents.instances.iter().enumerate() {
@@ -1255,7 +1308,8 @@ impl Document {
                 }
             }
             let start = out.vertices.len();
-            self.collect(&def.entities, ix, parent, child, walk, out);
+            let ctx = Some(crate::undo::Ctx::Def(i.definition));
+            self.collect(&def.entities, ctx, ix, parent, child, walk, out);
             if let Some(turn) = sun_turn {
                 out.sun_facing.push((start..out.vertices.len(), turn));
             }
@@ -1487,6 +1541,262 @@ mod tests {
         doc.undo();
         assert_eq!(doc.undo_name(), None);
         assert_eq!(doc.redo_name(), Some("Line"));
+    }
+
+    /// Everything undo restores, as text (clones drop the spatial indexes, which are
+    /// lookup caches, not model data).
+    /// Also checks that the scene, built with the triangles kept from earlier builds,
+    /// is the one a new document draws.
+    fn dump(doc: &Document) -> String {
+        let mut fresh = Document::untitled();
+        fresh.model = doc.model.clone();
+        fresh.context = doc.context.clone();
+        assert_eq!(
+            crate::bench::checksum(&doc.scene()),
+            crate::bench::checksum(&fresh.scene()),
+            "kept triangles"
+        );
+        format!(
+            "{:?}",
+            (
+                doc.model.clone(),
+                &doc.context,
+                doc.units,
+                doc.unit_options,
+                doc.state
+            )
+        )
+    }
+
+    /// A square of size 10 at height `z`.
+    fn square(ents: &mut Entities, z: f64) {
+        let p = [
+            DVec3::new(0.0, 0.0, z),
+            DVec3::new(10.0, 0.0, z),
+            DVec3::new(10.0, 10.0, z),
+            DVec3::new(0.0, 10.0, z),
+        ];
+        for i in 0..4 {
+            mt_kernel::add_line(ents, p[i], p[(i + 1) % 4]);
+        }
+    }
+
+    /// Undo steps share unchanged entities collections, so each kind of edit (and
+    /// changes made without an undo step in between) is checked to come back exactly:
+    /// undo restores the state before each step and redo the state after it.
+    #[test]
+    fn undo_and_redo_restore_the_exact_model_after_many_edit_kinds() {
+        type Action = (&'static str, fn(&mut Document));
+        fn group_all(doc: &mut Document) {
+            doc.edit_model(|model, ents| {
+                let sel = mt_kernel::group::Selection {
+                    edges: ents.edges.keys().collect(),
+                    faces: ents.faces.keys().collect(),
+                    instances: (0..ents.instances.len()).collect(),
+                };
+                mt_kernel::group::make_group(&mut model.definitions, ents, &sel, "G".into(), true)
+                    .is_some()
+            });
+        }
+        let actions: [Action; 20] = [
+            ("square", |d| {
+                d.edit(|e| {
+                    square(e, 0.0);
+                    true
+                });
+            }),
+            ("group it", group_all),
+            ("second square", |d| {
+                d.edit(|e| {
+                    square(e, 20.0);
+                    true
+                });
+            }),
+            ("untracked style, open group", |d| {
+                d.model.style.hidden_geometry = true;
+                assert!(d.open_instance(0));
+            }),
+            ("draw in group", |d| {
+                d.edit(|e| !mt_kernel::add_line(e, DVec3::ZERO, DVec3::Z * 5.0).is_empty());
+            }),
+            ("push/pull in group", |d| {
+                let f = d.active().faces.keys().next().unwrap();
+                d.edit(|e| mt_kernel::push_pull::push_pull(e, f, 7.0, false).is_some());
+            }),
+            ("hide in group", |d| {
+                let f = d.active().faces.keys().next().unwrap();
+                d.hide(&[Owner::Face(f)]);
+            }),
+            ("close, untracked root change", |d| {
+                d.close_instance();
+                let e = d.model.root.edges.keys().next().unwrap();
+                d.model.root.edges[e].attrs.soft = true;
+            }),
+            ("erase", |d| {
+                let e = d.model.root.edges.keys().nth(1).unwrap();
+                d.erase(&[Owner::Edge(e)], false, false);
+            }),
+            ("material (whole model)", |d| {
+                d.edit_whole(|m| {
+                    m.materials.push(mt_kernel::Material {
+                        name: "Red".into(),
+                        color: [200, 0, 0],
+                        opacity: 1.0,
+                        texture: None,
+                    });
+                    true
+                });
+            }),
+            ("units", |d| {
+                d.set_units(mt_infer::units::LengthUnit::Millimeter, Default::default());
+            }),
+            ("untracked preview", |d| {
+                let ents = d.active_mut_untracked();
+                let e = ents.edges.keys().next().unwrap();
+                ents.edges[e].attrs.smooth = true;
+            }),
+            ("second instance", |d| {
+                d.edit(|e| {
+                    let mut i = e.instances[0].clone();
+                    i.transform = DMat4::from_translation(DVec3::X * 30.0);
+                    e.instances.push(i);
+                    true
+                });
+                assert!(d.open_instance(1));
+            }),
+            ("edit the shared definition", |d| {
+                d.edit(|e| !mt_kernel::add_line(e, DVec3::Y, DVec3::Y * 9.0).is_empty());
+            }),
+            ("close, untracked definition change", |d| {
+                d.close_instance();
+                let def = d.model.root.instances[0].definition;
+                let ents = &mut d.model.definitions[def].entities;
+                let e = ents.edges.keys().next().unwrap();
+                ents.edges[e].attrs.hidden = true;
+            }),
+            ("move", |d| {
+                let all = crate::context_extra::all_owners(d.active());
+                d.edit(|e| {
+                    crate::modify::apply(e, &all, DMat4::from_translation(DVec3::Z), false);
+                    true
+                });
+            }),
+            ("lock", |d| {
+                d.lock(&[Owner::Instance(1)], true);
+            }),
+            ("group everything", group_all),
+            ("explode", |d| {
+                d.edit_model(|m, e| mt_kernel::group::explode(&m.definitions, e, 0));
+            }),
+            ("delete", |d| {
+                let e = d.active().edges.keys().next().unwrap();
+                d.delete(&[Owner::Edge(e), Owner::Instance(0)]);
+            }),
+        ];
+        let mut doc = Document::untitled();
+        // The state before each undo step.
+        let mut before = Vec::new();
+        for (name, action) in actions {
+            let steps = doc.undo.len();
+            let dump_before = dump(&doc);
+            action(&mut doc);
+            if doc.undo.len() > steps {
+                before.push((name, dump_before));
+            }
+        }
+        let names: Vec<_> = before.iter().map(|b| b.0).collect();
+        assert_eq!(
+            before.len(),
+            16,
+            "every edit kind is one undo step: {names:?}"
+        );
+        let mut after = Vec::new();
+        for (name, state) in before.iter().rev() {
+            after.push(dump(&doc));
+            assert!(doc.undo());
+            assert_eq!(dump(&doc), *state, "undo {name}");
+        }
+        for ((name, _), state) in before.iter().zip(after.iter().rev()) {
+            assert!(doc.redo());
+            assert_eq!(dump(&doc), *state, "redo {name}");
+        }
+        // Undo part way, edit, and undo back again.
+        for _ in 0..5 {
+            doc.undo();
+        }
+        let back = dump(&doc);
+        doc.edit(|e| {
+            square(e, 50.0);
+            true
+        });
+        let edited = dump(&doc);
+        assert!(doc.undo());
+        assert_eq!(dump(&doc), back);
+        assert!(doc.redo());
+        assert_eq!(dump(&doc), edited);
+        while doc.undo() {}
+        assert_eq!(dump(&doc), before[0].1, "back to the empty model");
+    }
+
+    /// A hexagon of radius 4 around `c` (a face large enough for its triangles to be
+    /// kept between scene builds).
+    fn hexagon(ents: &mut Entities, c: DVec3) {
+        let p = |k: usize| {
+            let a = k as f64 * std::f64::consts::TAU / 6.0;
+            c + DVec3::new(a.cos(), a.sin(), 0.0) * 4.0
+        };
+        for k in 0..6 {
+            mt_kernel::add_line(ents, p(k), p(k + 1));
+        }
+    }
+
+    /// Triangles kept from earlier scene builds (`tess_cache`) are only reused for
+    /// unchanged faces: after each kind of edit, undo and redo the scene is the one a
+    /// new document draws (`dump` compares them).
+    #[test]
+    fn kept_triangles_follow_every_edit() {
+        let mut doc = Document::untitled();
+        let at = |i: usize| DVec3::new((i % 5) as f64 * 10.0, (i / 5) as f64 * 10.0, 0.0);
+        doc.edit(|e| {
+            (0..20).for_each(|i| hexagon(e, at(i)));
+            true
+        });
+        dump(&doc);
+        let faces: Vec<FaceId> = doc.model.root.faces.keys().collect();
+        assert_eq!(faces.len(), 20);
+        // Move some faces (their edges and neighbors stay).
+        let some: Vec<Owner> = faces[..5].iter().map(|&f| Owner::Face(f)).collect();
+        doc.edit(|e| {
+            crate::modify::apply(e, &some, DMat4::from_translation(DVec3::Z * 3.0), false);
+            true
+        });
+        dump(&doc);
+        // Push/pull one, erase an edge of another, group the rest of a row.
+        doc.edit(|e| mt_kernel::push_pull::push_pull(e, faces[7], 5.0, false).is_some());
+        dump(&doc);
+        let edge = doc.model.root.faces[faces[12]].outer.coedges[0].edge;
+        doc.erase(&[Owner::Edge(edge)], false, false);
+        dump(&doc);
+        doc.edit_model(|model, ents| {
+            let sel = mt_kernel::group::Selection {
+                edges: vec![],
+                faces: faces[15..].to_vec(),
+                instances: vec![],
+            };
+            mt_kernel::group::make_group(&mut model.definitions, ents, &sel, "G".into(), true)
+                .is_some()
+        });
+        dump(&doc);
+        // A change without an undo step.
+        let v = doc.model.root.vertices.keys().next().unwrap();
+        doc.model.root.vertices[v].pos.z += 1.0;
+        dump(&doc);
+        while doc.undo() {
+            dump(&doc);
+        }
+        while doc.redo() {
+            dump(&doc);
+        }
     }
 
     #[test]

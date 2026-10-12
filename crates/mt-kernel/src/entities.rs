@@ -20,13 +20,13 @@ pub type MaterialId = usize;
 /// Index into `Model::layers`.
 pub type LayerId = usize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Vertex {
     pub pos: DVec3,
     pub edges: Vec<EdgeId>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EdgeAttrs {
     pub soft: bool,
     pub smooth: bool,
@@ -82,7 +82,7 @@ pub struct Curve {
     pub polygon: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Edge {
     pub start: VertexId,
     pub end: VertexId,
@@ -162,7 +162,7 @@ pub struct InstanceAttrs {
     pub glued: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Face {
     pub outer: Loop,
     pub holes: Vec<Loop>,
@@ -182,7 +182,7 @@ impl Face {
 }
 
 /// A placed component or group.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
     pub definition: DefinitionId,
     /// Definition space to parent space.
@@ -199,7 +199,7 @@ pub struct Instance {
 }
 
 /// A collection of geometry: the model root or a component definition's contents.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Entities {
     pub vertices: SlotMap<VertexId, Vertex>,
     pub edges: SlotMap<EdgeId, Edge>,
@@ -222,6 +222,118 @@ pub struct Entities {
     pub snaps: Vec<crate::snaps::Snap>,
     /// Lookup acceleration, not model data: not cloned, see `spatial`.
     pub(crate) index: crate::spatial::SpatialIndex,
+}
+
+/// Above this many vertices, edges and faces together, cloning and comparing an
+/// `Entities` splits the work over threads (each map on its own).
+const PARALLEL_MIN: usize = 50_000;
+
+impl Entities {
+    /// Vertices, edges, faces and instances together: a measure of the work of copying
+    /// or comparing the collection.
+    pub fn size(&self) -> usize {
+        self.vertices.len() + self.edges.len() + self.faces.len() + self.instances.len()
+    }
+
+    fn is_large(&self) -> bool {
+        self.vertices.len() + self.edges.len() + self.faces.len() >= PARALLEL_MIN
+    }
+}
+
+/// A copy without the spatial index (see `spatial`). Large collections (an undo step of
+/// a big model) copy their vertices, edges and faces on separate threads.
+impl Clone for Entities {
+    fn clone(&self) -> Self {
+        let Self {
+            vertices,
+            edges,
+            faces,
+            instances,
+            curves,
+            guides,
+            section_planes,
+            active_section,
+            dimensions,
+            texts,
+            snaps,
+            index,
+        } = self;
+        let (vertices, edges, faces) = if self.is_large() {
+            std::thread::scope(|s| {
+                let e = s.spawn(|| edges.clone());
+                let f = s.spawn(|| faces.clone());
+                let v = vertices.clone();
+                (v, e.join().unwrap(), f.join().unwrap())
+            })
+        } else {
+            (vertices.clone(), edges.clone(), faces.clone())
+        };
+        Self {
+            vertices,
+            edges,
+            faces,
+            instances: instances.clone(),
+            curves: curves.clone(),
+            guides: guides.clone(),
+            section_planes: section_planes.clone(),
+            active_section: *active_section,
+            dimensions: dimensions.clone(),
+            texts: texts.clone(),
+            snaps: snaps.clone(),
+            index: index.clone(),
+        }
+    }
+}
+
+/// Same entities under the same keys (the spatial index is not compared, and neither
+/// are the maps' free slots, which only decide the keys of entities added later).
+/// Floating-point fields compare as numbers: NaN never equals itself.
+impl PartialEq for Entities {
+    fn eq(&self, other: &Self) -> bool {
+        fn same<K: slotmap::Key, V: PartialEq>(a: &SlotMap<K, V>, b: &SlotMap<K, V>) -> bool {
+            a.len() == b.len() && a.iter().eq(b.iter())
+        }
+        let Self {
+            vertices,
+            edges,
+            faces,
+            instances,
+            curves,
+            guides,
+            section_planes,
+            active_section,
+            dimensions,
+            texts,
+            snaps,
+            index: _,
+        } = self;
+        let small = *instances == other.instances
+            && same(curves, &other.curves)
+            && *guides == other.guides
+            && *section_planes == other.section_planes
+            && *active_section == other.active_section
+            && *dimensions == other.dimensions
+            && *texts == other.texts
+            && *snaps == other.snaps
+            && vertices.len() == other.vertices.len()
+            && edges.len() == other.edges.len()
+            && faces.len() == other.faces.len();
+        if !small {
+            return false;
+        }
+        if self.is_large() {
+            std::thread::scope(|s| {
+                let e = s.spawn(|| same(edges, &other.edges));
+                let f = s.spawn(|| same(faces, &other.faces));
+                let v = same(vertices, &other.vertices);
+                v & e.join().unwrap() & f.join().unwrap()
+            })
+        } else {
+            same(vertices, &other.vertices)
+                && same(edges, &other.edges)
+                && same(faces, &other.faces)
+        }
+    }
 }
 
 /// A section plane: cuts away the geometry on the side `normal` points to (which side
