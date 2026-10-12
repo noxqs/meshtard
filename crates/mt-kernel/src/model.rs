@@ -125,6 +125,9 @@ pub struct Page {
     /// "Properties to save" and what they saved.
     pub props: crate::model_data::SceneProps,
     pub state: crate::model_data::SceneState,
+    /// Camera > Match New Photo: the photo shown behind the model in this scene and how
+    /// it is lined up (not saved in .skp).
+    pub matched_photo: Option<Box<crate::photo_match::MatchedPhoto>>,
 }
 
 impl Default for Page {
@@ -140,6 +143,7 @@ impl Default for Page {
             include_in_animation: true,
             props: Default::default(),
             state: Default::default(),
+            matched_photo: None,
         }
     }
 }

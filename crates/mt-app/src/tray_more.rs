@@ -753,6 +753,13 @@ impl App {
             return false;
         };
         self.active_scene = Some(i);
+        if page.matched_photo.is_some() {
+            // A matched photo's scene: straight to the photo's view (no transition).
+            apply_page(&mut doc.model, &page);
+            self.show_matched_photo(i);
+            self.apply_shadows();
+            return true;
+        }
         if let Some(to) = apply_page(&mut doc.model, &page) {
             self.transition = Some(crate::tray::Transition::with_secs(
                 self.camera.clone(),

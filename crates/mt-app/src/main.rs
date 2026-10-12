@@ -31,6 +31,7 @@ mod library;
 mod locks;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod match_photo;
 mod material_edit;
 mod model_axes;
 mod model_info;
@@ -310,6 +311,7 @@ const IMPLEMENTED: &[&str] = &[
     "edit.replace_selected",
     "help.search",
     "window.3d_warehouse",
+    "camera.match_new_photo",
 ];
 
 fn main() -> eframe::Result {
@@ -478,6 +480,8 @@ struct App {
     envs: environments::Environments,
     /// FEATURES.md 67 items' state (`small_items`).
     small: small_items::State,
+    /// Camera > Match New Photo / Edit Matched Photo and the scene photo shown.
+    match_photo: match_photo::MatchPhoto,
 }
 
 impl App {
@@ -593,6 +597,7 @@ impl App {
             library: Default::default(),
             envs: Default::default(),
             small: Default::default(),
+            match_photo: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -1108,6 +1113,7 @@ impl App {
             || self.presentation_command(ctx, frame, id)
             || self.texture_command(frame, id)
             || self.library_command(ctx, id)
+            || self.match_photo_command(id)
         {
         } else if id == "window.model_info" {
             self.open_model_info();
@@ -1599,7 +1605,11 @@ impl App {
         };
         self.animate_camera(ui.ctx());
         let before = self.camera.clone();
-        nav::apply(self.tool, &mut self.camera, &input, viewport_px);
+        // Match Photo editing takes the mouse (no navigation while lining up).
+        let photo = self.match_photo_input(ui, &response, rect, viewport_px);
+        if !photo {
+            nav::apply(self.tool, &mut self.camera, &input, viewport_px);
+        }
         self.cancel_transition_if_moved(&before);
         self.viewport_px = viewport_px;
         if self.transition.is_none() {
@@ -1609,7 +1619,11 @@ impl App {
         // navigation tool, which does nothing here).
         let texpos =
             self.texture_position_input(ui, &response, rect, viewport_px, &render_state.device);
-        match if texpos { Tool::Pan } else { self.tool } {
+        match if texpos || photo {
+            Tool::Pan
+        } else {
+            self.tool
+        } {
             Tool::Select => {
                 self.select_tool(ui, &response, rect, viewport_px, &render_state.device)
             }
@@ -1637,6 +1651,8 @@ impl App {
         self.tool_cursor(ui, &response, rect, viewport_px);
         self.update_live(&render_state.device);
 
+        let photo_behind = self.match_photo_behind();
+        self.viewport.set_transparent_background(photo_behind);
         self.viewport.render(
             &render_state.device,
             &render_state.queue,
@@ -1664,12 +1680,16 @@ impl App {
             ),
         };
         self.texture = Some((id, size));
-        ui.painter().image(
-            id,
-            rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
+        drop(renderer);
+        if self.match_photo_under(ui, rect) {
+            ui.painter().image(
+                id,
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        self.match_photo_over(ui, rect);
         self.draw_selection_box(ui, &response, rect);
         self.crosshairs(ui, &response, rect, viewport_px);
         self.draw_lasso(ui, &response, rect);
@@ -2617,6 +2637,7 @@ impl eframe::App for App {
         let has_file = self.document.as_ref().is_some_and(|d| d.has_file);
         let can_go_back = self.camera_history.can_go_back();
         let can_go_forward = self.camera_history.can_go_forward();
+        let can_edit_photo = self.can_edit_matched_photo();
         let camera = self.camera.clone();
         let scene_tabs = self.scene_tabs;
         let playing = self.animation.is_playing();
@@ -2639,6 +2660,7 @@ impl eframe::App for App {
                 "edit.paste" | "edit.paste_in_place" => can_paste,
                 "camera.previous" => can_go_back,
                 "camera.next" => can_go_forward,
+                "camera.edit_matched_photo" => can_edit_photo,
                 "file.revert" => has_file,
                 _ => small_on
                     .iter()
@@ -2683,6 +2705,7 @@ impl eframe::App for App {
         self.tool_extra_ui(ui.ctx(), frame);
         self.search_ui(ui.ctx(), frame);
         self.library_ui(ui.ctx(), frame);
+        self.match_photo_ui(ui.ctx(), frame);
         for event in events {
             match event {
                 mt_ui::Event::Command(id) => self.run_command(ui.ctx(), frame, &id),

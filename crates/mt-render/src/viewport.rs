@@ -1504,6 +1504,12 @@ impl Viewport {
         }
     }
 
+    /// Leaves the background (sky, ground, background color, watermarks) out of the
+    /// on-screen frames too, clearing to transparent: a matched photo is drawn behind.
+    pub fn set_transparent_background(&mut self, on: bool) {
+        self.transparent = on;
+    }
+
     pub fn color_view(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.resolve_view)
     }
