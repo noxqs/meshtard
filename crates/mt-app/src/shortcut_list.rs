@@ -280,9 +280,10 @@ mod tests {
     #[test]
     fn default_keymap_is_usable() {
         let spec = Spec::builtin().unwrap();
-        let commands = spec.commands();
         let mut seen = std::collections::BTreeMap::new();
         for spec in [spec.clone(), spec.mac_layout().unwrap()] {
+            // Each layout's own menus (the Mac adds File > Close).
+            let commands = spec.commands();
             seen.clear();
             for (id, texts) in &spec.keymap.bindings {
                 assert!(commands.contains_key(id), "{id} is not a menu command");

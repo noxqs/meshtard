@@ -23,6 +23,14 @@ items = [
   { id = "file.exit", label = "Quit Meshtard" },
 ]
 
+# Commands only SketchUp for Mac has, each after a Windows command. File > Close
+# (Cmd+W) closes the model's window [inf: macOS document windows; SketchUp for Mac
+# opens one window per model, Windows one model per app window and no Close item].
+[[insert]]
+after = "file.open"
+id = "file.close"
+label = "Close"
+
 # New labels by command id.
 [relabel]
 # Hide Dialogs / Show Dialogs in SketchUp for Mac's Window menu [doc]; ours is one

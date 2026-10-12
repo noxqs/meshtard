@@ -43,12 +43,13 @@ verified = false
 "tool.tape_measure" = "T"
 # Researched 2026-10-12 (spec/parity/SHORTCUTS.md has every key with its source):
 # help.sketchup.com/en/default-keyboard-shortcuts (2026) [doc] confirms the tool keys
-# above, Shift+Space, Shift+Z, G, Shift+S and adds K (Back Edges) and I (Image Igloo,
-# no command yet); the File/Edit/Zoom Window/scene keys above match a Windows
+# above, Shift+Space, Shift+Z, G, Shift+S and adds K (Back Edges) and I (Image
+# Igloo); the File/Edit/Zoom Window/scene keys above match a Windows
 # Preferences > Shortcuts export (forums.sketchup.com/t/36923, 2017) [inf].
 # The second keys of Undo, Cut, Copy, Paste and Zoom Extents (Alt+Backspace,
 # Shift+Delete, Ctrl+Insert, Shift+Insert, Ctrl+Shift+E) are from that export too [inf].
 "view.back_edges" = "K"
+"camera.image_igloo" = "I"
 # Sketchup/Context Help in that export [inf]; no menu item in SketchUp. Meshtard
 # shows the Instructor panel for the active tool.
 "help.context_help" = "Shift+F1"

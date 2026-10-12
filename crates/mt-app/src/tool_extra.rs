@@ -16,6 +16,7 @@ use glam::DVec2;
 use crate::App;
 use crate::document::Owner;
 use crate::nav::Tool;
+use crate::tool_mods::Role;
 
 impl App {
     /// Before a drawing tool's click handling: Ctrl tapped (pressed and released with
@@ -34,9 +35,15 @@ impl App {
                 .any(|e| matches!(e, egui::Event::Key { pressed: true, key, .. } if !matches!(key, egui::Key::Plus | egui::Key::Minus | egui::Key::Equals)));
             // Alt +/- is the 2026 Quick Reference Card's key (3 Point Arc [doc],
             // FEATURES.md 76); Ctrl +/- is Meshtard's earlier one, kept.
-            let k = |key| (i.modifiers.command || i.modifiers.alt) && i.key_pressed(key);
+            // On the Mac: Option or Command (`tool_mods`).
+            let m = crate::tool_mods::Keys::from_egui(i.modifiers);
+            let p = crate::tool_mods::Platform::current();
+            let any = [Role::Copy, Role::Alternate, Role::AltOption]
+                .iter()
+                .any(|r| p.held(m, *r));
+            let k = |key| any && i.key_pressed(key);
             (
-                i.modifiers.command,
+                p.held(m, Role::Copy),
                 any_key,
                 k(egui::Key::Plus) || k(egui::Key::Equals),
                 k(egui::Key::Minus),
@@ -87,7 +94,8 @@ impl App {
         draw.hover(&crate::tools::DrawHover {
             instance_name,
             units,
-            alt: ui.input(|i| i.modifiers.alt),
+            // Rectangle from the center: Alt, Option on the Mac.
+            alt: ui.input(|i| crate::tool_mods::held(i.modifiers, Role::AltOption)),
         });
     }
 

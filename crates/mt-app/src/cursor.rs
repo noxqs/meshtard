@@ -14,7 +14,9 @@ use crate::document::Owner;
 use crate::nav::Tool;
 use crate::selection::{self, Mode};
 
-/// Modifier keys held (Ctrl is Cmd on macOS, as everywhere in the app).
+/// Modifier keys held, by their Windows names: `ctrl` is the copy key (Option on the
+/// Mac), `alt` the alternate key (Command on the Mac, Option in some tools); built
+/// per platform by `tool_mods`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Mods {
     pub ctrl: bool,
@@ -219,11 +221,7 @@ impl App {
             return;
         }
         let m = ui.input(|i| i.modifiers);
-        let mods = Mods {
-            ctrl: m.command,
-            shift: m.shift,
-            alt: m.alt,
-        };
+        let mods = crate::tool_mods::mods(m, self.tool);
         let nav = response
             .dragged_by(egui::PointerButton::Middle)
             .then_some(if m.shift {
