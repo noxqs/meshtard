@@ -120,7 +120,7 @@ fn skp_read_and_write_are_unchanged() {
         if cfg!(target_os = "linux") {
             assert_eq!(g, e, "file, parsed, built, saved");
         } else {
-            let first3 = |l: &str| l.rsplitn(2, ' ').nth(1).unwrap_or("").to_owned();
+            let first3 = |l: &str| l.rsplit_once(' ').map_or(l, |x| x.0).to_owned();
             assert_eq!(first3(g), first3(e), "file, parsed, built");
         }
     }
