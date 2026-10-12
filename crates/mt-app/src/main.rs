@@ -8,6 +8,7 @@ mod camera_cmd;
 mod camera_tools;
 mod click_style;
 mod commands;
+mod component_behavior;
 mod component_dialog;
 mod component_snaps;
 mod confirm;
@@ -616,6 +617,7 @@ impl App {
 
     /// Rebuilds the drawn scene and pick index after the model changed.
     fn rebuild(&mut self, device: &wgpu::Device) {
+        self.sync_facing();
         self.scene = self
             .document
             .as_ref()
@@ -711,13 +713,23 @@ impl App {
         }
         self.viewport
             .set_faces(device, &self.scene.vertices, &self.scene.indices);
+        let casters = self.scene.shadow_casters();
+        let caster_indices: &[u32] = if casters.is_some() {
+            &self.scene.indices
+        } else {
+            &[]
+        };
+        self.viewport
+            .set_shadow_casters(device, casters.as_deref().unwrap_or(&[]), caster_indices);
         self.viewport.set_textures(&self.scene.textures);
         self.inst_bounds = match &self.document {
             Some(doc) => {
                 let ents = doc.active();
                 let xf = self.ctx_xf;
                 selection::instance_bounds(&self.scene, |i| {
-                    ents.instances.get(i).map(|inst| xf * inst.transform)
+                    ents.instances
+                        .get(i)
+                        .map(|inst| doc.drawn_transform(xf * inst.transform, inst))
                 })
             }
             None => Default::default(),
@@ -728,39 +740,46 @@ impl App {
         self.update_highlight(device);
     }
 
+    /// The sun the Shadows settings place (or Environments > Set Sun Location), when
+    /// shadows or "Use sun for shading" are on.
+    fn sun_dir(&self) -> Option<DVec3> {
+        let d = self.document.as_ref()?;
+        let s = &d.model.shadows;
+        // "Use sun for shading": sun lighting without shadows.
+        if !(s.enabled || s.use_sun_for_shading) {
+            return None;
+        }
+        // The settings hold no year; the current SketchUp default year is unverified.
+        let sun = mt_render::sun_direction(
+            s.latitude,
+            s.longitude,
+            s.utc_offset,
+            2026,
+            s.month,
+            s.day,
+            s.hour,
+            s.minute,
+        );
+        let sun = mt_render::rotate_north(sun, d.model.geo.north_angle);
+        // Environments > Set Sun Location replaces the sun.
+        Some(environments::sun_override(&d.model.environment).unwrap_or(sun))
+    }
+
     /// Passes the model's shadow settings to the viewport.
     fn apply_shadows(&mut self) {
         self.apply_environment();
-        let env_sun =
-            (self.document.as_ref()).and_then(|d| environments::sun_override(&d.model.environment));
+        let sun = self.sun_dir();
         let shadows = self
             .document
             .as_ref()
-            .map(|d| (&d.model.shadows, d.model.geo.north_angle))
-            // "Use sun for shading": sun lighting without shadows.
-            .filter(|(s, _)| s.enabled || s.use_sun_for_shading)
-            .map(|(s, north)| {
-                // The settings hold no year; the current SketchUp default year is unverified.
-                let sun = mt_render::sun_direction(
-                    s.latitude,
-                    s.longitude,
-                    s.utc_offset,
-                    2026,
-                    s.month,
-                    s.day,
-                    s.hour,
-                    s.minute,
-                );
-                let sun = mt_render::rotate_north(sun, north);
-                // Environments > Set Sun Location replaces the sun.
-                let sun = env_sun.unwrap_or(sun);
-                mt_render::Shadows {
-                    sun_dir: sun.as_vec3().to_array(),
-                    light: s.light as f32,
-                    dark: s.dark as f32,
-                    on_faces: s.on_faces && s.enabled,
-                    on_ground: s.on_ground && s.enabled,
-                }
+            .map(|d| &d.model.shadows)
+            .zip(sun)
+            .map(|(s, sun)| mt_render::Shadows {
+                sun_dir: sun.as_vec3().to_array(),
+                light: s.light as f32,
+                dark: s.dark as f32,
+                on_faces: s.on_faces && s.enabled,
+                on_ground: s.on_ground && s.enabled,
             });
         self.viewport.set_shadows(shadows);
     }
@@ -860,7 +879,7 @@ impl App {
                 else {
                     continue;
                 };
-                let mut xf = self.ctx_xf * inst.transform;
+                let mut xf = doc.drawn_transform(self.ctx_xf * inst.transform, inst);
                 if let Some((m, false)) = moved(&Some(*o)) {
                     xf = m * xf;
                 }
@@ -1659,6 +1678,7 @@ impl App {
         self.context_menu(ui, &response, rect, viewport_px, &render_state.device);
         self.orbit_double_click(ui, &response, rect, viewport_px);
         self.tool_cursor(ui, &response, rect, viewport_px);
+        self.update_facing(&render_state.device);
         self.update_live(&render_state.device);
 
         let photo_behind = self.match_photo_behind();

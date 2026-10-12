@@ -5,6 +5,7 @@
 
 pub mod annotation;
 pub mod arrangement;
+pub mod behavior;
 pub mod bvh;
 pub mod clipboard;
 pub mod curves;

@@ -48,6 +48,10 @@ pub struct Document {
     /// Name given to the next recorded step: the app sets it to the running tool or
     /// command before edits happen.
     pub operation: String,
+    /// Where the view is, for components that always face the camera (and the sun
+    /// for their shadows). Not part of the model: the app sets it before building
+    /// the scene; `None` draws them as placed.
+    pub view: Option<crate::component_behavior::Facing>,
 }
 
 /// A state Undo and Redo go back to: the model, the edit context, the state id and
@@ -132,6 +136,9 @@ pub struct Scene {
     /// Index into `textures` of each model material (`FaceVertex::NO_TEXTURE` when
     /// untextured).
     texture_of: Vec<u32>,
+    /// Vertex ranges of face-camera components with "Shadows face sun", and the
+    /// rotation turning each from the camera to the sun (see [`Scene::shadow_casters`]).
+    pub sun_facing: Vec<(std::ops::Range<usize>, DMat4)>,
 }
 
 /// Where entities being collected sit relative to the open context.
@@ -343,6 +350,7 @@ impl Document {
             undo_names: Vec::new(),
             redo_names: Vec::new(),
             operation: String::new(),
+            view: None,
         })
     }
 
@@ -371,6 +379,7 @@ impl Document {
             undo_names: Vec::new(),
             redo_names: Vec::new(),
             operation: String::new(),
+            view: None,
         }
     }
 
@@ -981,6 +990,8 @@ impl Document {
             out.edge_owner.push(owner_of(Owner::Edge(id)));
         }
 
+        // "Cut opening" components glued here cut holes into the faces they sit on.
+        let openings = self.cut_openings(ents);
         for (f, face) in &ents.faces {
             let hidden = ghost || face.attrs.hidden;
             if rest_here
@@ -1034,7 +1045,11 @@ impl Document {
             let layer = |t: &Side| t.as_ref().map_or(FaceVertex::NO_TEXTURE, |t| t.0);
             let texture = [layer(&front_tex), layer(&back_tex)];
             let n = world_normal(f);
-            for local in tessellate::triangulate(ents, f) {
+            let tris = (!openings.is_empty())
+                .then(|| mt_kernel::behavior::cut_face(ents, f, &openings))
+                .flatten()
+                .unwrap_or_else(|| tessellate::triangulate(ents, f));
+            for local in tris {
                 let [a, b, c] = local.map(|p| xf.transform_point3(p));
                 // A mirroring transform flips the winding; keep it counter-clockwise
                 // around the front normal.
@@ -1112,9 +1127,10 @@ impl Document {
                 layer: i.layer.filter(|&l| l > 0).or(outer_layer),
                 similar: similar || (edit_def == Some(i.definition) && !on_path),
             };
+            let (ix, sun_turn) =
+                crate::component_behavior::placed(self.view.as_ref(), def, xf * i.transform);
             // Model Info > Components > Show component axes.
             if self.model.edit_fade.show_axes && !def.is_group && !def.is_image {
-                let ix = xf * i.transform;
                 let size = def
                     .entities
                     .vertices
@@ -1133,7 +1149,11 @@ impl Document {
                         .push(Segment::line(f32x3(o), f32x3(tip), c, [EDGE_WIDTH, 0.0]));
                 }
             }
-            self.collect(&def.entities, xf * i.transform, parent, child, active, out);
+            let start = out.vertices.len();
+            self.collect(&def.entities, ix, parent, child, active, out);
+            if let Some(turn) = sun_turn {
+                out.sun_facing.push((start..out.vertices.len(), turn));
+            }
             active.remove(&i.definition);
         }
     }

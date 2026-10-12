@@ -60,9 +60,9 @@ pub struct Definition {
     pub glue: GlueTo,
     /// Entity Info > Advanced Attributes kept on the definition.
     pub attributes: DefinitionAttrs,
-    /// Components panel, Edit tab: "Cut opening" (cuts the face it is glued to; not
-    /// applied yet), "Always face camera" and "Shadows face sun" (stored only). Not
-    /// saved in .skp.
+    /// Components panel, Edit tab: "Cut opening" (cuts the face it is glued to),
+    /// "Always face camera" and "Shadows face sun", applied when the scene is drawn
+    /// (`mt_kernel::behavior`). Not saved in .skp.
     pub cut_opening: bool,
     pub always_face_camera: bool,
     pub shadows_face_sun: bool,
