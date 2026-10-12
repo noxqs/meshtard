@@ -951,10 +951,9 @@ impl App {
     ) {
         {
             {
-                if let Some(camera) = doc
-                    .saved_camera()
-                    .or_else(|| doc.extents_camera(self.camera.fov_deg))
-                {
+                let saved = doc.saved_camera();
+                let zoom_extents = saved.is_none();
+                if let Some(camera) = saved {
                     self.camera = camera;
                 }
                 self.transition = None;
@@ -965,6 +964,18 @@ impl App {
                 self.clipboard_changed_document();
                 self.selection.clear();
                 self.rebuild(device);
+                // Without a saved view, Zoom Extents on the scene just built (building
+                // one only for the camera doubled the time to open a big model). Only
+                // face-camera components depend on the view: rebuild for those.
+                if zoom_extents
+                    && let Some(camera) =
+                        document::extents_camera_of(&self.scene, self.camera.fov_deg)
+                {
+                    self.camera = camera;
+                    if self.document.as_ref().is_some_and(|d| d.has_face_camera()) {
+                        self.rebuild(device);
+                    }
+                }
                 log::info!(
                     "opened {}: {} triangles, {} edges",
                     path.display(),

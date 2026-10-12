@@ -67,7 +67,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use archive::EdgeFlags;
 use archive::{
-    ArcParams, ArchiveWriter, Body, CurveKind, FaceRecord, InstanceKind, InstanceRecord, shift_ref,
+    ArcParams, ArchiveWriter, Body, ClassSlots, CurveKind, FaceRecord, InstanceKind,
+    InstanceRecord, shift_ref,
 };
 pub use geom::rotation_matrix;
 
@@ -756,7 +757,7 @@ impl SkpBuilder {
             owner: OWNERS.fetch_add(1, Ordering::Relaxed),
             guid: Box::new(random_guid),
             clock: Box::new(now),
-            material_writer: ArchiveWriter::new(BASE_SLOT, HashMap::new(), pid_start),
+            material_writer: ArchiveWriter::new(BASE_SLOT, ClassSlots::default(), pid_start),
             materials_by_name: HashMap::new(),
             material_slots: HashSet::new(),
             material_count: 0,
@@ -910,7 +911,7 @@ impl SkpBuilder {
         self.material_writer.next_slot - BASE_SLOT
     }
 
-    fn material_shifted_class_slot(&self) -> HashMap<String, u32> {
+    fn material_shifted_class_slot(&self) -> ClassSlots {
         let shift = self.material_shift();
         SCAFFOLD_CLASS_SLOTS
             .iter()
@@ -924,7 +925,7 @@ impl SkpBuilder {
             .map_or(0, |w| w.next_slot - self.layer_writer_start)
     }
 
-    fn post_layer_class_slot(&self) -> HashMap<String, u32> {
+    fn post_layer_class_slot(&self) -> ClassSlots {
         match &self.layer_writer {
             Some(w) => w.class_slot.clone(),
             None => self.material_shifted_class_slot(),
@@ -937,7 +938,7 @@ impl SkpBuilder {
             .map_or(0, |w| w.next_slot - self.definition_writer_start)
     }
 
-    fn post_definition_class_slot(&self) -> HashMap<String, u32> {
+    fn post_definition_class_slot(&self) -> ClassSlots {
         match &self.definition_writer {
             Some(w) => w.class_slot.clone(),
             None => self.post_layer_class_slot(),

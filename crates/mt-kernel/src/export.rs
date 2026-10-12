@@ -234,9 +234,12 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
         visit(model, id, &mut seen, &mut order);
     }
     let mut written: HashMap<DefinitionId, w::DefinitionId> = HashMap::new();
+    // Names already written, for `unique_name` (a model can have thousands of groups).
+    let mut names: HashSet<String> = HashSet::new();
     for id in order {
         let d = &model.definitions[id];
-        let name = unique_name(&d.name, &written);
+        let name = unique_name(&d.name, &names);
+        names.insert(name.clone());
         let desc = (!d.description.is_empty()).then_some(d.description.as_str());
         let mut db = b.add_component_definition(&name, desc)?;
         write_body(&mut DefSink(&mut db), model, &d.entities, &maps, &written)?;
@@ -284,8 +287,8 @@ fn visit(
     out.push(id);
 }
 
-fn unique_name(name: &str, written: &HashMap<DefinitionId, w::DefinitionId>) -> String {
-    let taken = |n: &str| written.values().any(|d| d.name() == n);
+fn unique_name(name: &str, written: &HashSet<String>) -> String {
+    let taken = |n: &str| written.contains(n);
     if !taken(name) {
         return name.to_owned();
     }
@@ -428,7 +431,7 @@ fn write_body(
     maps: &Maps,
     written: &HashMap<DefinitionId, w::DefinitionId>,
 ) -> Result<(), WriteError> {
-    let mut done: HashSet<EdgeId> = HashSet::new();
+    let mut done: crate::spatial::FxSet<EdgeId> = Default::default();
     for c in ents.curves.keys() {
         let edges = ents.curve_edges(c);
         let Some((points, closed)) = chain(ents, &edges) else {

@@ -11,6 +11,7 @@ use crate::model::{
 use crate::raw::{CoEdge, GeometryBuilder, RawDefinition, RawFace, RawInstance, TlvNode};
 use crate::tlv::{find, find_all, flat, flat_find};
 
+#[inline(always)]
 fn is(n: &TlvNode, tag: &str) -> bool {
     n.tag == Tag::new(tag)
 }
@@ -97,11 +98,17 @@ fn flat_spans(p: &[u8], mut a: usize, z: usize) -> Vec<(Tag, usize, usize)> {
 
 /// Tags that wrap more attribute structure (OpenSKP `_PROP_CONTAINER_TAGS`).
 fn is_prop_container(t: Tag) -> bool {
-    [
-        "DD05", "B536", "B136", "B236", "B336", "B036", "A438", "AE38",
-    ]
-    .iter()
-    .any(|c| Tag::new(c) == t)
+    const TAGS: [Tag; 8] = [
+        Tag::new("DD05"),
+        Tag::new("B536"),
+        Tag::new("B136"),
+        Tag::new("B236"),
+        Tag::new("B336"),
+        Tag::new("B036"),
+        Tag::new("A438"),
+        Tag::new("AE38"),
+    ];
+    TAGS.contains(&t)
 }
 
 /// An `A438` value wrapper: its single child's tag gives the type.

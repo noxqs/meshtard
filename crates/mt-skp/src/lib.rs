@@ -11,6 +11,7 @@
 
 mod bytes;
 pub mod dump;
+mod fx;
 mod geometry;
 mod legacy;
 pub mod model;

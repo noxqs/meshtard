@@ -974,7 +974,7 @@ mod pick_tests {
         let bvh = mt_kernel::bvh::Bvh::build(scene.triangles.clone());
         let camera = doc
             .saved_camera()
-            .or_else(|| doc.extents_camera(35.0))
+            .or_else(|| crate::document::extents_camera_of(&doc.scene(), 35.0))
             .unwrap();
         let viewport = DVec2::new(1280.0, 760.0);
         let mut hits = 0;
