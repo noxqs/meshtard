@@ -107,7 +107,13 @@ impl Aabb {
 
 /// FxHash: a fast hasher for integer cell coordinates.
 #[derive(Default)]
-struct FxHasher(u64);
+pub(crate) struct FxHasher(u64);
+
+/// A hash map keyed by integer cell coordinates (or other small integers).
+pub(crate) type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+/// A hash set of small integers.
+pub(crate) type FxSet<K> = std::collections::HashSet<K, BuildHasherDefault<FxHasher>>;
 
 impl Hasher for FxHasher {
     fn finish(&self) -> u64 {
@@ -115,7 +121,12 @@ impl Hasher for FxHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+        // Whole words at a time (`[i64; 3]` keys hash as their bytes).
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.write_u64(u64::from_le_bytes(*w));
+        }
+        for &b in rest {
             self.write_u64(u64::from(b));
         }
     }

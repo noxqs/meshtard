@@ -14,7 +14,7 @@
 //! The model is also written as `.glb` and `.gltf` and read back: their area must match
 //! the import's within 1e-6 (relative), else marked `DIFF` (zero-area triangles may drop
 //! out). Each import is also checked as kernel geometry (`valid` / `INVALID`, or
-//! `unchecked` for large models): area lost on export comes from faces of invalid
+//! `unchecked` for huge models): area lost on export comes from faces of invalid
 //! imports, whatever the format.
 
 use std::path::{Path, PathBuf};
@@ -171,8 +171,8 @@ fn main() {
                 continue;
             }
         };
-        // Valid kernel geometry (checked when small: validation is quadratic).
-        let valid = (model.root.edges.len() <= 20_000)
+        // Valid kernel geometry (checked unless huge).
+        let valid = (model.root.edges.len() <= 1_000_000)
             .then(|| mt_kernel::validate(&model.root, mt_kernel::Checks::ALL).is_empty());
         println!(
             "   {} {}",

@@ -1,11 +1,13 @@
-//! Imports DXF, glTF / GLB, FBX and IFC files the way File > Import does and prints what
-//! came in: `cargo run -p mt-kernel --example import_check -- FILE...`.
+//! Imports DXF, glTF / GLB, FBX, IFC and the other mesh formats (OBJ, STL, PLY, 3MF,
+//! 3DS) the way File > Import does and prints what came in:
+//! `cargo run -p mt-kernel --example import_check -- FILE...`.
 //!
 //! For each file: definitions (components and groups), instances, faces, edges,
 //! curves, texts, dimensions and materials over the whole model, the nesting depth,
 //! and whether every definition and the root pass `mt_kernel::validate` (`valid`, or
 //! `INVALID` with the first problem; `topology INVALID` when even
 //! `Checks::TOPOLOGY` fails). IFC files also print the importer's report.
+//! `--errors` also counts every problem `validate` reports, by kind.
 
 use std::path::Path;
 
@@ -93,14 +95,36 @@ fn import(path: &Path) -> Result<Model, String> {
             };
             Ok(model)
         }
-        _ => Err("unknown extension".into()),
+        _ => {
+            let kind = mt_kernel::formats::Kind::from_extension(&ext).ok_or("unknown extension")?;
+            let (mesh, hints) = mt_kernel::formats::read_mesh(kind, &bytes, &read, true)?;
+            let units = hints.units.unwrap_or(kind.default_hints().0);
+            let mut model = Model::default();
+            model.materials.extend(
+                mesh.materials
+                    .iter()
+                    .map(mt_kernel::formats::model_material),
+            );
+            let ids: Vec<usize> = (0..mesh.materials.len()).collect();
+            let opts = mt_kernel::mesh_import::MeshOptions {
+                inches_per_unit: 1.0 / units.per_inch(),
+                y_up: false,
+                merge_coplanar: true,
+            };
+            model.root = mt_kernel::mesh_import::to_entities(&mesh, &opts, &ids);
+            Ok(model)
+        }
     }
 }
 
 fn main() {
     // `--texts` also lists texts and dimension overrides.
     let show_texts = std::env::args().any(|a| a == "--texts");
-    for arg in std::env::args().skip(1).filter(|a| a != "--texts") {
+    let show_errors = std::env::args().any(|a| a == "--errors");
+    for arg in std::env::args()
+        .skip(1)
+        .filter(|a| a != "--texts" && a != "--errors")
+    {
         let path = Path::new(&arg);
         let start = std::time::Instant::now();
         let model = match import(path) {
@@ -110,6 +134,7 @@ fn main() {
                 continue;
             }
         };
+        let imported = start.elapsed().as_secs_f64();
         let all: Vec<&Entities> = std::iter::once(&model.root)
             .chain(model.definitions.values().map(|d| &d.entities))
             .collect();
@@ -135,7 +160,7 @@ fn main() {
             println!("{arg}: bounds {:.2} .. {:.2} m", b[0] * m, b[1] * m);
         }
         println!(
-            "{arg}: {} components, {} groups, {} instances, depth {}, {} faces, {} edges, {} curves, {} texts, {} dimensions, {} materials, {} ({:.1}s)",
+            "{arg}: {} components, {} groups, {} instances, depth {}, {} faces, {} edges, {} curves, {} texts, {} dimensions, {} materials, {} (import {:.1}s, total {:.1}s)",
             components,
             model.definitions.len() - components,
             sum(&|e| e.instances.len()),
@@ -150,8 +175,26 @@ fn main() {
                 None => "valid".to_owned(),
                 Some(p) => format!("INVALID: {p}"),
             },
+            imported,
             start.elapsed().as_secs_f64(),
         );
+        if show_errors {
+            // Problems by kind: the text with entity ids left out.
+            let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+            for e in &all {
+                for p in mt_kernel::validate(e, mt_kernel::Checks::ALL) {
+                    let kind = p
+                        .split(' ')
+                        .filter(|w| !w.contains("Id("))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    *kinds.entry(kind).or_default() += 1;
+                }
+            }
+            for (k, n) in kinds {
+                println!("  {n:>6} {k}");
+            }
+        }
         if show_texts {
             for e in &all {
                 for t in &e.texts {

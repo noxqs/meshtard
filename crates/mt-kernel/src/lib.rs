@@ -23,6 +23,7 @@ pub mod import;
 pub mod instance_ops;
 pub mod intersect;
 pub mod mesh_export;
+pub mod mesh_heal;
 pub mod mesh_import;
 pub mod model;
 pub mod model_data;
