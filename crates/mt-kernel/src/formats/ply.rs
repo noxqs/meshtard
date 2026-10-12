@@ -11,20 +11,23 @@
 //!   rounded to 4 bits per channel first. Float colors (0..1) are read too.
 //! - Texture coordinates `s t` / `u v` / `texture_u texture_v` per vertex, or a face
 //!   `texcoord` list, with the texture named by a `comment TextureFile <name>` line
-//!   (MeshLab's convention): faces get the texture.
+//!   (MeshLab's convention; with several, a face `texnumber` picks one): faces get
+//!   the texture.
 //! - PLY records no units or axes.
 //!
 //! Export: binary little endian or ASCII; per-material vertices (so colors are exact)
-//! with `red green blue` bytes, triangles as `vertex_indices` lists. Texture
-//! coordinates are not written (PLY has no material list).
+//! with `red green blue` bytes, triangles as `vertex_indices` lists. With textures,
+//! MeshLab's convention: `comment TextureFile` lines naming the images written next
+//! to the file, a face `texcoord` list (empty for untextured faces) and, with several
+//! textures, a face `texnumber`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use glam::{DVec2, DVec3};
 
-use super::{ExportOptions, Hints, ReadFile, find_texture, groups};
-use crate::mesh_import::{Mesh, MeshMaterial, Polygon};
+use super::{ExportOptions, Files, Hints, ReadFile, find_texture, groups};
+use crate::mesh_import::{Mesh, MeshMaterial, MeshTexture, Polygon};
 use crate::model::Model;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -169,7 +172,7 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
     }
     let mut enc = None;
     let mut elements: Vec<Element> = Vec::new();
-    let mut texture_file = None;
+    let mut texture_files: Vec<String> = Vec::new();
     for line in header.lines() {
         let w: Vec<&str> = line.split_whitespace().collect();
         match w.as_slice() {
@@ -182,7 +185,7 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
                 })
             }
             ["comment", key, rest @ ..] if key.eq_ignore_ascii_case("texturefile") => {
-                texture_file = Some(rest.join(" "));
+                texture_files.push(rest.join(" "));
             }
             ["element", name, count] => elements.push(Element {
                 name: (*name).to_owned(),
@@ -227,6 +230,8 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
     // Corners, own color, per-corner texture coordinates.
     type Face = (Vec<usize>, Option<[f64; 4]>, Vec<DVec2>);
     let mut faces: Vec<Face> = Vec::new();
+    // Each face's texture number (`texnumber`).
+    let mut face_tex: Vec<Option<usize>> = Vec::new();
     for el in &elements {
         let idx = |names: &[&str]| {
             el.props
@@ -276,6 +281,7 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
                     .filter(|&i| el.props[i].list.is_some())
                     .ok_or("PLY faces without vertex_indices")?;
                 let tc = idx(&["texcoord"]).filter(|&i| el.props[i].list.is_some());
+                let tn = idx(&["texnumber"]).filter(|&i| el.props[i].list.is_none());
                 let colors = color_idx(rgba);
                 for _ in 0..el.count {
                     let (rec, lists) = read_record(&mut body, el)?;
@@ -298,6 +304,7 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
                         })
                         .unwrap_or_default();
                     faces.push((vs, colors.as_ref().map(|c| color_of(&rec, c)), uvs));
+                    face_tex.push(tn.map(|i| rec[i]).filter(|&n| n >= 0.0).map(|n| n as usize));
                 }
             }
             _ => {
@@ -341,10 +348,15 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
             *c = c.map(|x| ((u16::from(x) + 8) / 17 * 17).min(255) as u8);
         }
     }
-    let texture = texture_file.as_deref().and_then(|f| find_texture(f, read));
+    let textures: Vec<Option<MeshTexture>> = texture_files
+        .iter()
+        .map(|f| find_texture(f, read))
+        .collect();
     let mut by_color: BTreeMap<[u8; 4], usize> = BTreeMap::new();
-    let mut textured_slot = None;
-    for ((vs, _, face_uvs), color) in faces.into_iter().zip(face_bytes) {
+    // The material of each texture number.
+    let mut textured_slot: BTreeMap<usize, usize> = BTreeMap::new();
+    face_tex.resize(faces.len(), None);
+    for (((vs, _, face_uvs), color), tex) in faces.into_iter().zip(face_bytes).zip(face_tex) {
         let uvs: Vec<DVec2> = if face_uvs.len() == vs.len() {
             face_uvs
         } else if vs.iter().all(|&v| vertex_uvs[v].is_some()) {
@@ -352,8 +364,10 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
         } else {
             Vec::new()
         };
-        let material = if let (Some(t), false) = (&texture, uvs.is_empty()) {
-            Some(*textured_slot.get_or_insert_with(|| {
+        let number = tex.unwrap_or(0);
+        let texture = textures.get(number).and_then(Option::as_ref);
+        let material = if let (Some(t), false) = (texture, uvs.is_empty()) {
+            Some(*textured_slot.entry(number).or_insert_with(|| {
                 mesh.materials.push(MeshMaterial {
                     name: t
                         .filename
@@ -393,19 +407,30 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// PLY export choices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlyOptions {
+    /// Units, axes, two-sided faces and `textures` (texture coordinates and images).
     pub common: ExportOptions,
     pub ascii: bool,
     /// Write `red green blue` per vertex.
     pub colors: bool,
 }
 
-/// Encodes the model as PLY.
-pub fn to_ply(model: &Model, opts: &PlyOptions) -> Vec<u8> {
-    let common = ExportOptions {
-        textures: false,
-        ..opts.common.clone()
-    };
-    let (mats, groups) = groups(model, &common);
+/// Encodes the model as PLY. With textures, the texture images are written next to
+/// it (MeshLab's `comment TextureFile` lines, in order) and each face gets a
+/// `texcoord` list (empty for untextured faces) and, with several textures, a
+/// `texnumber`.
+pub fn to_ply(model: &Model, opts: &PlyOptions) -> Files {
+    let (mats, groups) = groups(model, &opts.common);
+    let textures = super::texture_files(&mats);
+    // Each slot's texture number.
+    let tex_of: Vec<Option<usize>> = mats
+        .iter()
+        .map(|m| {
+            let (name, _) = m.texture.as_ref()?;
+            textures.iter().position(|(n, _)| n == name)
+        })
+        .collect();
+    let textured = !textures.is_empty();
+    let numbered = textures.len() > 1;
     let nv: usize = groups.iter().map(|g| g.positions.len()).sum();
     let nf: usize = groups.iter().map(|g| g.triangles.len()).sum();
     let mut head = String::from("ply\n");
@@ -421,15 +446,25 @@ pub fn to_ply(model: &Model, opts: &PlyOptions) -> Vec<u8> {
     let _ = writeln!(
         head,
         "comment Exported by meshtard, units: {}",
-        common.units.name()
+        opts.common.units.name()
     );
+    for (name, _) in &textures {
+        let _ = writeln!(head, "comment TextureFile {name}");
+    }
     let _ = writeln!(head, "element vertex {nv}");
     head.push_str("property float x\nproperty float y\nproperty float z\n");
     if opts.colors {
         head.push_str("property uchar red\nproperty uchar green\nproperty uchar blue\n");
     }
     let _ = writeln!(head, "element face {nf}");
-    head.push_str("property list uchar int vertex_indices\nend_header\n");
+    head.push_str("property list uchar int vertex_indices\n");
+    if textured {
+        head.push_str("property list uchar float texcoord\n");
+    }
+    if numbered {
+        head.push_str("property int texnumber\n");
+    }
+    head.push_str("end_header\n");
     let mut out = head.into_bytes();
     let mut text = String::new();
     for (g, m) in groups.iter().zip(&mats) {
@@ -457,22 +492,51 @@ pub fn to_ply(model: &Model, opts: &PlyOptions) -> Vec<u8> {
         }
     }
     let mut base = 0;
-    for g in &groups {
+    for (slot, g) in groups.iter().enumerate() {
+        let tex = tex_of[slot];
         for t in &g.triangles {
             let ix = t.map(|(p, _)| (base + p) as i32);
+            // Texture coordinates of a textured slot's corners.
+            let uv: Vec<f64> = match tex {
+                Some(_) => t.iter().flat_map(|&(_, k)| g.uvs[k].to_array()).collect(),
+                None => Vec::new(),
+            };
+            let number = tex.map_or(-1, |n| n as i32);
             if opts.ascii {
-                let _ = writeln!(text, "3 {} {} {}", ix[0], ix[1], ix[2]);
+                let _ = write!(text, "3 {} {} {}", ix[0], ix[1], ix[2]);
+                if textured {
+                    let _ = write!(text, " {}", uv.len());
+                    for x in &uv {
+                        let _ = write!(text, " {}", super::num(*x));
+                    }
+                }
+                if numbered {
+                    let _ = write!(text, " {number}");
+                }
+                text.push('\n');
             } else {
                 out.push(3);
                 for i in ix {
                     out.extend_from_slice(&i.to_le_bytes());
+                }
+                if textured {
+                    out.push(uv.len() as u8);
+                    for x in &uv {
+                        out.extend_from_slice(&(*x as f32).to_le_bytes());
+                    }
+                }
+                if numbered {
+                    out.extend_from_slice(&number.to_le_bytes());
                 }
             }
         }
         base += g.positions.len();
     }
     out.extend_from_slice(text.as_bytes());
-    out
+    Files {
+        main: out,
+        others: textures,
+    }
 }
 
 /// Distinct colors of a mesh's materials (tests).
@@ -529,7 +593,8 @@ mod tests {
                     ascii,
                     colors: true,
                 },
-            );
+            )
+            .main;
             let (mesh, _) = parse(&ply, true, &none).unwrap();
             assert_eq!(mesh.polygons.len(), 12);
             let c = colors(&mesh);
@@ -573,5 +638,78 @@ mod tests {
         assert_eq!(mesh.materials.len(), 1);
         assert!(mesh.materials[0].texture.is_some());
         assert_eq!(mesh.polygons[0].uvs.len(), 3);
+    }
+
+    #[test]
+    fn texture_coordinates_round_trip() {
+        let mut m = painted_cube();
+        let tex = |name: &str, byte: u8| crate::Texture {
+            filename: name.into(),
+            data: std::sync::Arc::from(vec![0x89, b'P', b'N', b'G', byte]),
+            width: 10.0,
+            height: 10.0,
+            colorize: false,
+        };
+        m.materials[0].texture = Some(tex("a.png", 1));
+        m.materials.push(crate::Material {
+            name: "B".into(),
+            color: [0, 0, 255],
+            opacity: 1.0,
+            texture: Some(tex("b.png", 2)),
+        });
+        let bottom = m
+            .root
+            .faces
+            .iter()
+            .find(|(_, f)| f.normal.z.abs() > 0.9 && m.root.loop_points(&f.outer)[0].z < 5.0)
+            .map(|(id, _)| id)
+            .unwrap();
+        m.root.faces[bottom].attrs.material = Some(1);
+        for ascii in [false, true] {
+            let files = to_ply(
+                &m,
+                &PlyOptions {
+                    common: ExportOptions::default(),
+                    ascii,
+                    colors: true,
+                },
+            );
+            assert_eq!(files.others.len(), 2);
+            let text = String::from_utf8_lossy(&files.main);
+            assert!(
+                text.contains("comment TextureFile model_Red.png"),
+                "{text:.400}"
+            );
+            assert!(text.contains("property int texnumber"));
+            let read = |name: &str| {
+                files
+                    .others
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, d)| d.to_vec())
+            };
+            let (mesh, _) = parse(&files.main, true, &read).unwrap();
+            assert_eq!(mesh.polygons.len(), 12);
+            let textured: Vec<_> = mesh
+                .materials
+                .iter()
+                .filter_map(|x| x.texture.as_ref().map(|t| t.data[4]))
+                .collect();
+            assert_eq!(textured.len(), 2, "ascii {ascii}");
+            // Two textured triangles per texture, with coordinates.
+            for (i, mat) in mesh.materials.iter().enumerate() {
+                if mat.texture.is_some() {
+                    let tris: Vec<_> = mesh
+                        .polygons
+                        .iter()
+                        .filter(|p| p.material == Some(i))
+                        .collect();
+                    assert_eq!(tris.len(), 2);
+                    assert!(tris.iter().all(|p| p.uvs.len() == 3));
+                }
+            }
+            // The other faces keep their color.
+            assert!(mesh.polygons.iter().filter(|p| p.uvs.is_empty()).count() == 8);
+        }
     }
 }

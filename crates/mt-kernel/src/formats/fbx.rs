@@ -22,13 +22,15 @@
 //!   UV layer's coordinates (by polygon vertex, by vertex or by polygon, direct or
 //!   indexed).
 //! - Normals, smoothing, edges, cameras, lights, skinning and animation are ignored;
-//!   the model hierarchy is flattened into one group.
+//!   [`parse_scene`] keeps the model hierarchy (File > Import makes nested groups of
+//!   it, [`super::scene`]); [`parse`] flattens it into one mesh.
 
 use std::collections::HashMap;
 use std::io::Read;
 
 use glam::{DMat4, DVec2, DVec3, DVec4, EulerRot};
 
+use super::scene::{Scene, SceneNode};
 use super::{Hints, ReadFile, find_texture, texture_from_bytes};
 use crate::mesh_export::Units;
 use crate::mesh_import::{Mesh, MeshMaterial, Polygon};
@@ -735,13 +737,22 @@ fn layer_index(
     }
 }
 
-/// Reads an FBX file (binary or ASCII). `read` finds texture files.
+/// Reads an FBX file (binary or ASCII) into one mesh. `read` finds texture files.
 pub fn parse(bytes: &[u8], read: ReadFile) -> Result<(Mesh, Hints), String> {
+    let (scene, hints) = parse_scene(bytes, read)?;
+    Ok((scene.mesh, hints))
+}
+
+/// Reads an FBX file with its model hierarchy: every `Model` is a node (world
+/// transform including the axis conversion) owning the polygons of its geometry.
+pub fn parse_scene(bytes: &[u8], read: ReadFile) -> Result<(Scene, Hints), String> {
     let (_version, nodes) = parse_tree(bytes)?;
     let doc = Doc::new(&nodes);
     let axes = axis_conversion(&nodes);
     let mut mesh = Mesh::default();
     let mut materials: HashMap<Key, usize> = HashMap::new();
+    let mut scene_nodes: Vec<SceneNode> = Vec::new();
+    let mut node_of: HashMap<Key, usize> = HashMap::new();
 
     // (geometry node, model key and node) pairs.
     let mut placed: Vec<(&Node, Option<(&Key, &Node)>)> = Vec::new();
@@ -759,6 +770,27 @@ pub fn parse(bytes: &[u8], read: ReadFile) -> Result<(Mesh, Hints), String> {
         })
         .unwrap_or_default();
     keys.sort_by_key(|k| order.get(&(doc.objects[*k] as *const Node)).copied());
+    for &key in &keys {
+        let node = doc.objects[key];
+        if node.name == "Model" {
+            let name = node.str(if matches!(key, Key::Id(_)) { 1 } else { 0 });
+            node_of.insert(key.clone(), scene_nodes.len());
+            scene_nodes.push(SceneNode {
+                name: object_name(name.unwrap_or("")).to_owned(),
+                parent: None,
+                world: axes * doc.global_transform(key, node, 0),
+                polygons: Vec::new(),
+            });
+        }
+    }
+    for &key in &keys {
+        if let Some(&i) = node_of.get(key) {
+            scene_nodes[i].parent = doc
+                .parents(key, "Model")
+                .first()
+                .and_then(|(pk, _)| node_of.get(*pk).copied());
+        }
+    }
     for key in keys {
         let node = doc.objects[key];
         if node.child("Vertices").is_none() {
@@ -786,6 +818,7 @@ pub fn parse(bytes: &[u8], read: ReadFile) -> Result<(Mesh, Hints), String> {
                 doc.global_transform(k, m, 0) * geometric_transform(m)
             });
         let mirrored = xf.determinant() < 0.0;
+        let first_polygon = mesh.polygons.len();
         let pts = geom.child("Vertices").map(Node::floats).unwrap_or_default();
         let base = mesh.positions.len();
         let count = pts.len() / 3;
@@ -865,9 +898,17 @@ pub fn parse(bytes: &[u8], read: ReadFile) -> Result<(Mesh, Hints), String> {
                 polygon += 1;
             }
         }
+        if let Some(&i) = model.and_then(|(k, _)| node_of.get(k)) {
+            scene_nodes[i]
+                .polygons
+                .extend(first_polygon..mesh.polygons.len());
+        }
     }
     Ok((
-        mesh,
+        Scene {
+            mesh,
+            nodes: scene_nodes,
+        },
         Hints {
             units: Some(Units::Centimeters),
             y_up: Some(false),
@@ -1031,6 +1072,49 @@ Connections:  {
         // in Z up: (10, 0, 1); times 2.54 cm per unit.
         let p = mesh.positions[1];
         assert!((p - DVec3::new(25.4, 0.0, 2.54)).length() < 1e-9, "{p}");
+    }
+
+    #[test]
+    fn model_hierarchy_becomes_nested_groups() {
+        // The triangle model and a second one sharing its geometry, both under a
+        // null model moved 5 units up.
+        let text = ASCII7
+            .replace(
+                "\tMaterial: 300",
+                "\tModel: 199, \"Model::Car\", \"Null\" {\n\t\tProperties70:  {\n\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,5,0\n\t\t}\n\t}\n\tModel: 201, \"Model::Copy\", \"Mesh\" {\n\t}\n\tMaterial: 300",
+            )
+            .replace(
+                "\tC: \"OO\",200,0\n",
+                "\tC: \"OO\",199,0\n\tC: \"OO\",200,199\n\tC: \"OO\",201,199\n\tC: \"OO\",100,201\n",
+            );
+        let none = |_: &str| None;
+        let (scene, _) = parse_scene(text.as_bytes(), &none).unwrap();
+        let names: Vec<&str> = scene.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["Tri", "Car", "Copy"]);
+        assert_eq!(scene.nodes[0].parent, Some(1));
+        assert_eq!(scene.nodes[2].parent, Some(1));
+        assert_eq!(scene.nodes[0].polygons, [1]);
+        assert_eq!(scene.nodes[2].polygons, [0]);
+        let mut model = crate::Model::default();
+        let opts = crate::mesh_import::MeshOptions {
+            inches_per_unit: 1.0,
+            y_up: false,
+            merge_coplanar: true,
+        };
+        let ents = super::super::scene::to_entities(&mut model, &scene, &opts, &[0]);
+        assert_eq!(ents.instances.len(), 1);
+        assert_eq!(ents.instances[0].name, "Car");
+        let car = &model.definitions[ents.instances[0].definition];
+        assert_eq!(car.entities.instances.len(), 2);
+        // The child triangle is where the flat import puts it.
+        let (flat, _) = parse(text.as_bytes(), &none).unwrap();
+        let tri = &car.entities.instances[0];
+        let xf = ents.instances[0].transform * tri.transform;
+        let def = &model.definitions[tri.definition].entities;
+        for v in def.vertices.values() {
+            let p = xf.transform_point3(v.pos);
+            assert!(flat.positions.iter().any(|q| q.distance(p) < 1e-9), "{p}");
+        }
     }
 
     #[test]

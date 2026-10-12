@@ -4,8 +4,12 @@
 //! - Parsed with the `gltf` crate (MIT/Apache-2.0). Buffers and images come from the
 //!   GLB binary chunk, `data:` URIs or files next to the model (through a callback).
 //! - Every mesh becomes a definition: a component when several nodes use it, else a
-//!   group. Node transforms are flattened: each node with a mesh becomes one instance
-//!   with its world transform; empty nodes and the node hierarchy are not kept.
+//!   group. The node hierarchy is kept: a node with a mesh and no children with
+//!   geometry is an instance of the mesh's definition with the node's transform; a
+//!   node with such children is a group (`Group#n`, the node's name on the instance)
+//!   holding its mesh (inlined when used nowhere else) and its children. Nodes with
+//!   no geometry below them are left out. A single top node (often only an axis or
+//!   unit change) is not a group of its own: its transform goes to its contents.
 //! - Triangles (also strips and fans) become faces as in OBJ/STL import
 //!   ([`crate::mesh_import`]), coplanar neighbors with the same material and texture
 //!   position merged; edges between faces less than [`SOFTEN_ANGLE_DEG`] apart are
@@ -13,7 +17,12 @@
 //! - Materials: base color factor (linear in glTF, sRGB in the model), its alpha as
 //!   opacity when the alpha mode is not opaque, and the base color texture (PNG or
 //!   JPEG) with each face's texture position fitted to the file's texture coordinates
-//!   (first texture coordinate set of the texture). Other PBR parts are ignored.
+//!   (the texture's coordinate set, moved by its `KHR_texture_transform`). Beyond the
+//!   base color, what the model's materials can hold: the diffuse color and texture
+//!   of `KHR_materials_pbrSpecularGlossiness` materials, and
+//!   `KHR_materials_transmission` as opacity ([`TRANSMISSION_OPACITY`]). Metallic,
+//!   roughness, normal, occlusion and emissive maps have no place in the model and
+//!   are ignored.
 //! - Units: glTF is meters, Y up; the model is inches, Z up.
 //!
 //! Export (File > Export > 3D Model, next to OBJ/STL/COLLADA in
@@ -32,7 +41,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use glam::{DMat4, DVec2, DVec3, DVec4};
+use glam::{DAffine2, DMat4, DVec2, DVec3, DVec4};
 
 use crate::entities::{DefinitionId, Entities, Instance, MaterialId};
 use crate::mesh_export::{self, Materials, Side};
@@ -56,6 +65,10 @@ pub const TEXTURE_TILE: f64 = INCHES_PER_METER;
 /// what f32 `POSITION` rounded off: `POSITION + _POSITION_LO` is the position to about
 /// f64 precision. Other readers ignore it.
 pub const POSITION_LO: &str = "_POSITION_LO";
+
+/// Opacity lost by a fully transmissive (`KHR_materials_transmission`) material: the
+/// model has no transmission, so glass comes in 30% opaque (a guess).
+pub const TRANSMISSION_OPACITY: f64 = 0.7;
 
 /// glTF space (meters, Y up) to model space (inches, Z up).
 pub fn gltf_to_model() -> DMat4 {
@@ -207,16 +220,30 @@ pub fn import(
     let mut model = Model::default();
     // Materials, one model material per glTF material (indices match).
     let mut mesh_materials: Vec<MeshMaterial> = Vec::new();
-    let mut tex_sets: Vec<u32> = Vec::new();
+    // Per material: the texture coordinate set and transform of its color texture.
+    let mut tex_maps: Vec<(u32, DAffine2)> = Vec::new();
     for (i, m) in doc.materials().enumerate() {
         let pbr = m.pbr_metallic_roughness();
-        let f = pbr.base_color_factor();
+        // Files with only the specular-glossiness extension leave the metallic-
+        // roughness base color at its default: their diffuse color is the color.
+        let sg = m
+            .pbr_specular_glossiness()
+            .filter(|_| pbr.base_color_texture().is_none() && pbr.base_color_factor() == [1.0; 4]);
+        let (f, color_texture) = match &sg {
+            Some(sg) => (sg.diffuse_factor(), sg.diffuse_texture()),
+            None => (pbr.base_color_factor(), pbr.base_color_texture()),
+        };
         let color = [0, 1, 2].map(|k| linear_to_srgb(f64::from(f[k])));
-        let opacity = if m.alpha_mode() == gltf::material::AlphaMode::Opaque {
+        let mut opacity = if m.alpha_mode() == gltf::material::AlphaMode::Opaque {
             1.0
         } else {
             f64::from(f[3]).clamp(0.0, 1.0)
         };
+        // Transmission (glass): see-through, but not invisible.
+        if let Some(t) = m.transmission() {
+            let t = f64::from(t.transmission_factor()).clamp(0.0, 1.0);
+            opacity = opacity.min(1.0 - TRANSMISSION_OPACITY * t);
+        }
         let base = m
             .name()
             .map_or_else(|| format!("Material{}", i + 1), str::to_owned);
@@ -226,8 +253,22 @@ pub fn import(
             n += 1;
             name = format!("{base}{n}");
         }
-        tex_sets.push(pbr.base_color_texture().map_or(0, |t| t.tex_coord()));
-        let texture = pbr.base_color_texture().and_then(|info| {
+        tex_maps.push(color_texture.as_ref().map_or((0, DAffine2::IDENTITY), |t| {
+            match t.texture_transform() {
+                // KHR_texture_transform: scaled, rotated (counter-clockwise in
+                // texture coordinates), then offset.
+                Some(x) => (
+                    x.tex_coord().unwrap_or(t.tex_coord()),
+                    DAffine2::from_scale_angle_translation(
+                        DVec2::from_array(x.scale().map(f64::from)),
+                        f64::from(x.rotation()),
+                        DVec2::from_array(x.offset().map(f64::from)),
+                    ),
+                ),
+                None => (t.tex_coord(), DAffine2::IDENTITY),
+            }
+        }));
+        let texture = color_texture.and_then(|info| {
             let image = info.texture().source();
             let (data, file) = match image.source() {
                 gltf::image::Source::View { view, mime_type } => {
@@ -327,12 +368,17 @@ pub fn import(
                 }
             }
             let material = prim.material().index();
-            let set = material.and_then(|m| tex_sets.get(m).copied()).unwrap_or(0);
+            let (set, uv_xf) = material
+                .and_then(|m| tex_maps.get(m).copied())
+                .unwrap_or((0, DAffine2::IDENTITY));
             let uvs: Vec<DVec2> = reader
                 .read_tex_coords(set)
                 .map(|t| {
                     t.into_f32()
-                        .map(|[u, v]| DVec2::new(f64::from(u), 1.0 - f64::from(v)))
+                        .map(|[u, v]| {
+                            let t = uv_xf.transform_point2(DVec2::new(f64::from(u), f64::from(v)));
+                            DVec2::new(t.x, 1.0 - t.y)
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -386,10 +432,9 @@ pub fn import(
         })));
     }
 
-    // Nodes, flattened to world transforms.
+    // Nodes: one instance per node with a mesh or with such nodes below it.
     let c = gltf_to_model();
     let c_inv = c.inverse();
-    let mut stack: Vec<(gltf::Node, DMat4, usize)> = Vec::new();
     let roots: Vec<gltf::Node> = match doc.default_scene().or_else(|| doc.scenes().next()) {
         Some(s) => s.nodes().collect(),
         None => {
@@ -402,40 +447,70 @@ pub fn import(
                 .collect()
         }
     };
-    for n in roots.into_iter().rev() {
-        stack.push((n, DMat4::IDENTITY, 0));
-    }
-    let mut uses: HashMap<DefinitionId, usize> = HashMap::new();
-    while let Some((node, parent, depth)) = stack.pop() {
-        let m = node.transform().matrix();
-        let local = DMat4::from_cols_array_2d(&m.map(|c| c.map(f64::from)));
-        let world = parent * local;
-        if let Some(def) = node
-            .mesh()
-            .and_then(|m| mesh_defs.get(m.index()).copied().flatten())
-        {
-            *uses.entry(def).or_default() += 1;
-            model.root.instances.push(Instance {
-                definition: def,
-                transform: c * world * c_inv,
-                name: node.name().unwrap_or_default().to_owned(),
-                hidden: false,
-                locked: false,
-                layer: None,
-                material: None,
-                attrs: Default::default(),
-            });
+    let mut nodes = Nodes {
+        mesh_defs: &mesh_defs,
+        c,
+        c_inv,
+        wrappers: Vec::new(),
+    };
+    let place = |model: &mut Model, def: DefinitionId, xf: DMat4, name: &str| {
+        model
+            .root
+            .instances
+            .push(node_instance(def, c * xf * c_inv, name));
+    };
+    if let [root] = roots.as_slice() {
+        // A single top node (often only an axis or unit change) is not kept as a
+        // group of its own: its mesh and children come in at the top.
+        let xf = node_matrix(root);
+        let name = root.name().unwrap_or_default();
+        if let Some(def) = nodes.mesh(root) {
+            place(&mut model, def, xf, name);
         }
-        if depth < 64 {
-            let kids: Vec<_> = node.children().collect();
-            for k in kids.into_iter().rev() {
-                stack.push((k, world, depth + 1));
+        for k in root.children() {
+            if let Some((def, name)) = nodes.build(&mut model, &k, 1) {
+                place(&mut model, def, xf * node_matrix(&k), &name);
+            }
+        }
+    } else {
+        for r in &roots {
+            if let Some((def, name)) = nodes.build(&mut model, r, 0) {
+                place(&mut model, def, node_matrix(r), &name);
             }
         }
     }
-    // Definitions used once are groups (named Group#n, the mesh name on the instance).
-    let ids: Vec<DefinitionId> = model.definitions.keys().collect();
+    // Uses of the mesh definitions, anywhere.
+    let mut uses: HashMap<DefinitionId, usize> = HashMap::new();
+    for i in model.root.instances.iter().chain(
+        model
+            .definitions
+            .values()
+            .flat_map(|d| &d.entities.instances),
+    ) {
+        *uses.entry(i.definition).or_default() += 1;
+    }
+    // A node group holding the only instance of its mesh takes the mesh's faces.
+    for (group, mesh) in std::mem::take(&mut nodes.wrappers) {
+        if uses.get(&mesh) != Some(&1) {
+            continue;
+        }
+        let Some(m) = model.definitions.remove(mesh) else {
+            continue;
+        };
+        uses.remove(&mesh);
+        let g = &mut model.definitions[group].entities;
+        let mut ents = m.entities;
+        ents.instances
+            .extend(g.instances.drain(..).filter(|i| i.definition != mesh));
+        *g = ents;
+    }
+    // Mesh definitions used once are groups (named Group#n, the mesh name on the
+    // instance).
+    let ids: Vec<DefinitionId> = mesh_defs.iter().flatten().copied().collect();
     for d in ids {
+        if !model.definitions.contains_key(d) {
+            continue;
+        }
         match uses.get(&d) {
             None => {
                 model.definitions.remove(d);
@@ -446,7 +521,11 @@ pub fn import(
                 let def = &mut model.definitions[d];
                 def.name = name;
                 def.is_group = true;
-                if let Some(i) = model.root.instances.iter_mut().find(|i| i.definition == d)
+                let holder = std::iter::once(&mut model.root)
+                    .chain(model.definitions.values_mut().map(|x| &mut x.entities))
+                    .flat_map(|e| e.instances.iter_mut())
+                    .find(|i| i.definition == d);
+                if let Some(i) = holder
                     && i.name.is_empty()
                 {
                     i.name = mesh_name;
@@ -456,6 +535,83 @@ pub fn import(
         }
     }
     Ok(model)
+}
+
+/// A node's local transform (glTF space).
+fn node_matrix(node: &gltf::Node) -> DMat4 {
+    let m = node.transform().matrix();
+    DMat4::from_cols_array_2d(&m.map(|c| c.map(f64::from)))
+}
+
+fn node_instance(definition: DefinitionId, transform: DMat4, name: &str) -> Instance {
+    Instance {
+        definition,
+        transform,
+        name: name.to_owned(),
+        hidden: false,
+        locked: false,
+        layer: None,
+        material: None,
+        attrs: Default::default(),
+    }
+}
+
+/// Builds node groups.
+struct Nodes<'a> {
+    mesh_defs: &'a [Option<DefinitionId>],
+    c: DMat4,
+    c_inv: DMat4,
+    /// Node groups with an instance of their own mesh: (group, mesh definition).
+    wrappers: Vec<(DefinitionId, DefinitionId)>,
+}
+
+impl Nodes<'_> {
+    fn mesh(&self, node: &gltf::Node) -> Option<DefinitionId> {
+        node.mesh()
+            .and_then(|m| self.mesh_defs.get(m.index()).copied().flatten())
+    }
+
+    /// What to place for `node` with its local transform: its mesh's definition when
+    /// it has no children with geometry, else a group of its mesh and children.
+    fn build(
+        &mut self,
+        model: &mut Model,
+        node: &gltf::Node,
+        depth: usize,
+    ) -> Option<(DefinitionId, String)> {
+        let name = node.name().unwrap_or_default().to_owned();
+        let mesh = self.mesh(node);
+        let mut kids = Vec::new();
+        if depth < 64 {
+            for k in node.children() {
+                if let Some((def, kname)) = self.build(model, &k, depth + 1) {
+                    kids.push(node_instance(
+                        def,
+                        self.c * node_matrix(&k) * self.c_inv,
+                        &kname,
+                    ));
+                }
+            }
+        }
+        if kids.is_empty() {
+            return mesh.map(|d| (d, name));
+        }
+        let mut ents = Entities::new();
+        if let Some(m) = mesh {
+            ents.instances.push(node_instance(m, DMat4::IDENTITY, ""));
+        }
+        ents.instances.extend(kids);
+        let group = model.definitions.insert(Definition {
+            name: model.unique_definition_name("Group#1"),
+            entities: ents,
+            is_group: true,
+            ..Default::default()
+        });
+        if let Some(m) = mesh {
+            self.wrappers.push((group, m));
+        }
+        Some((group, name))
+    }
 }
 
 /// Marks edges between two faces less than `angle_deg` apart (and not coplanar) soft
@@ -1123,5 +1279,101 @@ mod tests {
         // The child: parent's 1 m along X plus 2 m up (model Z).
         assert!(t[1].abs_diff_eq(DVec3::new(k, 0.0, 2.0 * k), 1e-9));
         assert!(import(b"nonsense", &|_| None, true).is_err());
+    }
+
+    #[test]
+    fn node_hierarchy_and_pbr_extensions() {
+        // A triangle (positions) and its texture coordinates in one data URI buffer.
+        let mut bin = Vec::new();
+        for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+        let png = base64_encode(&[0x89, b'P', b'N', b'G', 1, 2, 3, 4]);
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0,4,5]}}],
+          "nodes":[
+            {{"name":"Car","children":[1,2],"translation":[1,0,0]}},
+            {{"name":"Body","mesh":0}},
+            {{"name":"Axle","mesh":2,"children":[3],"translation":[0,1,0]}},
+            {{"name":"Wheel","mesh":1,"translation":[0,0,3]}},
+            {{"name":"Empty"}},
+            {{"name":"Spare","mesh":1}}],
+          "meshes":[
+            {{"name":"BodyMesh","primitives":[{{"attributes":{{"POSITION":0}},"material":0}}]}},
+            {{"name":"WheelMesh","primitives":[{{"attributes":{{"POSITION":0}},"material":1}}]}},
+            {{"name":"AxleMesh","primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":2}}]}}],
+          "materials":[
+            {{"name":"Blue","extensions":{{"KHR_materials_pbrSpecularGlossiness":{{"diffuseFactor":[0,0,1,1]}}}}}},
+            {{"name":"Glass","pbrMetallicRoughness":{{"baseColorFactor":[1,0,0,1]}},
+              "extensions":{{"KHR_materials_transmission":{{"transmissionFactor":1.0}}}}}},
+            {{"name":"Tex","pbrMetallicRoughness":{{"baseColorTexture":{{"index":0,
+              "extensions":{{"KHR_texture_transform":{{"offset":[0.5,0],"scale":[2,2]}}}}}}}}}}],
+          "textures":[{{"source":0}}],
+          "images":[{{"uri":"data:image/png;base64,{png}"}}],
+          "accessors":[
+            {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,-1],"max":[1,0,0]}},
+            {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}}],
+          "bufferViews":[{{"buffer":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":24}}],
+          "buffers":[{{"byteLength":60,"uri":"data:application/octet-stream;base64,{}"}}]}}"#,
+            base64_encode(&bin)
+        );
+        let m = import(json.as_bytes(), &|_| None, true).unwrap();
+        for d in m.definitions.values() {
+            assert!(crate::validate(&d.entities, crate::Checks::ALL).is_empty());
+        }
+        // Car and Spare at the top (Empty has no geometry).
+        let names: Vec<&str> = m.root.instances.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Car", "Spare"]);
+        let car = &m.definitions[m.root.instances[0].definition];
+        assert!(car.is_group);
+        let inner: Vec<&str> = car
+            .entities
+            .instances
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(inner, ["Body", "Axle"]);
+        // Body's mesh is used once: a group. The wheel mesh is used twice: a component.
+        let body = &m.definitions[car.entities.instances[0].definition];
+        assert!(body.is_group);
+        let axle_inst = &car.entities.instances[1];
+        let axle = &m.definitions[axle_inst.definition];
+        // The axle node's own mesh is inlined into its group, next to the wheel.
+        assert_eq!(axle.entities.faces.len(), 1);
+        assert_eq!(axle.entities.instances.len(), 1);
+        let wheel = &axle.entities.instances[0];
+        assert_eq!(wheel.name, "Wheel");
+        assert_eq!(wheel.definition, m.root.instances[1].definition);
+        assert_eq!(m.definitions[wheel.definition].name, "WheelMesh");
+        assert!(!m.definitions[wheel.definition].is_group);
+        // Transforms compose to the node's world position: 1 m along X, 1 m up, then
+        // 3 m along glTF Z (model -Y).
+        let k = INCHES_PER_METER;
+        let world = m.root.instances[0].transform * axle_inst.transform * wheel.transform;
+        assert!(
+            world
+                .w_axis
+                .truncate()
+                .abs_diff_eq(DVec3::new(k, -3.0 * k, k), 1e-9),
+            "{world}"
+        );
+        // Car, Axle, Body (a group) and WheelMesh.
+        assert_eq!(m.definitions.len(), 4);
+        // Materials: diffuse of the specular-glossiness extension; glass opacity.
+        let mat = |n: &str| m.materials.iter().find(|x| x.name == n).unwrap();
+        assert_eq!(mat("Blue").color, [0, 0, 255]);
+        assert!((mat("Glass").opacity - (1.0 - TRANSMISSION_OPACITY)).abs() < 1e-9);
+        assert!(mat("Tex").texture.is_some());
+        // The texture transform doubles the coordinates.
+        let tris = mesh_export::triangles(&m);
+        let uv = tris.iter().find_map(|t| t.uv).unwrap();
+        let spread = (0..3)
+            .flat_map(|i| (0..3).map(move |j| (i, j)))
+            .map(|(i, j)| uv[i].distance(uv[j]))
+            .fold(0.0, f64::max);
+        assert!((spread - 2.0 * 2f64.sqrt()).abs() < 1e-6, "{spread}");
     }
 }

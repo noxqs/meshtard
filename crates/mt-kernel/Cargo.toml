@@ -9,7 +9,7 @@ license.workspace = true
 glam.workspace = true
 slotmap = "1"
 earcutr = "0.5"
-gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extras"] }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extras", "KHR_materials_pbrSpecularGlossiness", "KHR_materials_transmission", "KHR_texture_transform"] }
 flate2 = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 mt-skp.workspace = true
