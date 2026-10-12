@@ -1681,6 +1681,7 @@ dependencies = [
 name = "mt-app"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "egui-wgpu",
@@ -1697,6 +1698,7 @@ dependencies = [
  "mt-spec",
  "mt-ui",
  "muda",
+ "pollster 1.0.1",
  "rfd",
  "rhai",
  "serde",

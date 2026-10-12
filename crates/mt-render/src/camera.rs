@@ -187,7 +187,13 @@ impl Camera {
 
     /// Pixel position of a world point, or `None` if behind the camera.
     pub fn project(&self, p: DVec3, viewport: DVec2) -> Option<DVec2> {
-        let clip = self.view_proj(viewport.x / viewport.y) * p.extend(1.0);
+        Self::project_with(&self.view_proj(viewport.x / viewport.y), p, viewport)
+    }
+
+    /// [`Camera::project`] with the camera's `view_proj` for the viewport's aspect
+    /// computed once by the caller: the same result, for projecting many points.
+    pub fn project_with(view_proj: &DMat4, p: DVec3, viewport: DVec2) -> Option<DVec2> {
+        let clip = *view_proj * p.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }

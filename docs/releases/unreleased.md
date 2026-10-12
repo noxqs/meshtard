@@ -40,3 +40,11 @@ Changes since 0.1.0, grouped by area.
 - IFC import brings in textures (embedded, pixel and image-file textures on triangulated geometry) and the site's location: latitude and longitude, north and map coordinates become the model's geo-location when it has none (Model Info > Geo-location shows the map origin). Sites far from the origin are moved near it, the offset kept in the geo-location.
 - Furniture and other objects placed in rooms no longer come in hidden with the room.
 - IFC export writes real element classes (walls, slabs, doors, windows, columns and more) from the Type an IFC import set, keeps imported names and GlobalIds, writes one storey per storey group, a `Reference` property and net volumes, and the site's location and map conversion.
+
+## Performance
+
+- Hovering, picking and inference snapping no longer slow down with model size: only the edges and points near the cursor are tested (a 1-million-edge model went from about 0.3 s per mouse move to well under a millisecond).
+- Moving, rotating or scaling part of a large model draws its live preview much faster (stretching connected geometry was quadratic in the size of the selection).
+- Rebuilding the view after an edit is faster: components placed many times are tessellated once, simple faces skip the general tessellation work, and the pick index builds faster.
+- Select All and the selection highlight are faster on large models.
+- A benchmark of large models (synthetic and real files) with before/after numbers is in `spec/PERFORMANCE.md`.

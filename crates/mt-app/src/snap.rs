@@ -34,10 +34,10 @@ pub fn geometry(scene: &Scene, doc: Option<&Document>, ctx_xf: DMat4) -> Geometr
     );
     geometry.edge_container = kept
         .iter()
-        .map(|i| scene.edge_container.get(i).copied())
+        .map(|&i| scene.edge_container.get(i).copied().flatten())
         .collect();
     geometry.tri_container = (0..scene.triangles.len())
-        .map(|i| scene.tri_container.get(&i).copied())
+        .map(|i| scene.tri_container.get(i).copied().flatten())
         .collect();
     let Some(doc) = doc else {
         return geometry;

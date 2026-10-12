@@ -15,8 +15,6 @@
 //!   (which end and tangent stay is unverified), "adjusting the arc's length and
 //!   radius".
 
-use std::collections::HashMap;
-
 use glam::{DMat4, DVec3};
 use mt_kernel::{Arc, CurveId, Entities, FaceId, TOL, VertexId};
 
@@ -141,7 +139,7 @@ pub fn fold_freedom(ents: &Entities, targets: &[Owner]) -> Freedom {
 /// with the whole transform and are not listed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stretch {
-    pub owners: HashMap<Owner, Vec<(DVec3, DVec3)>>,
+    pub owners: mt_kernel::spatial::FxMap<Owner, Vec<(DVec3, DVec3)>>,
 }
 
 /// See [`Stretch`]. `xf` is in context space, `ctx_xf` the context's transform.
@@ -154,20 +152,22 @@ pub fn stretch(ents: &Entities, targets: &[Owner], xf: DMat4, ctx_xf: DMat4) -> 
             _ => {}
         }
     }
-    let moved: HashMap<VertexId, (DVec3, DVec3)> = mt_kernel::vertices_of(ents, &edges, &faces)
-        .into_iter()
-        .map(|v| {
-            let p = ents.pos(v);
-            (
-                v,
+    let moved: mt_kernel::spatial::FxMap<VertexId, (DVec3, DVec3)> =
+        mt_kernel::vertices_of(ents, &edges, &faces)
+            .into_iter()
+            .map(|v| {
+                let p = ents.pos(v);
                 (
-                    ctx_xf.transform_point3(p),
-                    ctx_xf.transform_point3(xf.transform_point3(p)),
-                ),
-            )
-        })
-        .collect();
+                    v,
+                    (
+                        ctx_xf.transform_point3(p),
+                        ctx_xf.transform_point3(xf.transform_point3(p)),
+                    ),
+                )
+            })
+            .collect();
     let mut out = Stretch::default();
+    let targets: mt_kernel::spatial::FxSet<Owner> = targets.iter().copied().collect();
     let is_target = |o: &Owner| targets.contains(o);
     for &v in moved.keys() {
         for &e in &ents.vertices[v].edges {

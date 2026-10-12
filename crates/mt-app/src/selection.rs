@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::{DMat4, DVec2, DVec3};
 use mt_kernel::Entities;
 use mt_kernel::bvh::RayIndex;
+use mt_kernel::spatial::FxMap;
 use mt_render::Camera;
 
 use crate::document::{Owner, Scene};
@@ -55,7 +56,7 @@ impl Mode {
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
     items: Vec<Owner>,
-    set: HashSet<Owner>,
+    set: mt_kernel::spatial::FxSet<Owner>,
 }
 
 impl Selection {
@@ -203,8 +204,8 @@ pub fn instance_bounds(
     scene: &Scene,
     to_world: impl Fn(usize) -> Option<DMat4>,
 ) -> HashMap<usize, (DVec3, DVec3)> {
-    let mut inverse: HashMap<usize, Option<DMat4>> = HashMap::new();
-    let mut out: HashMap<usize, (DVec3, DVec3)> = HashMap::new();
+    let mut inverse: FxMap<usize, Option<DMat4>> = FxMap::default();
+    let mut out: FxMap<usize, (DVec3, DVec3)> = FxMap::default();
     let mut add = |i: usize, p: DVec3| {
         let inv = *inverse.entry(i).or_insert_with(|| {
             to_world(i)
@@ -228,7 +229,7 @@ pub fn instance_bounds(
             add(*i, v3(seg.b));
         }
     }
-    out
+    out.into_iter().collect()
 }
 
 /// What a click with `clicks` presses on `hit` selects.
@@ -341,11 +342,24 @@ pub fn pick(
     let face_t = face_hit.map_or(f64::INFINITY, |h| h.t);
 
     let mut best: Option<(f64, Owner)> = None;
-    for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
-        let Some(owner) = owner else { continue };
-        let (a, b) = (v3(seg.a), v3(seg.b));
-        let (Some(pa), Some(pb)) = (camera.project(a, viewport), camera.project(b, viewport))
+    // Only edges near the cursor on screen can be picked; their index order keeps the
+    // tie-breaking of a scan of every edge.
+    let near = scene.edges_near(camera, viewport, cursor, APERTURE_PX);
+    let all = 0..scene.edges.len();
+    let candidates: Box<dyn Iterator<Item = usize>> = match &near {
+        Some(near) => Box::new(near.iter().copied()),
+        None => Box::new(all),
+    };
+    let view_proj = camera.view_proj(viewport.x / viewport.y);
+    let project = |p: DVec3| Camera::project_with(&view_proj, p, viewport);
+    for i in candidates {
+        let (seg, Some(owner)) = (&scene.edges[i], scene.edge_owner.get(i).copied().flatten())
         else {
+            continue;
+        };
+        let owner = &owner;
+        let (a, b) = (v3(seg.a), v3(seg.b));
+        let (Some(pa), Some(pb)) = (project(a), project(b)) else {
             continue;
         };
         let d = dist_to_segment(cursor, pa, pb);
@@ -640,6 +654,100 @@ mod tests {
         // Select's Ctrl keys still work.
         assert_eq!(Mode::for_lasso(true, false, false), Mode::Add);
         assert_eq!(Mode::for_lasso(true, true, false), Mode::Remove);
+    }
+
+    /// `pick` before the edge culling index: every edge projected and tested.
+    fn pick_scanning(
+        scene: &Scene,
+        bvh: &dyn RayIndex,
+        camera: &Camera,
+        cursor: DVec2,
+        viewport: DVec2,
+    ) -> Option<Owner> {
+        let ray = camera.ray(cursor, viewport);
+        let face_hit = bvh.ray(ray.origin, ray.dir);
+        let face_t = face_hit.map_or(f64::INFINITY, |h| h.t);
+        let mut best: Option<(f64, Owner)> = None;
+        for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
+            let Some(owner) = owner else { continue };
+            let (a, b) = (v3(seg.a), v3(seg.b));
+            let (Some(pa), Some(pb)) = (camera.project(a, viewport), camera.project(b, viewport))
+            else {
+                continue;
+            };
+            let d = dist_to_segment(cursor, pa, pb);
+            if d > APERTURE_PX || best.is_some_and(|(bd, _)| bd <= d) {
+                continue;
+            }
+            let t = closest_ray_param(ray.origin, ray.dir, a, b);
+            if t <= face_t * (1.0 + 1e-4) + 1e-3 {
+                best = Some((d, *owner));
+            }
+        }
+        best.map(|(_, o)| o)
+            .or_else(|| face_hit.and_then(|h| scene.tri_owner[h.triangle]))
+    }
+
+    /// With many edges `pick` culls them with an index and still picks what testing
+    /// every edge picks, in perspective and parallel views.
+    #[test]
+    fn culled_pick_matches_a_full_scan() {
+        let mut scene = Scene::default();
+        let f = |p: DVec3| p.as_vec3().to_array();
+        for k in 0..=100 {
+            let t = k as f64 * 1.2;
+            let z = (k as f64 * 0.37).sin() * 4.0;
+            for (a, b) in [
+                (DVec3::new(t, 0.0, z), DVec3::new(t, 120.0, z)),
+                (DVec3::new(0.0, t, -z), DVec3::new(120.0, t, z)),
+            ] {
+                scene
+                    .edges
+                    .push(mt_render::Segment::line(f(a), f(b), [0.0; 4], [1.0, 0.0]));
+                scene
+                    .edge_owner
+                    .push(Some(Owner::Section(scene.edge_owner.len())));
+            }
+            for j in 0..10 {
+                let a = DVec3::new(t, j as f64 * 12.0, z);
+                let b = a + DVec3::new(0.9, 1.7, 2.0);
+                scene
+                    .edges
+                    .push(mt_render::Segment::line(f(a), f(b), [0.0; 4], [1.0, 0.0]));
+                scene
+                    .edge_owner
+                    .push((j % 3 != 0).then_some(Owner::Instance(scene.edge_owner.len())));
+            }
+        }
+        assert!(scene.edges.len() >= 1024);
+        let c = [
+            DVec3::new(0.0, 0.0, 1.0),
+            DVec3::new(120.0, 0.0, 1.0),
+            DVec3::new(120.0, 120.0, 1.0),
+            DVec3::new(0.0, 120.0, 1.0),
+        ];
+        scene.triangles = vec![[c[0], c[1], c[2]], [c[0], c[2], c[3]]];
+        scene.tri_owner = vec![Some(Owner::Text(0)), Some(Owner::Text(1))];
+        let bvh = mt_kernel::bvh::Bvh::build(scene.triangles.clone());
+        let viewport = DVec2::new(900.0, 700.0);
+        for perspective in [true, false] {
+            let camera = Camera {
+                eye: DVec3::new(-150.0, -200.0, 180.0),
+                target: DVec3::new(60.0, 60.0, 0.0),
+                fov_deg: 35.0,
+                perspective,
+                two_point: false,
+            };
+            let mut hits = 0;
+            for k in 0..900 {
+                let cursor = DVec2::new((k % 30) as f64 * 30.0 + 1.5, (k / 30) as f64 * 23.0 + 2.5);
+                let fast = pick(&scene, &bvh, &camera, cursor, viewport);
+                let slow = pick_scanning(&scene, &bvh, &camera, cursor, viewport);
+                assert_eq!(fast, slow, "cursor {cursor}");
+                hits += usize::from(matches!(fast, Some(Owner::Section(_) | Owner::Instance(_))));
+            }
+            assert!(hits > 50, "edges are picked ({hits})");
+        }
     }
 
     fn square(e: &mut Entities, x: f64) {

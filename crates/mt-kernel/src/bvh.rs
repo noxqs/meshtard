@@ -98,7 +98,9 @@ impl Bvh {
         };
         if !bvh.triangles.is_empty() {
             let n = bvh.triangles.len();
-            bvh.build_node(0, n);
+            // Three times each centroid, computed once for all the splits.
+            let sums: Vec<DVec3> = bvh.triangles.iter().map(|t| t[0] + t[1] + t[2]).collect();
+            bvh.build_node(0, n, &sums);
         }
         bvh
     }
@@ -126,7 +128,7 @@ impl Bvh {
     }
 
     /// Builds the node for `order[first..first + count]` and returns its index.
-    fn build_node(&mut self, first: usize, count: usize) -> usize {
+    fn build_node(&mut self, first: usize, count: usize, sums: &[DVec3]) -> usize {
         let bounds = self.bounds_of(&self.order[first..first + count]);
         let index = self.nodes.len();
         if count <= LEAF_SIZE {
@@ -146,8 +148,7 @@ impl Bvh {
         } else {
             2
         };
-        let tris = &self.triangles;
-        let centroid = |i: usize| (tris[i][0] + tris[i][1] + tris[i][2])[axis];
+        let centroid = |i: usize| sums[i][axis];
         let mid = count / 2;
         self.order[first..first + count]
             .select_nth_unstable_by(mid, |&a, &b| centroid(a).total_cmp(&centroid(b)));
@@ -156,8 +157,8 @@ impl Bvh {
             first,
             count,
         });
-        let left = self.build_node(first, mid);
-        let right = self.build_node(first + mid, count - mid);
+        let left = self.build_node(first, mid, sums);
+        let right = self.build_node(first + mid, count - mid, sums);
         self.nodes[index] = Node::Inner {
             bounds,
             left,

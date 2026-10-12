@@ -21,10 +21,11 @@
 //!
 //! Pick distances in pixels are drafts (`spec/parity/STATUS.md`).
 
+pub mod cull;
 pub mod hints;
 pub mod units;
 
-use glam::{DVec2, DVec3};
+use glam::{DMat4, DVec2, DVec3};
 use mt_kernel::bvh::RayIndex;
 use mt_render::Camera;
 
@@ -356,12 +357,34 @@ pub struct Geometry {
     pub section_lines: Vec<[DVec3; 2]>,
     /// Origins of the group and component instances ("Component Origin").
     pub component_origins: Vec<DVec3>,
+    /// Culling index over `edges` and `vertices` for large geometry, built on first
+    /// use (`cull`); ignored when their lengths no longer match.
+    index: std::sync::OnceLock<GeomIndex>,
+}
+
+/// See [`Geometry::index`].
+#[derive(Debug, Clone)]
+struct GeomIndex {
+    edges: cull::BoxIndex,
+    vertices: cull::BoxIndex,
+}
+
+/// Below this many edges and vertices every one is tested (no index).
+const INDEX_MIN: usize = 1024;
+
+/// `near` (ascending indices), or every index below `len` when there is no list.
+fn indices(near: &Option<Vec<usize>>, len: usize) -> impl Iterator<Item = usize> + '_ {
+    let (some, all) = match near {
+        Some(v) => (Some(v.iter().copied()), None),
+        None => (None, Some(0..len)),
+    };
+    some.into_iter().flatten().chain(all.into_iter().flatten())
 }
 
 impl Geometry {
     /// Builds from edge segments; vertices are the distinct endpoints.
     pub fn from_edges(edges: Vec<[DVec3; 2]>) -> Self {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = mt_kernel::spatial::FxSet::default();
         let key = |p: DVec3| ((p * 1e4).round().as_i64vec3()).to_array();
         let vertices = edges
             .iter()
@@ -403,6 +426,34 @@ impl Geometry {
     pub fn container_of_triangle(&self, tri: usize) -> Option<Container> {
         self.tri_container.get(tri).copied().flatten()
     }
+
+    /// The culling index, for geometry large enough to need one.
+    fn index(&self) -> Option<&GeomIndex> {
+        if self.edges.len() + self.vertices.len() < INDEX_MIN {
+            return None;
+        }
+        let index = self.index.get_or_init(|| GeomIndex {
+            edges: cull::BoxIndex::segments(self.edges.iter().copied()),
+            vertices: cull::BoxIndex::points(self.vertices.iter().copied()),
+        });
+        (index.edges.len() == self.edges.len() && index.vertices.len() == self.vertices.len())
+            .then_some(index)
+    }
+
+    /// Edges that may pass within `radius` pixels of `cursor` (a superset, in index
+    /// order); `None` means all of them.
+    fn edges_near(&self, view: &Lens, cursor: DVec2, radius: f64) -> Option<Vec<usize>> {
+        self.index()?
+            .edges
+            .near(view.camera, view.viewport, cursor, radius)
+    }
+
+    /// Like [`Geometry::edges_near`] for `vertices`.
+    fn vertices_near(&self, view: &Lens, cursor: DVec2, radius: f64) -> Option<Vec<usize>> {
+        self.index()?
+            .vertices
+            .near(view.camera, view.viewport, cursor, radius)
+    }
 }
 
 /// Camera and viewport size in pixels.
@@ -412,9 +463,26 @@ pub struct View<'a> {
     pub viewport: DVec2,
 }
 
-impl View<'_> {
+/// A [`View`] with its projection matrix computed once, for the many projections of
+/// one inference (the same numbers as [`Camera::project`]).
+#[derive(Clone, Copy)]
+struct Lens<'a> {
+    camera: &'a Camera,
+    viewport: DVec2,
+    view_proj: DMat4,
+}
+
+impl<'a> Lens<'a> {
+    fn new(view: View<'a>) -> Self {
+        Self {
+            camera: view.camera,
+            viewport: view.viewport,
+            view_proj: view.camera.view_proj(view.viewport.x / view.viewport.y),
+        }
+    }
+
     fn project(&self, p: DVec3) -> Option<DVec2> {
-        self.camera.project(p, self.viewport)
+        Camera::project_with(&self.view_proj, p, self.viewport)
     }
 
     /// Projects the part of segment `a b` in front of the camera (long guide and axis
@@ -693,7 +761,7 @@ impl Engine {
         cursor: DVec2,
         anchor: Option<DVec3>,
     ) -> Inference {
-        let i = self.infer_inner(geom, bvh, view, cursor, anchor);
+        let i = self.infer_inner(geom, bvh, Lens::new(view), cursor, anchor);
         if i.kind.is_acquirable() {
             self.acquired = Some(i.point);
         }
@@ -712,7 +780,7 @@ impl Engine {
         anchor: Option<DVec3>,
         now: f64,
     ) -> Inference {
-        let i = self.infer_inner(geom, bvh, view, cursor, anchor);
+        let i = self.infer_inner(geom, bvh, Lens::new(view), cursor, anchor);
         let same = |(q, _): (DVec3, f64)| q.distance(i.point) <= 1e-9;
         match self.hover {
             Some(h) if same(h) && i.kind.is_acquirable() => {}
@@ -751,7 +819,7 @@ impl Engine {
         &mut self,
         geom: &Geometry,
         bvh: &dyn RayIndex,
-        view: View,
+        view: Lens,
         cursor: DVec2,
         anchor: Option<DVec3>,
     ) -> Inference {
@@ -780,7 +848,7 @@ impl Engine {
         &mut self,
         geom: &Geometry,
         bvh: &dyn RayIndex,
-        view: View,
+        view: Lens,
         cursor: DVec2,
         anchor: Option<DVec3>,
     ) -> Inference {
@@ -886,7 +954,7 @@ impl Engine {
         &self,
         geom: &Geometry,
         bvh: &dyn RayIndex,
-        view: View,
+        view: Lens,
         cursor: DVec2,
         ro: DVec3,
         rd: DVec3,
@@ -915,9 +983,12 @@ impl Engine {
                 })
         };
 
+        // Only items near the cursor on screen can win (`cull`).
+        let near_vertices = geom.vertices_near(&view, cursor, POINT_APERTURE);
+        let near_edges = geom.edges_near(&view, cursor, POINT_APERTURE.max(EDGE_APERTURE));
         // Endpoints: remember an edge using the vertex, for parallel inferences.
         let endpoint = best_point(
-            &mut geom.vertices.iter().map(|&p| (p, None)),
+            &mut indices(&near_vertices, geom.vertices.len()).map(|i| (geom.vertices[i], None)),
             Kind::Endpoint,
         )
         .map(|mut i| {
@@ -929,11 +1000,10 @@ impl Engine {
         });
         let midpoint = || {
             best_point(
-                &mut geom
-                    .edges
-                    .iter()
-                    .enumerate()
-                    .map(|(i, [a, b])| ((*a + *b) / 2.0, Some(i))),
+                &mut indices(&near_edges, geom.edges.len()).map(|i| {
+                    let [a, b] = geom.edges[i];
+                    ((a + b) / 2.0, Some(i))
+                }),
                 Kind::Midpoint,
             )
         };
@@ -951,10 +1021,11 @@ impl Engine {
             ((0.0..=1.0).contains(&s) && visible(p)).then_some((d, p))
         };
         let on_edge = || {
-            geom.edges
-                .iter()
-                .enumerate()
-                .filter_map(|(i, [a, b])| on_line(*a, *b).map(|(d, p)| (d, p, i)))
+            indices(&near_edges, geom.edges.len())
+                .filter_map(|i| {
+                    let [a, b] = geom.edges[i];
+                    on_line(a, b).map(|(d, p)| (d, p, i))
+                })
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, p, i)| Inference {
                     point: p,
@@ -1143,7 +1214,7 @@ impl Engine {
     fn direction_inference(
         &self,
         geom: &Geometry,
-        view: View,
+        view: Lens,
         cursor: DVec2,
         ro: DVec3,
         rd: DVec3,
@@ -1218,7 +1289,7 @@ impl Engine {
     /// meets the tracking line.
     fn tracking(
         &self,
-        view: View,
+        view: Lens,
         cursor: DVec2,
         ro: DVec3,
         rd: DVec3,
@@ -1283,7 +1354,7 @@ fn segment_crossing(p1: DVec3, q1: DVec3, p2: DVec3, q2: DVec3) -> Option<(f64, 
 fn intersection(
     geom: &Geometry,
     bvh: &dyn RayIndex,
-    view: View,
+    view: Lens,
     cursor: DVec2,
     hit: Option<(DVec3, DVec3)>,
     visible: &impl Fn(DVec3) -> bool,
@@ -1297,10 +1368,12 @@ fn intersection(
         cursor.distance(pa + ab * t) <= POINT_APERTURE
     };
     // Lines near the cursor; `true` for edges (guides do not pierce faces here).
-    let lines: Vec<(DVec3, DVec3, bool)> = geom
-        .edges
-        .iter()
-        .map(|&[a, b]| (a, b, true))
+    let near_edges = geom.edges_near(&view, cursor, POINT_APERTURE);
+    let lines: Vec<(DVec3, DVec3, bool)> = indices(&near_edges, geom.edges.len())
+        .map(|i| {
+            let [a, b] = geom.edges[i];
+            (a, b, true)
+        })
         .chain(
             geom.guide_lines
                 .iter()
@@ -1451,6 +1524,58 @@ mod tests {
 
     fn at(p: DVec3) -> DVec2 {
         camera().project(p, VIEWPORT).unwrap()
+    }
+
+    /// With the culling index (large geometry) the inference is the one a scan of
+    /// every edge and vertex gives, at cursors all over a dense grid of lines, with
+    /// and without a start point, in perspective and parallel views.
+    #[test]
+    fn culled_inference_matches_a_full_scan() {
+        let mut edges = Vec::new();
+        for k in 0..=40 {
+            let t = k as f64 * 2.5;
+            let z = (k as f64 * 0.7).sin() * 3.0;
+            edges.push([DVec3::new(t, 0.0, z), DVec3::new(t, 100.0, -z)]);
+            edges.push([DVec3::new(0.0, t, z), DVec3::new(100.0, t, z)]);
+            for j in 0..12 {
+                let a = DVec3::new(t, j as f64 * 8.0, z);
+                edges.push([a, a + DVec3::new(1.3, 2.1, 0.4 * j as f64)]);
+            }
+        }
+        let indexed = Geometry::from_edges(edges);
+        // The same geometry with an index of the wrong size: every item is tested.
+        let scan = indexed.clone();
+        scan.index
+            .set(GeomIndex {
+                edges: cull::BoxIndex::default(),
+                vertices: cull::BoxIndex::default(),
+            })
+            .unwrap();
+        assert!(scan.index().is_none());
+        assert!(indexed.index().is_some(), "large enough for the index");
+        let (_, bvh) = square();
+        for perspective in [true, false] {
+            let cam = Camera {
+                perspective,
+                ..camera()
+            };
+            let view = View {
+                camera: &cam,
+                viewport: VIEWPORT,
+            };
+            for k in 0..400 {
+                let cursor = DVec2::new((k % 20) as f64 * 40.0 + 3.0, (k / 20) as f64 * 30.0 + 5.0);
+                for anchor in [None, Some(DVec3::new(10.0, 10.0, 0.0))] {
+                    let a = Engine::default().infer(&indexed, &bvh, view, cursor, anchor);
+                    let b = Engine::default().infer(&scan, &bvh, view, cursor, anchor);
+                    assert_eq!(
+                        (a.point, a.kind, a.edge),
+                        (b.point, b.kind, b.edge),
+                        "cursor {cursor}"
+                    );
+                }
+            }
+        }
     }
 
     fn infer(

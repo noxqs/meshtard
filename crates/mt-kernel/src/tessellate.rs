@@ -25,10 +25,49 @@ fn simple_cycles(vs: &[VertexId]) -> Vec<Vec<VertexId>> {
 /// Triangles of a face, counter-clockwise around its normal. Faces earcut cannot
 /// handle give no triangles.
 pub fn triangulate(ents: &Entities, f: FaceId) -> Vec<[DVec3; 3]> {
+    triangulate_with(ents, f, true)
+}
+
+/// [`triangulate`]; `fast` takes the shortcut for simple faces (off in a test that
+/// checks the shortcut gives what the general case gives).
+fn triangulate_with(ents: &Entities, f: FaceId, fast: bool) -> Vec<[DVec3; 3]> {
     let face = &ents.faces[f];
     let plane = ents.face_plane(f);
     let proj =
         |c: &[VertexId]| -> Vec<DVec2> { c.iter().map(|&v| plane.project(ents.pos(v))).collect() };
+    // Earcut's triangles of `ids`, counter-clockwise around the face normal.
+    let emit = |ids: &[VertexId], idx: &[usize], out: &mut Vec<[DVec3; 3]>| {
+        for t in idx.as_chunks::<3>().0 {
+            let (a, b, c) = (
+                ents.pos(ids[t[0]]),
+                ents.pos(ids[t[1]]),
+                ents.pos(ids[t[2]]),
+            );
+            out.push(if (b - a).cross(c - a).dot(face.normal) < 0.0 {
+                [a, c, b]
+            } else {
+                [a, b, c]
+            });
+        }
+    };
+
+    // The common face: one loop that never touches itself. The general case below
+    // then makes the loop its only region with no holes and earcuts exactly this.
+    if fast && face.holes.is_empty() {
+        let outer = ents.loop_vertices(&face.outer);
+        if outer.len() >= 3 && all_distinct(&outer) {
+            let poly = proj(&outer);
+            // A NaN area makes the general case drop the loop.
+            if !signed_area2(&poly).is_nan() {
+                let flat: Vec<f64> = poly.iter().flat_map(|q| [q.x, q.y]).collect();
+                let mut out = Vec::new();
+                if let Ok(idx) = earcutr::earcut(&flat, &[], 2) {
+                    emit(&outer, &idx, &mut out);
+                }
+                return out;
+            }
+        }
+    }
 
     // Pieces of the outer loop that run the same way as the whole loop are regions, the
     // others are holes; every piece of a hole loop is a hole. Files do not always wind
@@ -80,26 +119,54 @@ pub fn triangulate(ents: &Entities, f: FaceId) -> Vec<[DVec3; 3]> {
         let Ok(idx) = earcutr::earcut(&flat, &starts, 2) else {
             continue;
         };
-        for t in idx.as_chunks::<3>().0 {
-            let (a, b, c) = (
-                ents.pos(ids[t[0]]),
-                ents.pos(ids[t[1]]),
-                ents.pos(ids[t[2]]),
-            );
-            out.push(if (b - a).cross(c - a).dot(face.normal) < 0.0 {
-                [a, c, b]
-            } else {
-                [a, b, c]
-            });
-        }
+        emit(&ids, &idx, &mut out);
     }
     out
+}
+
+/// No vertex appears twice.
+fn all_distinct(vs: &[VertexId]) -> bool {
+    if vs.len() <= 16 {
+        return vs.iter().enumerate().all(|(i, v)| !vs[..i].contains(v));
+    }
+    let mut sorted = vs.to_vec();
+    sorted.sort_unstable();
+    sorted.windows(2).all(|w| w[0] != w[1])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use slotmap::SlotMap;
+
+    /// The shortcut for simple faces gives exactly the general case's triangles, for
+    /// every face of the corpus models.
+    #[test]
+    fn simple_face_shortcut_matches_the_general_case() {
+        let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus");
+        let mut faces = 0;
+        for entry in std::fs::read_dir(corpus.join("openskp")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|x| x != "skp") {
+                continue;
+            }
+            let Ok(src) = mt_skp::read(&path) else {
+                continue;
+            };
+            let model = crate::import::from_skp(&src);
+            let lists =
+                std::iter::once(&model.root).chain(model.definitions.values().map(|d| &d.entities));
+            for ents in lists {
+                for f in ents.faces.keys() {
+                    let fast = triangulate_with(ents, f, true);
+                    let general = triangulate_with(ents, f, false);
+                    assert_eq!(fast, general, "{}", path.display());
+                    faces += 1;
+                }
+            }
+        }
+        assert!(faces > 1000, "{faces} faces compared");
+    }
 
     #[test]
     fn pinched_loop_splits() {
