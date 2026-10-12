@@ -130,6 +130,21 @@ pub(crate) struct Handle {
     pub axis: DVec3,
 }
 
+/// The rotation handles Move shows on `b`: none when Preferences > Drawing > Show
+/// Move Tool Rotation Grips is off (`shown`), else [`handles`].
+pub(crate) fn move_handles(
+    shown: bool,
+    b: &OrientedBox,
+    eye: Option<DVec3>,
+    view_dir: DVec3,
+) -> Vec<Handle> {
+    if shown {
+        handles(b, eye, view_dir)
+    } else {
+        Vec::new()
+    }
+}
+
 /// The rotation handles on the faces of `b` that face the camera: four per face, half
 /// way from the face center towards its sides. Flat faces (no area) get none.
 pub(crate) fn handles(b: &OrientedBox, eye: Option<DVec3>, view_dir: DVec3) -> Vec<Handle> {
@@ -433,13 +448,7 @@ impl App {
                     },
                 );
             }
-            // Preferences > Drawing > Show Move Tool Rotation Grips.
-            let shown = if self.prefs.more.rotation_grips {
-                handles(&b, eye, view_dir)
-            } else {
-                Vec::new()
-            };
-            for handle in shown {
+            for handle in move_handles(self.prefs.more.rotation_grips, &b, eye, view_dir) {
                 consider(
                     handle.point,
                     Hot::Handle {
@@ -597,12 +606,7 @@ impl App {
             Some(Hot::Handle { handle, .. }) => Some(handle),
             _ => None,
         };
-        let shown = if self.prefs.more.rotation_grips {
-            handles(&b, eye, view_dir)
-        } else {
-            Vec::new()
-        };
-        for h in shown {
+        for h in move_handles(self.prefs.more.rotation_grips, &b, eye, view_dir) {
             let Some(q) = to_screen(h.point) else {
                 continue;
             };
@@ -731,6 +735,13 @@ mod tests {
         let top: Vec<_> = hs.iter().filter(|h| h.axis == DVec3::Z).collect();
         assert_eq!(top.len(), 4);
         assert_eq!(top[0].face_center, DVec3::new(1.0, 2.0, 6.0));
+        // Preferences > Drawing > Show Move Tool Rotation Grips.
+        assert_eq!(move_handles(true, &b, Some(eye), DVec3::ZERO), hs);
+        assert!(move_handles(false, &b, Some(eye), DVec3::ZERO).is_empty());
+        assert!(
+            crate::prefs_pages::More::default().rotation_grips,
+            "on by default"
+        );
     }
 
     #[test]

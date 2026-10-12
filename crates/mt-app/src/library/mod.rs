@@ -11,31 +11,38 @@
 //!
 //! Network and file work runs on background threads ([`Worker`], [`Download`]); the
 //! UI thread only polls their channels. Downloads and thumbnails are cached under
-//! the user data folder (`settings::data_dir()/library`). A placed model's
+//! the user data folder (`settings::data_dir()/library`), kept under a size limit
+//! ([`cache`]); a model downloaded before is placed again from there without the
+//! network. Downloaded and placed models are listed under Recent downloads (kept in
+//! `library.toml`). The thumbnail queue drops the models a new search or filter
+//! hides. A placed model's
 //! definition gets the source page (URL), license and credit in its Advanced
 //! Attributes (Entity Info) and description.
 
+pub(crate) mod cache;
 pub(crate) mod local;
 pub(crate) mod net;
 pub(crate) mod polyhaven;
 pub(crate) mod sketchfab;
 mod ui;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use eframe::egui;
 
-/// Where a model comes from.
+/// Where a model comes from. `Recent` is only a list shown in the window (the
+/// downloads kept in `library.toml`); its models keep their own source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum Source {
     #[default]
     Local,
     PolyHaven,
     Sketchfab,
+    Recent,
 }
 
 impl Source {
@@ -44,6 +51,7 @@ impl Source {
             Source::Local => "Local folders",
             Source::PolyHaven => "Poly Haven",
             Source::Sketchfab => "Sketchfab",
+            Source::Recent => "Recent downloads",
         }
     }
 
@@ -52,7 +60,14 @@ impl Source {
             Source::Local => "local",
             Source::PolyHaven => "polyhaven",
             Source::Sketchfab => "sketchfab",
+            Source::Recent => "recent",
         }
+    }
+
+    fn from_key(k: &str) -> Option<Self> {
+        [Source::PolyHaven, Source::Sketchfab, Source::Local]
+            .into_iter()
+            .find(|s| s.key() == k)
     }
 }
 
@@ -178,14 +193,85 @@ fn cache_dir() -> Option<PathBuf> {
     crate::settings::data_dir().map(|d| d.join("library"))
 }
 
+/// Most models kept in the recent downloads list.
+pub(crate) const MAX_RECENT: usize = 20;
+
 /// Settings kept in `library.toml` in the config folder.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Config {
     /// Folders added in the panel (the Components folder is always looked in too).
     pub folders: Vec<PathBuf>,
     /// The user's own Sketchfab API token (kept in plain text, as SketchUp keeps its
     /// login tokens in its own settings; noted in the panel).
     pub sketchfab_token: String,
+    /// Download cache size limit in megabytes ([`cache`]).
+    pub cache_limit_mb: u64,
+    /// Models downloaded and placed, newest first (at most [`MAX_RECENT`]).
+    pub recent: Vec<Asset>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            folders: Vec::new(),
+            sketchfab_token: String::new(),
+            cache_limit_mb: cache::DEFAULT_LIMIT_MB,
+            recent: Vec::new(),
+        }
+    }
+}
+
+/// A recent download as a TOML table (what the list and placing again need).
+fn recent_to_toml(a: &Asset) -> toml::Value {
+    let mut t = toml::Table::new();
+    let mut put = |k: &str, v: &str| {
+        if !v.is_empty() {
+            t.insert(k.into(), toml::Value::String(v.to_owned()));
+        }
+    };
+    put("source", a.source.key());
+    put("id", &a.id);
+    put("name", &a.name);
+    put("author", &a.author);
+    put("license", &a.license);
+    put("license_url", &a.license_url);
+    put("page_url", &a.page_url);
+    put("thumbnail_url", a.thumbnail_url.as_deref().unwrap_or(""));
+    if let Some(s) = a.size.and_then(|s| i64::try_from(s).ok()) {
+        t.insert("size".into(), toml::Value::Integer(s));
+    }
+    toml::Value::Table(t)
+}
+
+fn recent_from_toml(v: &toml::Value) -> Option<Asset> {
+    let t = v.as_table()?;
+    let s = |k: &str| {
+        t.get(k)
+            .and_then(toml::Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    let source = Source::from_key(&s("source")).filter(|s| *s != Source::Local)?;
+    let id = s("id");
+    if id.is_empty() {
+        return None;
+    }
+    let thumb = s("thumbnail_url");
+    Some(Asset {
+        source,
+        id,
+        name: s("name"),
+        author: s("author"),
+        license: s("license"),
+        license_url: s("license_url"),
+        page_url: s("page_url"),
+        thumbnail_url: (!thumb.is_empty()).then_some(thumb),
+        size: t
+            .get("size")
+            .and_then(toml::Value::as_integer)
+            .and_then(|i| u64::try_from(i).ok()),
+        ..Default::default()
+    })
 }
 
 impl Config {
@@ -213,6 +299,21 @@ impl Config {
                 .and_then(toml::Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
+            cache_limit_mb: t
+                .get("cache_limit_mb")
+                .and_then(toml::Value::as_integer)
+                .and_then(|i| u64::try_from(i).ok())
+                .map_or(cache::DEFAULT_LIMIT_MB, |m| m.max(cache::MIN_LIMIT_MB)),
+            recent: t
+                .get("recent")
+                .and_then(toml::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(recent_from_toml)
+                        .take(MAX_RECENT)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -231,6 +332,16 @@ impl Config {
             t.insert(
                 "sketchfab_token".into(),
                 toml::Value::String(self.sketchfab_token.clone()),
+            );
+        }
+        t.insert(
+            "cache_limit_mb".into(),
+            toml::Value::Integer(i64::try_from(self.cache_limit_mb).unwrap_or(i64::MAX)),
+        );
+        if !self.recent.is_empty() {
+            t.insert(
+                "recent".into(),
+                toml::Value::Array(self.recent.iter().map(recent_to_toml).collect()),
             );
         }
         format!("# meshtard Model Library (Window > Model Library).\n{t}")
@@ -253,7 +364,22 @@ impl Config {
     }
 }
 
-/// Background work other than downloads.
+/// Puts `a` at the top of the recent downloads `list` (once; at most [`MAX_RECENT`]).
+pub(crate) fn push_recent(list: &mut Vec<Asset>, a: &Asset) {
+    list.retain(|x| !(x.source == a.source && x.id == a.id));
+    list.insert(
+        0,
+        Asset {
+            local_path: None,
+            description: String::new(),
+            tags: Vec::new(),
+            ..a.clone()
+        },
+    );
+    list.truncate(MAX_RECENT);
+}
+
+/// Background work other than downloads and thumbnails.
 enum Job {
     /// List or search a source. `generation` tells stale answers apart.
     List {
@@ -265,14 +391,8 @@ enum Job {
         /// Sketchfab: the next page's URL (results are added to the list).
         next: Option<String>,
     },
-    Thumb {
-        generation: u64,
-        asset: Box<Asset>,
-    },
     /// Poly Haven: the download's size for the details.
-    Details {
-        asset: Box<Asset>,
-    },
+    Details { asset: Box<Asset> },
 }
 
 enum Reply {
@@ -304,58 +424,111 @@ const MAX_THUMB_FILE: u64 = 40 << 20;
 /// Poly Haven's model list is fetched again after this long.
 const LIST_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+/// Thumbnails waiting for a thread, first asked first. The window drops those of
+/// models a new search or filter no longer shows ([`retain_queued`]), so the queue
+/// follows what is on screen.
+#[derive(Default)]
+struct ThumbQueue {
+    jobs: Mutex<VecDeque<Asset>>,
+    ready: Condvar,
+    closed: AtomicBool,
+}
+
+impl ThumbQueue {
+    fn push(&self, a: Asset) {
+        if let Ok(mut q) = self.jobs.lock() {
+            q.push_back(a);
+            self.ready.notify_one();
+        }
+    }
+
+    /// The next thumbnail to make; `None` once the window's worker is gone.
+    fn pop(&self) -> Option<Asset> {
+        let mut q = self.jobs.lock().ok()?;
+        loop {
+            if self.closed.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(a) = q.pop_front() {
+                return Some(a);
+            }
+            q = self.ready.wait(q).ok()?;
+        }
+    }
+}
+
+/// Drops the queued thumbnails whose key is not in `keep`; returns their keys.
+fn retain_queued(queue: &mut VecDeque<Asset>, keep: &HashSet<String>) -> Vec<String> {
+    let mut dropped = Vec::new();
+    queue.retain(|a| {
+        let k = a.key();
+        let kept = keep.contains(&k);
+        if !kept {
+            dropped.push(k);
+        }
+        kept
+    });
+    dropped
+}
+
 /// Threads for listing and thumbnails: one for lists and details, two for
 /// thumbnails (their own queue, so a long thumbnail queue never holds up a search).
 struct Worker {
     jobs: Sender<Job>,
-    thumbs: Sender<Job>,
+    thumbs: Arc<ThumbQueue>,
     replies: Receiver<Reply>,
-    /// The current search generation; thumbnail jobs of older ones are skipped.
-    generation: Arc<AtomicU64>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.thumbs.closed.store(true, Ordering::Relaxed);
+        self.thumbs.ready.notify_all();
+    }
 }
 
 impl Worker {
     fn start(ctx: &egui::Context) -> Self {
         let (jobs, job_rx) = channel::<Job>();
-        let (thumbs, thumb_rx) = channel::<Job>();
         let (reply_tx, replies) = channel();
-        let generation = Arc::new(AtomicU64::new(0));
-        let spawn = |rx: Arc<Mutex<Receiver<Job>>>, name: &str| {
+        let thumbs = Arc::new(ThumbQueue::default());
+        {
             let tx = reply_tx.clone();
             let ctx = ctx.clone();
-            let generation = generation.clone();
             let _ = std::thread::Builder::new()
-                .name(name.into())
+                .name("library-list".into())
                 .spawn(move || {
-                    loop {
-                        let job = match rx.lock() {
-                            Ok(rx) => rx.recv(),
-                            Err(_) => return,
-                        };
-                        let Ok(job) = job else { return };
-                        if let Some(reply) = run_job(job, &generation)
-                            && tx.send(reply).is_err()
-                        {
+                    while let Ok(job) = job_rx.recv() {
+                        if tx.send(run_job(job)).is_err() {
                             return;
                         }
                         ctx.request_repaint();
                     }
                 });
-        };
-        spawn(Arc::new(Mutex::new(job_rx)), "library-list");
-        let thumb_rx = Arc::new(Mutex::new(thumb_rx));
-        spawn(thumb_rx.clone(), "library-thumbs-1");
-        spawn(thumb_rx, "library-thumbs-2");
+        }
+        for name in ["library-thumbs-1", "library-thumbs-2"] {
+            let tx = reply_tx.clone();
+            let ctx = ctx.clone();
+            let queue = thumbs.clone();
+            let _ = std::thread::Builder::new()
+                .name(name.into())
+                .spawn(move || {
+                    while let Some(a) = queue.pop() {
+                        if tx.send(thumb_job(&a)).is_err() {
+                            return;
+                        }
+                        ctx.request_repaint();
+                    }
+                });
+        }
         Self {
             jobs,
             thumbs,
             replies,
-            generation,
         }
     }
 }
 
-fn run_job(job: Job, current: &AtomicU64) -> Option<Reply> {
+fn run_job(job: Job) -> Reply {
     match job {
         Job::List {
             generation,
@@ -374,65 +547,67 @@ fn run_job(job: Job, current: &AtomicU64) -> Option<Reply> {
                     let tok = (!token.is_empty()).then_some(token.as_str());
                     net::get_json(&url, tok).and_then(|j| sketchfab::parse_search(&j))
                 }
+                // Listed by the window itself from the settings.
+                Source::Recent => Ok((Vec::new(), None)),
             };
-            Some(Reply::List {
+            Reply::List {
                 generation,
                 append,
                 result,
-            })
-        }
-        Job::Thumb { generation, asset } => {
-            if generation < current.load(Ordering::Relaxed) {
-                return None;
             }
-            let key = asset.key();
-            let file = cache_dir().map(|d| d.join("thumbs").join(format!("{key}.png")));
-            if let Some(f) = &file
-                && let Ok(img) = image::open(f)
-            {
-                return Some(Reply::Thumb {
-                    key,
-                    image: Ok(img.to_rgba8()),
-                });
-            }
-            if let Some(p) = &asset.local_path {
-                if asset.size.unwrap_or(0) > MAX_THUMB_FILE {
-                    return Some(Reply::Thumb {
-                        key,
-                        image: Err("too large".into()),
-                    });
-                }
-                return Some(match local::load_model(p) {
-                    Ok(m) => Reply::ThumbModel {
-                        key,
-                        model: Box::new(m),
-                    },
-                    Err(e) => Reply::Thumb { key, image: Err(e) },
-                });
-            }
-            let image = asset
-                .thumbnail_url
-                .as_deref()
-                .ok_or_else(|| "no thumbnail".to_owned())
-                .and_then(|u| net::get_bytes(u, None))
-                .and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string()))
-                .map(|img| {
-                    img.resize(THUMB_PX, THUMB_PX, image::imageops::FilterType::Triangle)
-                        .to_rgba8()
-                });
-            if let (Ok(img), Some(f)) = (&image, &file) {
-                save_png(f, img);
-            }
-            Some(Reply::Thumb { key, image })
         }
         Job::Details { asset } => {
             let size = net::get_json(&polyhaven::files_url(&asset.id), None)
                 .and_then(|j| polyhaven::parse_files(&j, "1k"))
                 .ok()
                 .map(|d| d.size());
-            Some(Reply::Details { id: asset.id, size })
+            Reply::Details { id: asset.id, size }
         }
     }
+}
+
+/// Makes one thumbnail: from the cache, by reading a local file (rendered on the UI
+/// thread) or by downloading the source's image (then cached).
+fn thumb_job(asset: &Asset) -> Reply {
+    let key = asset.key();
+    let file = cache_dir().map(|d| d.join("thumbs").join(format!("{key}.png")));
+    if let Some(f) = &file
+        && let Ok(img) = image::open(f)
+    {
+        return Reply::Thumb {
+            key,
+            image: Ok(img.to_rgba8()),
+        };
+    }
+    if let Some(p) = &asset.local_path {
+        if asset.size.unwrap_or(0) > MAX_THUMB_FILE {
+            return Reply::Thumb {
+                key,
+                image: Err("too large".into()),
+            };
+        }
+        return match local::load_model(p) {
+            Ok(m) => Reply::ThumbModel {
+                key,
+                model: Box::new(m),
+            },
+            Err(e) => Reply::Thumb { key, image: Err(e) },
+        };
+    }
+    let image = asset
+        .thumbnail_url
+        .as_deref()
+        .ok_or_else(|| "no thumbnail".to_owned())
+        .and_then(|u| net::get_bytes(u, None))
+        .and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string()))
+        .map(|img| {
+            img.resize(THUMB_PX, THUMB_PX, image::imageops::FilterType::Triangle)
+                .to_rgba8()
+        });
+    if let (Ok(img), Some(f)) = (&image, &file) {
+        save_png(f, img);
+    }
+    Reply::Thumb { key, image }
 }
 
 pub(crate) fn save_png(path: &Path, img: &image::RgbaImage) {
@@ -481,6 +656,28 @@ fn polyhaven_list() -> Result<Vec<Asset>, String> {
     }
 }
 
+/// Bytes the cache takes, as last measured (`None` until measured). Shared with the
+/// threads that measure it.
+type Usage = Arc<Mutex<Option<u64>>>;
+
+fn set_usage(usage: &Usage, bytes: u64) {
+    if let Ok(mut u) = usage.lock() {
+        *u = Some(bytes);
+    }
+}
+
+/// Brings the cache under `limit` bytes on a thread and measures it.
+fn spawn_evict(limit: u64, usage: &Usage, ctx: &egui::Context) {
+    let Some(cache) = cache_dir() else { return };
+    let (usage, ctx) = (usage.clone(), ctx.clone());
+    let _ = std::thread::Builder::new()
+        .name("library-cache".into())
+        .spawn(move || {
+            set_usage(&usage, cache::evict(&cache, limit, None));
+            ctx.request_repaint();
+        });
+}
+
 /// A model downloading (and then being read) on its own thread.
 pub(crate) struct Download {
     pub asset: Asset,
@@ -489,14 +686,22 @@ pub(crate) struct Download {
 }
 
 impl Download {
-    fn start(asset: Asset, token: String, ctx: &egui::Context) -> Self {
+    fn start(asset: Asset, token: String, limit: u64, usage: &Usage, ctx: &egui::Context) -> Self {
         let progress = Arc::new(net::Progress::default());
         let (tx, rx) = channel();
-        let (a, p, ctx) = (asset.clone(), progress.clone(), ctx.clone());
+        let (a, p, ctx, usage) = (asset.clone(), progress.clone(), ctx.clone(), usage.clone());
         let _ = std::thread::Builder::new()
             .name("library-download".into())
             .spawn(move || {
-                let result = fetch_and_read(&a, &token, &p, cache_dir().as_deref());
+                let cache = cache_dir();
+                let result = fetch_and_read(&a, &token, &p, cache.as_deref());
+                // Keep the cache under its limit, never removing this model.
+                if a.local_path.is_none()
+                    && let Some(c) = &cache
+                {
+                    let keep = c.join("models").join(a.key());
+                    set_usage(&usage, cache::evict(c, limit, Some(&keep)));
+                }
                 let _ = tx.send(result);
                 ctx.request_repaint();
             });
@@ -512,8 +717,14 @@ impl Download {
     }
 }
 
-/// Downloads the model's files into the cache (files already there with the right
-/// size are kept) and reads the main one.
+/// The cache folder of a downloaded model.
+fn model_dir(cache: &Path, asset: &Asset) -> PathBuf {
+    cache.join("models").join(asset.key())
+}
+
+/// Reads the model from the cache when it was downloaded completely before (no
+/// network), else downloads its files into the cache (files already there with the
+/// right size are kept) and reads the main one.
 fn fetch_and_read(
     asset: &Asset,
     token: &str,
@@ -522,6 +733,18 @@ fn fetch_and_read(
 ) -> Result<mt_kernel::Model, String> {
     if let Some(p) = &asset.local_path {
         return local::load_model(p);
+    }
+    if let Some(dir) = cache.map(|c| model_dir(c, asset))
+        && let Some(main) = cache::cached_main(&dir)
+        && let Ok(m) = local::load_model(&main)
+    {
+        // Marks it used for the cache's eviction order.
+        if let Ok(rel) = main.strip_prefix(&dir) {
+            cache::note_main(&dir, &rel.to_string_lossy());
+        }
+        progress.total.store(1, Ordering::Relaxed);
+        progress.done.store(1, Ordering::Relaxed);
+        return Ok(m);
     }
     let plan = match asset.source {
         Source::PolyHaven => net::get_json(&polyhaven::files_url(&asset.id), None)
@@ -533,12 +756,12 @@ fn fetch_and_read(
             net::get_json(&sketchfab::download_url(&asset.id), Some(token))
                 .and_then(|j| sketchfab::parse_download(&j, &asset.id))?
         }
-        Source::Local => return Err("No file.".into()),
+        Source::Local | Source::Recent => return Err("No file.".into()),
     };
-    let dir = cache
-        .ok_or("No user data folder for the download cache.")?
-        .join("models")
-        .join(asset.key());
+    let dir = model_dir(
+        cache.ok_or("No user data folder for the download cache.")?,
+        asset,
+    );
     progress.total.store(plan.size(), Ordering::Relaxed);
     for f in &plan.files {
         if !safe_relative(&f.path) {
@@ -556,8 +779,10 @@ fn fetch_and_read(
             .and_then(|()| std::fs::rename(&tmp, &path))
             .map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    let main = dir.join(&plan.files.first().ok_or("Nothing to download.")?.path);
-    local::load_model(&main)
+    let first = &plan.files.first().ok_or("Nothing to download.")?.path;
+    let model = local::load_model(&dir.join(first))?;
+    cache::note_main(&dir, first);
+    Ok(model)
 }
 
 /// The Model Library window's state.
@@ -568,6 +793,8 @@ pub(crate) struct Library {
     config_loaded: bool,
     pub source: Source,
     pub query: String,
+    /// The filter the thumbnail queue was last trimmed for.
+    queue_query: String,
     /// Everything the current source listed (Poly Haven and local: all of it,
     /// filtered by `query` when shown; Sketchfab: the search results).
     pub assets: Vec<Asset>,
@@ -585,6 +812,10 @@ pub(crate) struct Library {
     to_render: Vec<(String, Box<mt_kernel::Model>)>,
     /// Sketchfab token being typed.
     pub token_edit: String,
+    /// Bytes the download cache takes, as last measured.
+    usage: Usage,
+    /// When the cache was last measured (and trimmed).
+    measured: Option<std::time::Instant>,
     /// Offscreen view for local files' thumbnails (made on first use).
     viewport: Option<mt_render::Viewport>,
 }
@@ -600,7 +831,19 @@ impl Library {
         if self.worker.is_none() {
             self.worker = Some(Worker::start(ctx));
             self.search();
+            self.refresh_usage(ctx);
         }
+    }
+
+    /// Measures (and trims) the cache again when the last measure is older than a
+    /// few seconds: thumbnails are added to it while the window is open.
+    pub(crate) fn refresh_usage(&mut self, ctx: &egui::Context) {
+        const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5);
+        if self.measured.is_some_and(|t| t.elapsed() < MAX_AGE) {
+            return;
+        }
+        self.measured = Some(std::time::Instant::now());
+        spawn_evict(self.limit_bytes(), &self.usage, ctx);
     }
 
     /// Folders scanned for local files: the Components folder, then added ones.
@@ -621,6 +864,7 @@ impl Library {
         if !self.config.sketchfab_token.is_empty() {
             s.push(Source::Sketchfab);
         }
+        s.push(Source::Recent);
         s
     }
 
@@ -639,13 +883,25 @@ impl Library {
         let Some(w) = &self.worker else { return };
         if next.is_none() {
             self.generation += 1;
-            w.generation.store(self.generation, Ordering::Relaxed);
             self.assets.clear();
             self.selected = None;
+            // A new list: the thumbnails still queued are of models no longer shown.
+            if let Ok(mut q) = w.thumbs.jobs.lock() {
+                for k in retain_queued(&mut q, &HashSet::new()) {
+                    self.requested.remove(&k);
+                }
+            }
             self.requested.retain(|k| self.thumbs.contains_key(k));
+            self.queue_query = self.query.clone();
+        }
+        self.error = None;
+        if self.source == Source::Recent {
+            self.assets = self.config.recent.clone();
+            self.next_page = None;
+            self.loading = false;
+            return;
         }
         self.loading = true;
-        self.error = None;
         let _ = w.jobs.send(Job::List {
             generation: self.generation,
             source: self.source,
@@ -662,6 +918,34 @@ impl Library {
             Source::Sketchfab => (0..self.assets.len()).collect(),
             _ => filter(&self.assets, &self.query),
         }
+    }
+
+    /// After the filter changed: drops the queued thumbnails of models it hides, so
+    /// those it shows come first (they are asked again when shown again).
+    pub(crate) fn follow_filter(&mut self) {
+        if self.queue_query == self.query {
+            return;
+        }
+        self.queue_query = self.query.clone();
+        let Some(w) = &self.worker else { return };
+        let keep: HashSet<String> = self
+            .shown()
+            .into_iter()
+            .map(|i| self.assets[i].key())
+            .collect();
+        if let Ok(mut q) = w.thumbs.jobs.lock() {
+            for k in retain_queued(&mut q, &keep) {
+                self.requested.remove(&k);
+            }
+        }
+    }
+
+    /// Thumbnails waiting for a thread.
+    pub(crate) fn queued_thumbs(&self) -> usize {
+        self.worker
+            .as_ref()
+            .and_then(|w| w.thumbs.jobs.lock().ok().map(|q| q.len()))
+            .unwrap_or(0)
     }
 
     pub(crate) fn selected_asset(&self) -> Option<&Asset> {
@@ -693,10 +977,7 @@ impl Library {
         if self.requested.insert(key)
             && let Some(w) = &self.worker
         {
-            let _ = w.thumbs.send(Job::Thumb {
-                generation: self.generation,
-                asset: Box::new(a.clone()),
-            });
+            w.thumbs.push(a.clone());
         }
         None
     }
@@ -705,6 +986,12 @@ impl Library {
     pub(crate) fn thumb_pending(&self, a: &Asset) -> bool {
         let key = a.key();
         self.requested.contains(&key) && !self.thumbs.contains_key(&key)
+    }
+
+    /// A downloaded model is in the cache (placing it needs no network).
+    pub(crate) fn is_cached(&self, a: &Asset) -> bool {
+        a.local_path.is_none()
+            && cache_dir().is_some_and(|c| cache::cached_main(&model_dir(&c, a)).is_some())
     }
 
     pub(crate) fn add_folder(&mut self, dir: PathBuf) {
@@ -736,13 +1023,66 @@ impl Library {
         }
     }
 
+    /// The cache size limit in bytes.
+    fn limit_bytes(&self) -> u64 {
+        self.config.cache_limit_mb.saturating_mul(1 << 20)
+    }
+
+    /// Bytes the download cache takes, once measured.
+    pub(crate) fn cache_usage(&self) -> Option<u64> {
+        self.usage.lock().ok().and_then(|u| *u)
+    }
+
+    /// The cache size limit was changed: saves it and trims the cache to it.
+    pub(crate) fn apply_cache_limit(&mut self, ctx: &egui::Context) {
+        self.config.cache_limit_mb = self.config.cache_limit_mb.max(cache::MIN_LIMIT_MB);
+        self.config.save();
+        spawn_evict(self.limit_bytes(), &self.usage, ctx);
+    }
+
+    /// Clear Cache: removes every downloaded model and thumbnail (not while a
+    /// download runs; the button is disabled then).
+    pub(crate) fn clear_cache(&mut self, ctx: &egui::Context) {
+        if self.download.is_none() {
+            spawn_evict(0, &self.usage, ctx);
+        }
+    }
+
+    /// A model was downloaded and placed: it goes to the top of Recent downloads.
+    pub(crate) fn add_recent(&mut self, a: &Asset) {
+        if a.local_path.is_some() {
+            return;
+        }
+        push_recent(&mut self.config.recent, a);
+        self.config.save();
+        if self.source == Source::Recent {
+            let selected = self.selected.clone();
+            self.search();
+            self.selected = selected;
+        }
+    }
+
+    pub(crate) fn clear_recent(&mut self) {
+        self.config.recent.clear();
+        self.config.save();
+        if self.source == Source::Recent {
+            self.search();
+        }
+    }
+
     pub(crate) fn start_download(&mut self, ctx: &egui::Context) {
         if self.download.is_some() {
             return;
         }
         if let Some(a) = self.selected_asset().cloned() {
             self.error = None;
-            self.download = Some(Download::start(a, self.config.sketchfab_token.clone(), ctx));
+            self.download = Some(Download::start(
+                a,
+                self.config.sketchfab_token.clone(),
+                self.limit_bytes(),
+                &self.usage,
+                ctx,
+            ));
         }
     }
 
@@ -855,13 +1195,133 @@ mod tests {
 
     #[test]
     fn config_round_trips() {
+        let recent = Asset {
+            source: Source::Sketchfab,
+            id: "abc123".into(),
+            name: "Chair".into(),
+            author: "Someone".into(),
+            license: "CC Attribution".into(),
+            license_url: "https://creativecommons.org/licenses/by/4.0/".into(),
+            page_url: "https://sketchfab.com/3d-models/abc123".into(),
+            thumbnail_url: Some("https://media.sketchfab.com/t.jpg".into()),
+            size: Some(1234),
+            ..Default::default()
+        };
         let c = Config {
             folders: vec![PathBuf::from("/models/a"), PathBuf::from("/b")],
             sketchfab_token: "tok".into(),
+            cache_limit_mb: 300,
+            recent: vec![
+                recent,
+                Asset {
+                    source: Source::PolyHaven,
+                    id: "stool".into(),
+                    ..Default::default()
+                },
+            ],
         };
-        assert_eq!(Config::from_toml(&c.to_toml()), c);
+        let text = c.to_toml();
+        assert!(text.contains("[[recent]]"), "{text}");
+        assert_eq!(Config::from_toml(&text), c);
         assert_eq!(Config::from_toml("not = [toml"), Config::default());
         assert!(!Config::default().to_toml().contains("token"));
+        // Too small a limit is raised; recent entries without an id or with an
+        // unknown source are dropped.
+        let c = Config::from_toml(
+            "cache_limit_mb = 1\n[[recent]]\nsource = \"polyhaven\"\n\
+             [[recent]]\nsource = \"nowhere\"\nid = \"x\"\n",
+        );
+        assert_eq!(c.cache_limit_mb, cache::MIN_LIMIT_MB);
+        assert!(c.recent.is_empty());
+        assert_eq!(Config::default().cache_limit_mb, cache::DEFAULT_LIMIT_MB);
+    }
+
+    #[test]
+    fn recent_downloads_put_the_newest_first_once() {
+        let mut list = Vec::new();
+        let a = |id: &str| Asset {
+            source: Source::PolyHaven,
+            id: id.into(),
+            description: "long text".into(),
+            ..Default::default()
+        };
+        for i in 0..MAX_RECENT + 3 {
+            push_recent(&mut list, &a(&format!("m{i}")));
+        }
+        assert_eq!(list.len(), MAX_RECENT);
+        assert_eq!(list[0].id, format!("m{}", MAX_RECENT + 2));
+        push_recent(&mut list, &a("m10"));
+        assert_eq!(list[0].id, "m10");
+        assert_eq!(list.iter().filter(|x| x.id == "m10").count(), 1);
+        assert!(list[0].description.is_empty(), "only what the list needs");
+        // The same id from another source is another model.
+        push_recent(
+            &mut list,
+            &Asset {
+                source: Source::Sketchfab,
+                ..a("m10")
+            },
+        );
+        assert_eq!(list.iter().filter(|x| x.id == "m10").count(), 2);
+    }
+
+    #[test]
+    fn thumbnail_queue_keeps_only_shown_models() {
+        let a = [
+            asset("Wooden Chair", &[]),
+            asset("Table", &[]),
+            asset("Lamp", &[]),
+        ];
+        let mut q: VecDeque<Asset> = a.iter().cloned().collect();
+        // The filter "chair" shows only the chair: the others leave the queue.
+        let keep: HashSet<String> = filter(&a, "chair").iter().map(|&i| a[i].key()).collect();
+        let dropped = retain_queued(&mut q, &keep);
+        assert_eq!(dropped, [a[1].key(), a[2].key()]);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].name, "Wooden Chair");
+        assert_eq!(retain_queued(&mut q, &HashSet::new()).len(), 1);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn thumb_queue_hands_out_in_order_and_stops_when_closed() {
+        let q = Arc::new(ThumbQueue::default());
+        q.push(asset("A", &[]));
+        q.push(asset("B", &[]));
+        assert_eq!(q.pop().unwrap().name, "A");
+        assert_eq!(q.pop().unwrap().name, "B");
+        let q2 = q.clone();
+        let t = std::thread::spawn(move || q2.pop());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        q.closed.store(true, Ordering::Relaxed);
+        q.ready.notify_all();
+        assert!(t.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_completely_downloaded_model_is_read_from_the_cache_offline() {
+        let cache = std::env::temp_dir().join(format!("mt_library_offline_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let a = Asset {
+            source: Source::PolyHaven,
+            id: "tri".into(),
+            ..Default::default()
+        };
+        let dir = model_dir(&cache, &a);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tri.stl"),
+            "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 10 0 0\n\
+             vertex 10 10 0\nendloop\nendfacet\nendsolid t\n",
+        )
+        .unwrap();
+        cache::note_main(&dir, "tri.stl");
+        let p = net::Progress::default();
+        // No network is used: the id is not a real Poly Haven model.
+        let m = fetch_and_read(&a, "", &p, Some(&cache)).unwrap();
+        assert_eq!(m.root.faces.len(), 1);
+        assert!(p.fraction() > 0.99);
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     /// Live check against Poly Haven (network): list, search, thumbnail, download

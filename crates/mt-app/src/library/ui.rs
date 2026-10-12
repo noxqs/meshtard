@@ -26,6 +26,9 @@ struct Actions {
     remove_folder: Option<usize>,
     save_token: bool,
     open_url: Option<String>,
+    cache_limit: bool,
+    clear_cache: bool,
+    clear_recent: bool,
 }
 
 impl App {
@@ -73,6 +76,7 @@ impl App {
                 self.place_imported_with(model, &name, &device, |def| {
                     store_source(def, &asset);
                 });
+                self.library.add_recent(&asset);
                 self.message = Some(format!(
                     "{}: click to place it. License: {}.",
                     asset.credit(),
@@ -137,6 +141,17 @@ impl App {
         if a.save_token {
             lib.save_token();
         }
+        if a.cache_limit {
+            lib.apply_cache_limit(ctx);
+        }
+        if a.clear_cache {
+            lib.clear_cache(ctx);
+        }
+        if a.clear_recent {
+            lib.clear_recent();
+        }
+        // The thumbnail queue follows the filter typed this frame.
+        lib.follow_filter();
         if let Some(url) = a.open_url
             && let Err(e) = crate::presentation::open_with_system(&url)
         {
@@ -228,6 +243,20 @@ impl App {
                      credit the author as it asks.",
                 );
             }
+            Source::Recent => {
+                ui.horizontal(|ui| {
+                    ui.weak("Models you downloaded and placed, newest first.");
+                    if ui
+                        .add_enabled(
+                            !lib.config.recent.is_empty(),
+                            egui::Button::new("Clear List"),
+                        )
+                        .clicked()
+                    {
+                        act.clear_recent = true;
+                    }
+                });
+            }
         }
         egui::CollapsingHeader::new("Sketchfab account")
             .id_salt("mt_library_sketchfab")
@@ -248,6 +277,39 @@ impl App {
                      kept in plain text in library.toml in the settings folder.",
                 );
             });
+        egui::CollapsingHeader::new("Download cache")
+            .id_salt("mt_library_cache")
+            .show(ui, |ui| {
+                let ctx = ui.ctx().clone();
+                lib.refresh_usage(&ctx);
+                ui.horizontal(|ui| {
+                    ui.label("Size limit:");
+                    let r = ui.add(
+                        egui::DragValue::new(&mut lib.config.cache_limit_mb)
+                            .range(super::cache::MIN_LIMIT_MB..=1_000_000)
+                            .speed(10.0)
+                            .suffix(" MB"),
+                    );
+                    // Applied when a drag ends or a typed value is committed.
+                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                        act.cache_limit = true;
+                    }
+                    ui.label(match lib.cache_usage() {
+                        Some(b) => format!("{} used", format_size(b)),
+                        None => "measuring...".to_owned(),
+                    });
+                    if ui
+                        .add_enabled(lib.download.is_none(), egui::Button::new("Clear Cache"))
+                        .clicked()
+                    {
+                        act.clear_cache = true;
+                    }
+                });
+                ui.weak(
+                    "Downloaded models and thumbnails; the least recently used are removed \
+                     when the cache grows past the limit.",
+                );
+            });
         ui.separator();
 
         // Status line.
@@ -261,6 +323,10 @@ impl App {
                     1 => "1 model".to_owned(),
                     n => format!("{n} models"),
                 });
+            }
+            let queued = lib.queued_thumbs();
+            if queued > 0 {
+                ui.weak(format!("({queued} thumbnails to load)"));
             }
             if let Some(e) = &lib.error {
                 ui.colored_label(egui::Color32::from_rgb(196, 43, 28), e);
@@ -364,6 +430,8 @@ impl App {
                 None => {
                     let label = if a.local_path.is_some() {
                         "Place"
+                    } else if lib.is_cached(&a) {
+                        "Place (downloaded)"
                     } else {
                         "Download & Place"
                     };
