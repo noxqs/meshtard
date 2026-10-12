@@ -198,6 +198,8 @@ pub struct RawDimension {
     pub offset_direction: Option<Vec3>,
     pub hidden: bool,
     pub text: String,
+    /// Layer id (resolved to the name by `build_model`), empty for Layer0.
+    pub layer: String,
 }
 
 /// Index into `RawParsed::material_store`.

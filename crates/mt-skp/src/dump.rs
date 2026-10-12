@@ -135,6 +135,7 @@ fn definition(d: &Definition) -> Value {
             "text": s(&t.text), "hidden": t.hidden, "point": vec3(&t.point),
             "label_point": vec3(&t.label_point),
             "screen_position": t.screen_position.map_or(Value::Null, |p| json!(p)),
+            "layer": s(&t.layer),
         })).collect::<Vec<_>>(),
         "dimensions": d.dimensions.iter().map(dimension).collect::<Vec<_>>(),
         "construction_lines": d.construction_lines.iter().map(|c| json!({
@@ -152,6 +153,7 @@ fn dimension(d: &Dimension) -> Value {
         "text": s(&d.text), "hidden": d.hidden, "a": vec3(&d.a), "b": vec3(&d.b),
         "offset": d.offset, "plane_x": vec3(&d.plane_x), "normal": vec3(&d.normal),
         "offset_direction": vec3(&d.offset_direction),
+        "layer": s(&d.layer),
     })
 }
 

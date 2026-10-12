@@ -8,9 +8,11 @@ Changes since 0.1.0.
 - **Arcs and circles stay arcs.** They reopen as arcs and circles you can edit by radius and segment count, not as plain curves. Convert to Polygon is not kept yet (the curve reopens as an arc).
 - **Edge tags are saved.** Edges keep their own tag.
 - **Guides and section planes inside groups and components are saved.**
+- **Text and dimension tags are saved.** Texts and dimensions keep their tag when the file is saved and reopened, and when it is imported into another model. Files from SketchUp 2021 and later still open them untagged.
+- Writer library (`mt_skp::write`): `add_text_on` and `add_dimension_on` put a text or dimension on a layer; the reader gives `TextEntity::layer` and `Dimension::layer`.
 - Writer library (`mt_skp::write`): `add_circle` / `add_arc` off the ground plane wrote a wrong second axis (inherited from OpenSKP's writer) that readers take for an ellipse; fixed.
 
-Still not saved: scenes, shadow settings, fog, model axes, locks, the active section plane, two-point perspective, text and dimension tags, tag folders and dashes, environments, fonts and dimension expert settings. Where the SketchUp 2017 format keeps most of these is not known yet; files saved by SketchUp during the trial will show it (`spec/parity/TRIAL_CHECKLIST.md` 1b). Tag folders and environments came after SketchUp 2017 and need the newer file format.
+Still not saved: scenes, shadow settings, fog, model axes, locks, the active section plane, two-point perspective, tag folders and dashes, environments, fonts and dimension expert settings. Where the SketchUp 2017 format keeps most of these is not known yet; files saved by SketchUp during the trial will show it (`spec/parity/TRIAL_CHECKLIST.md` 1b). Tag folders and environments came after SketchUp 2017 and need the newer file format.
 
 ## Shortcuts
 

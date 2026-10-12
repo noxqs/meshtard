@@ -236,6 +236,8 @@ pub struct TextEntity {
     /// Screen texts: the label's position as fractions of the view's width and
     /// height (origin unverified, assumed top left). Legacy files only.
     pub screen_position: Option<[f64; 2]>,
+    /// The tag (layer) name; empty for Layer0. Legacy files only.
+    pub layer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -252,6 +254,8 @@ pub struct Dimension {
     /// the reader derives it (legacy files: plane normal x (b - a)). VFF files give
     /// `plane_x` and `normal` instead.
     pub offset_direction: Option<Vec3>,
+    /// The tag (layer) name; empty for Layer0. Legacy files only.
+    pub layer: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -519,11 +523,20 @@ pub(crate) fn build_model(mut p: RawParsed) -> Model {
         for l in d.builder.edge_layers.values_mut() {
             resolve(l);
         }
+        for t in &mut d.builder.texts {
+            resolve(&mut t.layer);
+        }
+        for x in &mut d.builder.dimensions {
+            resolve(&mut x.layer);
+        }
     };
     for d in p.definitions.values_mut() {
         resolve_def(d);
     }
     resolve_def(&mut p.root);
+    for d in &mut p.dimensions {
+        resolve(&mut d.layer);
+    }
 
     let definitions = std::mem::take(&mut p.definitions)
         .into_iter()
@@ -581,6 +594,7 @@ pub(crate) fn build_model(mut p: RawParsed) -> Model {
             plane_x: d.plane_x,
             normal: d.normal,
             offset_direction: d.offset_direction,
+            layer: d.layer.clone(),
         })
         .collect();
 

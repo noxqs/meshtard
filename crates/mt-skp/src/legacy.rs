@@ -1897,6 +1897,16 @@ fn offset_direction(n: Vec3, a: Vec3, b: Vec3) -> Option<Vec3> {
 }
 
 /// The position of the vertex at `slot`, if that slot holds one.
+/// A drawbase layer id as the string `build_model` resolves to the name; empty for
+/// the default layer.
+fn layer_id(layer: i32) -> String {
+    if layer == 0 {
+        String::new()
+    } else {
+        layer.to_string()
+    }
+}
+
 fn vertex_at(slots: &Slots, slot: Option<u64>) -> Option<Vec3> {
     let v = slots.get(&slot?)?.v.as_ref()?;
     (v.k == "vertex").then_some(v.xyz)
@@ -2081,6 +2091,7 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                     point: a.a.or_else(|| vertex_at(slots, a.connect[0])),
                     label_point: a.label,
                     screen_position: a.screen,
+                    layer: layer_id(v.layer),
                 });
             }
             "dimension" => {
@@ -2103,6 +2114,7 @@ fn fill(b: &mut GeometryBuilder, ents: &[Obj], slots: &Slots) {
                         .zip(pb)
                         .zip(a.normal)
                         .and_then(|((p, q), n)| offset_direction(n, p, q)),
+                    layer: layer_id(v.layer),
                     ..Default::default()
                 });
             }
@@ -2626,6 +2638,7 @@ fn parse_into(data: &[u8], out: &mut RawParsed) -> Result<(), Error> {
                 offset_direction: d.offset_direction,
                 hidden: d.hidden,
                 text: d.text.clone(),
+                layer: d.layer.clone(),
                 ..Default::default()
             })
         })

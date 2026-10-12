@@ -246,7 +246,7 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
     let root = &model.root;
     b.begin_root()?;
     write_body(&mut RootSink(b), model, root, &maps, &written)?;
-    crate::annotation::write_root(b, root)?;
+    crate::annotation::write_root(b, root, |l| maps.layer(l))?;
     Ok(())
 }
 

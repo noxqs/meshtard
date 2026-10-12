@@ -1151,6 +1151,74 @@ fn edge_tags_round_trip() {
 }
 
 #[test]
+fn annotation_tags_round_trip() {
+    let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
+    let notes = b.add_layer("Notes", None, true).unwrap();
+    let dims = b.add_layer("Dims", None, false).unwrap();
+    let mut d = b.add_component_definition("Label", None).unwrap();
+    d.add_face(&Face::new(QUAD)).unwrap();
+    d.add_text_on("inner", [0.0; 3], DEFAULT_LEADER, Some(notes))
+        .unwrap();
+    let label = d.finish().unwrap();
+    b.add_text("plain", [0.0; 3], DEFAULT_LEADER).unwrap();
+    b.add_text_on("tagged", [10.0, 0.0, 0.0], DEFAULT_LEADER, Some(notes))
+        .unwrap();
+    b.add_dimension([0.0; 3], [100.0, 0.0, 0.0], 12.0).unwrap();
+    b.add_dimension_on([0.0; 3], [0.0, 50.0, 0.0], 10.0, Some(dims))
+        .unwrap();
+    b.add_instance(&label, &Placement::at([0.0, 0.0, 100.0]))
+        .unwrap();
+    // A foreign layer handle is refused.
+    let other = SkpBuilder::new().add_layer("X", None, true).unwrap();
+    assert!(
+        b.add_text_on("bad", [0.0; 3], DEFAULT_LEADER, Some(other))
+            .is_err()
+    );
+    assert!(
+        b.add_dimension_on([0.0; 3], [1.0, 0.0, 0.0], 1.0, Some(other))
+            .is_err()
+    );
+    let bytes = b.to_bytes().unwrap();
+
+    let m = mt_skp::parse(&bytes).unwrap();
+    let texts: Vec<_> = m
+        .root
+        .texts
+        .iter()
+        .map(|t| (t.text.as_str(), t.layer.as_str()))
+        .collect();
+    assert_eq!(texts, [("plain", ""), ("tagged", "Notes")]);
+    let dim_layers: Vec<_> = m.root.dimensions.iter().map(|d| d.layer.as_str()).collect();
+    assert_eq!(dim_layers, ["", "Dims"]);
+    assert_eq!(m.root.dimensions, m.dimensions);
+    let def = m.definitions.values().find(|d| d.name == "Label").unwrap();
+    assert_eq!(def.texts[0].layer, "Notes");
+
+    // OpenSKP's archive resolves the same drawbase ids to the same layers.
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/oracle/read_annotation_layers.py");
+    let Some(j) = python_json(&script, "annotation_tags", &bytes) else {
+        return;
+    };
+    let pairs = |k: &str| -> Vec<(String, Option<String>)> {
+        serde_json::from_value(j[k].clone()).unwrap()
+    };
+    let n = |s: &str| Some(s.to_owned());
+    assert_eq!(
+        pairs("text"),
+        [
+            ("inner".into(), n("Notes")),
+            ("plain".into(), None),
+            ("tagged".into(), n("Notes")),
+        ]
+    );
+    assert_eq!(
+        pairs("dimension"),
+        [(String::new(), None), (String::new(), n("Dims"))]
+    );
+}
+
+#[test]
 fn guides_and_section_planes_in_definitions() {
     let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
     let mut d = b.add_component_definition("Cabinet", None).unwrap();

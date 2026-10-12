@@ -51,7 +51,7 @@ pub struct Dimension {
     /// `None` follows the model's `dimension_style` (not saved in .skp).
     pub style: Option<crate::model_data::DimensionStyle>,
     /// Its tag (index into `Model::layers`; `None` = Untagged). Hidden tags hide it
-    /// and Color by Tag colors it. Not saved in .skp.
+    /// and Color by Tag colors it. Saved in .skp (root dimensions only).
     pub layer: Option<usize>,
 }
 
@@ -208,7 +208,7 @@ pub struct Text {
     /// Font, color and leader set by Model Info > Text > Update Selected; `None`
     /// follows the model's `text_style` (not saved in .skp).
     pub style: Option<crate::model_data::TextStyle>,
-    /// Its tag (see [`Dimension::layer`]). Not saved in .skp.
+    /// Its tag (see [`Dimension::layer`]). Saved in .skp (root texts only).
     pub layer: Option<usize>,
 }
 
@@ -268,10 +268,12 @@ pub fn dimensions_from_skp(dims: &[skp::Dimension]) -> Vec<Dimension> {
 /// Writes root dimensions and leader texts. The writer has no text override for
 /// dimensions, no radial dimensions (they are written as linear ones between their
 /// points) and no screen texts (left out); the offset is written signed in the
-/// horizontal plane (see below).
+/// horizontal plane (see below). `layer` maps a tag index to the file's layer (`None`
+/// for Untagged).
 pub fn write_root(
     b: &mut skp::write::SkpBuilder,
     ents: &crate::Entities,
+    layer: impl Fn(Option<usize>) -> Option<skp::write::LayerId>,
 ) -> Result<(), skp::write::WriteError> {
     for d in &ents.dimensions {
         if d.a.distance(d.b) > crate::TOL {
@@ -285,11 +287,16 @@ pub fn write_root(
             } else {
                 d.offset.dot(side)
             };
-            b.add_dimension(d.a.to_array(), d.b.to_array(), signed)?;
+            b.add_dimension_on(d.a.to_array(), d.b.to_array(), signed, layer(d.layer))?;
         }
     }
     for t in ents.texts.iter().filter(|t| !t.screen) {
-        b.add_text(&t.text, t.point.to_array(), t.leader.to_array())?;
+        b.add_text_on(
+            &t.text,
+            t.point.to_array(),
+            t.leader.to_array(),
+            layer(t.layer),
+        )?;
     }
     Ok(())
 }
