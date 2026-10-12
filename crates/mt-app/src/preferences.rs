@@ -44,6 +44,11 @@ pub(crate) struct General {
     pub welcome: bool,
     /// Warnings answered with "don't show again" (Reset All Warning Messages clears).
     pub dismissed: BTreeSet<String>,
+    /// Linux: turn off the desktop's Alt + drag window move while focused
+    /// (`wm_modifier`; a Meshtard addition).
+    pub linux_alt_drag: bool,
+    /// Linux: the first-start question about it was answered.
+    pub linux_alt_drag_asked: bool,
 }
 
 impl Default for General {
@@ -57,6 +62,8 @@ impl Default for General {
             notify_fixed: false,
             welcome: true,
             dismissed: BTreeSet::new(),
+            linux_alt_drag: false,
+            linux_alt_drag_asked: false,
         }
     }
 }
@@ -143,6 +150,12 @@ pub(crate) struct Prefs {
     pub samples_supported: Vec<u32>,
     pub samples_in_use: u32,
     pub adapter_details: String,
+    /// Linux: the desktop's window-drag modifier while Meshtard is focused.
+    #[cfg(target_os = "linux")]
+    pub(crate) alt_drag: crate::wm_modifier::AltDrag,
+    /// Linux: the first-start Alt + drag question is open.
+    #[cfg(target_os = "linux")]
+    pub(crate) alt_drag_prompt: bool,
     /// The toolbar icon size given to the shell.
     icons_applied: Option<bool>,
 }
@@ -343,6 +356,8 @@ fn general_from_table(t: &toml::Table) -> General {
         ("fix_problems", &mut g.fix_problems),
         ("notify_fixed", &mut g.notify_fixed),
         ("show_welcome", &mut g.welcome),
+        ("linux_alt_drag", &mut g.linux_alt_drag),
+        ("linux_alt_drag_asked", &mut g.linux_alt_drag_asked),
     ] {
         if let Some(v) = flag(key) {
             *field = v;
@@ -395,6 +410,8 @@ fn settings_text(g: &General, d: &Drawing, m: &More) -> String {
     t.insert("fix_problems".into(), g.fix_problems.into());
     t.insert("notify_fixed".into(), g.notify_fixed.into());
     t.insert("show_welcome".into(), g.welcome.into());
+    t.insert("linux_alt_drag".into(), g.linux_alt_drag.into());
+    t.insert("linux_alt_drag_asked".into(), g.linux_alt_drag_asked.into());
     t.insert(
         "dismissed_warnings".into(),
         toml::Value::Array(g.dismissed.iter().map(|s| s.as_str().into()).collect()),
@@ -452,7 +469,8 @@ pub(crate) fn load(spec: &mut Spec) -> Prefs {
         .map(|t| settings_from_text(&t))
         .unwrap_or_default();
     let a = &spec.default_model.axes;
-    let prefs = Prefs {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut prefs = Prefs {
         general,
         drawing,
         more,
@@ -462,6 +480,8 @@ pub(crate) fn load(spec: &mut Spec) -> Prefs {
     };
     prefs.apply_axes(spec);
     prefs.more.apply_globals();
+    #[cfg(target_os = "linux")]
+    prefs.alt_drag.recover();
     prefs
 }
 
@@ -611,6 +631,8 @@ impl App {
         if let Some(r) = self.prefs.recovery_written.take() {
             crate::welcome::remove_recovery(&r);
         }
+        #[cfg(target_os = "linux")]
+        self.prefs.alt_drag.exit();
     }
 
     /// Auto-saves the model to its recovery file when it has had unsaved changes for
@@ -752,7 +774,15 @@ impl App {
                             crate::prefs_pages::drawing_more(ui, &mut more);
                         }
                         Page::Applications => crate::prefs_pages::applications_page(ui, &mut more),
-                        Page::General => general_page(ui, &mut general),
+                        Page::General => {
+                            general_page(ui, &mut general);
+                            #[cfg(target_os = "linux")]
+                            crate::wm_modifier::prefs_section(
+                                ui,
+                                &mut general.linux_alt_drag,
+                                self.prefs.alt_drag.support(),
+                            );
+                        }
                         Page::Shortcuts => {
                             keymap_changed |= self.shortcuts_page(ui, &mut d, &mut files_action);
                         }
@@ -1348,6 +1378,8 @@ mod tests {
             notify_fixed: true,
             welcome: false,
             dismissed: [WARN_FIXED.to_owned()].into(),
+            linux_alt_drag: true,
+            linux_alt_drag_asked: true,
         };
         let d = Drawing {
             click_style: ClickStyle::ClickMoveClick,

@@ -76,6 +76,8 @@ mod tray;
 mod tray_extra;
 mod tray_more;
 mod welcome;
+#[cfg(target_os = "linux")]
+mod wm_modifier;
 
 use eframe::egui;
 use egui_wgpu::wgpu;
@@ -2649,6 +2651,8 @@ impl eframe::App for App {
         self.model_info_ui(ui.ctx(), frame);
         self.geo_map_ui(ui.ctx(), frame);
         self.preferences_ui(ui.ctx(), frame);
+        #[cfg(target_os = "linux")]
+        self.alt_drag_tick(ui.ctx());
         self.shortcut_list_ui(ui.ctx());
         self.presentation_ui(ui.ctx(), frame);
         self.context_extra_ui(ui.ctx(), frame);
