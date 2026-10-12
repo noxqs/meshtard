@@ -1,10 +1,13 @@
 //! File > Import of triangle and polygon meshes: Wavefront OBJ (with MTL colors) and
 //! STL (binary or ASCII), turned into kernel faces.
 //!
-//! - Vertices closer than the kernel tolerance are welded; edges shared by faces are
-//!   shared. Degenerate polygons and repeated faces are skipped; non-planar polygons
-//!   and polygons that pass a vertex twice (a hole joined to the outline by a bridge
-//!   edge) are ear-clipped into triangles (merging joins the planar ones again).
+//! - The mesh is healed into valid geometry ([`crate::mesh_heal`]): vertices closer
+//!   than the kernel tolerance are welded, sides are split where a vertex lies on them
+//!   or they cross, coplanar overlaps become their arrangement's cells. Edges shared by
+//!   faces are shared. Degenerate polygons, slivers and repeated faces are skipped;
+//!   non-planar polygons and polygons that pass a vertex twice (a hole joined to the
+//!   outline by a bridge edge) are ear-clipped into triangles (merging joins the
+//!   planar ones again).
 //! - "Merge coplanar faces" (SketchUp's STL importer option, from memory) joins
 //!   neighboring coplanar faces of the same material into one face, removing the edges
 //!   between them; a region that would not give one simple outer loop is left as is.
@@ -21,8 +24,11 @@ use std::sync::Arc;
 use glam::{DVec2, DVec3};
 
 use crate::TOL;
-use crate::entities::{CoEdge, EdgeAttrs, Entities, FaceAttrs, FaceId, Loop, MaterialId, VertexId};
+use crate::entities::{
+    CoEdge, EdgeAttrs, EdgeId, Entities, FaceAttrs, FaceId, Loop, MaterialId, VertexId,
+};
 use crate::geom::{Plane, signed_area2};
+use crate::mesh_heal::{self, Welder};
 
 /// A polygon mesh as read from a file, in file units.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -237,10 +243,10 @@ pub struct MeshOptions {
 }
 
 /// Builds faces from `mesh` in a new collection. `materials` maps the mesh's materials
-/// to model materials.
+/// to model materials. The mesh is healed into valid geometry first
+/// ([`crate::mesh_heal`]): welded, split where sides cross or touch, and with coplanar
+/// overlaps resolved.
 pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) -> Entities {
-    let mut ents = Entities::new();
-    let mut welded: BTreeMap<[i64; 3], VertexId> = BTreeMap::new();
     let place = |i: usize| -> DVec3 {
         let p = mesh.positions[i];
         let p = if opts.y_up {
@@ -250,73 +256,56 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
         };
         p * opts.inches_per_unit
     };
-    let mut vertex = |ents: &mut Entities, i: usize| -> VertexId {
-        let p = place(i);
-        let key = (p / TOL).round().as_i64vec3().to_array();
-        *welded.entry(key).or_insert_with(|| ents.add_vertex(p))
-    };
+    let mut welder = Welder::default();
+    let mut welded: Vec<Option<usize>> = vec![None; mesh.positions.len()];
+    let mut pieces = Vec::new();
+    for (src, poly) in mesh.polygons.iter().enumerate() {
+        let vs: Vec<usize> = poly
+            .vertices
+            .iter()
+            .map(|&i| *welded[i].get_or_insert_with(|| welder.weld(place(i))))
+            .collect();
+        pieces.extend(mesh_heal::pieces(&welder.points, &vs, src));
+    }
+    let (pieces, _) = mesh_heal::split_sides(&mut welder, pieces);
+
+    let mut ents = Entities::new();
+    let mut ids: Vec<Option<VertexId>> = vec![None; welder.points.len()];
     let mut seen: BTreeSet<Vec<VertexId>> = BTreeSet::new();
-    for poly in &mesh.polygons {
-        let mut vs: Vec<VertexId> = Vec::with_capacity(poly.vertices.len());
-        for &i in &poly.vertices {
-            let v = vertex(&mut ents, i);
-            if vs.last() != Some(&v) {
-                vs.push(v);
-            }
-        }
-        while vs.len() > 1 && vs.first() == vs.last() {
-            vs.pop();
-        }
+    for piece in &pieces {
+        let vs: Vec<VertexId> = piece
+            .vs
+            .iter()
+            .map(|&i| *ids[i].get_or_insert_with(|| ents.add_vertex(welder.points[i])))
+            .collect();
+        let poly = &mesh.polygons[piece.src];
         let material = poly.material.and_then(|m| materials.get(m).copied());
-        let points: Vec<DVec3> = vs.iter().map(|&v| ents.pos(v)).collect();
-        let Some(plane) = Plane::from_polygon(&points) else {
-            continue;
-        };
-        let distinct: BTreeSet<VertexId> = vs.iter().copied().collect();
-        if distinct.len() < 3 {
-            continue;
-        }
+        let face = add_face(&mut ents, &vs, piece.normal, material, &mut seen);
         // Texture coordinates, when the polygon has them and its material a texture.
         let tile = poly
             .material
             .and_then(|m| mesh.materials.get(m))
             .and_then(|m| m.texture.as_ref())
             .map(|t| t.size);
-        let uvs = (poly.uvs.len() == poly.vertices.len()).then_some(&poly.uvs);
-        let corners: Vec<(DVec3, DVec2)> = match uvs {
-            Some(uvs) => poly
+        if let (Some(f), Some(tile)) = (face, tile)
+            && poly.uvs.len() == poly.vertices.len()
+        {
+            let corners: Vec<(DVec3, DVec2)> = poly
                 .vertices
                 .iter()
-                .zip(uvs)
+                .zip(&poly.uvs)
                 .map(|(&i, &t)| (place(i), t))
-                .collect(),
-            None => Vec::new(),
-        };
-        let map = |ents: &mut Entities, face: Option<FaceId>| {
-            if let (Some(f), Some(tile)) = (face, tile)
-                && let Some(m) = uv_from_corners(ents.faces[f].normal, &corners, tile)
-            {
+                .collect();
+            if let Some(m) = uv_from_corners(ents.faces[f].normal, &corners, tile) {
                 ents.faces[f].attrs.uv = crate::FaceUv::boxed(Some(m), None);
-            }
-        };
-        if distinct.len() == vs.len() && points.iter().all(|&p| plane.contains(p)) {
-            let f = add_face(&mut ents, &vs, plane.normal, material, &mut seen);
-            map(&mut ents, f);
-        } else {
-            // Non-planar polygons and polygons through a vertex twice (a hole joined
-            // to the outline by a bridge) become triangles.
-            for t in polygon_triangles(&points, &plane) {
-                let tri = t.map(|k| vs[k]);
-                let pts = tri.map(|v| ents.pos(v));
-                if let Some(p) = Plane::from_polygon(&pts) {
-                    let f = add_face(&mut ents, &tri, p.normal, material, &mut seen);
-                    map(&mut ents, f);
-                }
             }
         }
     }
+    mesh_heal::resolve_overlaps(&mut ents);
     if opts.merge_coplanar {
         merge_coplanar(&mut ents);
+        // The two sides of a sliver can merge into faces over the same edges.
+        mesh_heal::drop_repeated_faces(&mut ents);
     }
     ents
 }
@@ -324,7 +313,7 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
 /// Triangles (corner indices, counter-clockwise around `plane`'s normal) of a
 /// polygon by ear clipping in `plane`, which handles concave polygons and outlines
 /// that visit a vertex twice; a fan when ear clipping fails.
-fn polygon_triangles(points: &[DVec3], plane: &Plane) -> Vec<[usize; 3]> {
+pub(crate) fn polygon_triangles(points: &[DVec3], plane: &Plane) -> Vec<[usize; 3]> {
     let flat: Vec<f64> = points
         .iter()
         .flat_map(|&p| plane.project(p).to_array())
@@ -477,7 +466,7 @@ fn merge_coplanar(ents: &mut Entities) {
         while k < region.len() {
             let f = region[k];
             k += 1;
-            for c in &ents.faces[f].outer.coedges {
+            for c in ents.faces[f].loops().flat_map(|l| &l.coedges) {
                 let e = &ents.edges[c.edge];
                 if e.faces.len() != 2 {
                     continue;
@@ -520,9 +509,15 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
     // Boundary coedges in loop direction, by start vertex.
     let mut next: BTreeMap<VertexId, Vec<CoEdge>> = BTreeMap::new();
     let mut count = 0;
+    let mut boundary: BTreeSet<EdgeId> = BTreeSet::new();
     for &f in region {
-        for c in &ents.faces[f].outer.coedges {
+        for c in ents.faces[f].loops().flat_map(|l| &l.coedges) {
             if !interior(ents, c.edge) {
+                if !boundary.insert(c.edge) {
+                    // Two faces of the region meet at an edge a third face uses too:
+                    // the region would run along it both ways.
+                    return;
+                }
                 next.entry(ents.coedge_ends(*c).0).or_default().push(*c);
                 count += 1;
             }
@@ -563,11 +558,23 @@ fn merge_region(ents: &mut Entities, region: &[FaceId], members: &BTreeSet<FaceI
     let [outer] = outer[..] else {
         return; // Pinched or several regions: keep the triangles.
     };
+    // The merged face's plane goes through its first corner: every corner must be
+    // in it, which faces each within the tolerance of the region's plane may not be.
     let normal = ents.faces[region[0]].normal;
+    let first = Plane::new(
+        normal,
+        ents.pos(ents.coedge_ends(loops[outer].coedges[0]).0),
+    );
+    if !loops
+        .iter()
+        .all(|l| ents.loop_points(l).iter().all(|&p| first.contains(p)))
+    {
+        return;
+    }
     let attrs = ents.faces[region[0]].attrs.clone();
     let mut interior_edges: BTreeSet<_> = BTreeSet::new();
     for &f in region {
-        for c in &ents.faces[f].outer.coedges {
+        for c in ents.faces[f].loops().flat_map(|l| &l.coedges) {
             if interior(ents, c.edge) {
                 interior_edges.insert(c.edge);
             }

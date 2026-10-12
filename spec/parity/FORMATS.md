@@ -67,9 +67,34 @@ Checked with `cargo run --release -p mt-kernel --example import_check -- FILE...
 uncommon entities), dxf-parser `test/data` (MIT), assimp DXF and FBX models and
 Khronos glTF-Sample-Assets (CesiumMilkTruck, BoxAnimated, TextureTransformTest,
 TransmissionTest, SpecGlossVsMetalRough, VirtualCity, NegativeScaleTest,
-OrientationTest). Every DXF and FBX import and every hierarchy group is valid; some
-glTF meshes import with invalid faces (crossing edges, overlaps), the known mesh
-healing gap (LEFTOVERS 3), unrelated to the hierarchy.
+OrientationTest). Every DXF and FBX import and every hierarchy group is valid, and
+every one of these glTF samples is valid with `Checks::ALL` since mesh import heals
+meshes (below).
+
+## Mesh import healing
+
+Every mesh importer (OBJ, STL, FBX, PLY, 3MF, 3DS, glTF, IFC faceted geometry) goes
+through `mesh_import::to_entities`, which heals the polygon soup into valid kernel
+geometry (`mt_kernel::mesh_heal`) the way SketchUp's importers leave it: points within
+the tolerance weld (nearest earlier point); a vertex within 0.75 of the tolerance of a
+polygon side splits it, sides that pass that close to each other get a shared vertex
+(repeated until settled, at most 8 rounds, stopped when the splits grow); polygons that
+then visit a vertex twice or bend out of their plane are ear-clipped and slivers
+thinner than that distance are dropped; coplanar faces that overlap are replaced by
+the cells of their arrangement (`arrangement::cells`), each cell taking the material,
+texture position and side of the earliest face covering it (a face drawn on another
+takes that face's material in SketchUp); faces over the same edges are dropped. Faces
+of different planes that pass through each other are not intersected (SketchUp's
+importers do not either). `import_check` (now also reading OBJ, STL, PLY, 3MF and 3DS;
+`--errors` counts every problem by kind) over the 59 assimp / tinyobj / 3MF Consortium /
+Stanford bunny files of `formats_check`, the Khronos samples above and the IFC samples:
+invalid imports went from 16 to 3 in `formats_check` (`regr01.obj`, `Wuson.stl`,
+`heartgears.3mf`) and S_Office (web-ifc) has 3 of its ~3,760 meshes left, all sliver
+solids or bundles of nearly collinear long edges thinner than the tolerance, where
+splitting does not settle (LEFTOVERS 17). Times (release): TransmissionTest imports in
+about 2.5 s (1.0 s unhealed) and validates with `Checks::ALL` in 1.5 s (was 7 s: the
+validator's vertex grid now uses the edges' cell size); S_Office in about 4.5 s
+(2 s unhealed).
 
 ## IFC checks
 

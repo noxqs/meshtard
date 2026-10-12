@@ -1,12 +1,11 @@
 //! Consistency checks, run after every operation in tests.
 
-use std::collections::HashMap;
-
 use glam::{DVec2, DVec3};
 
 use crate::TOL;
 use crate::entities::{EdgeId, Entities, FaceId, Loop};
 use crate::geom::{Plane, segment_segment, signed_area2};
+use crate::spatial::FxMap;
 
 /// Which checks to run. Files written by SketchUp satisfy the topology checks, but not
 /// necessarily our geometric tolerances, so imports check topology only.
@@ -180,81 +179,185 @@ fn check_face_geometry(ents: &Entities, fid: FaceId, err: &mut impl FnMut(String
     }
 }
 
-/// Bounding boxes bucketed in a uniform grid, so the geometric checks only compare
-/// things that are near each other. Boxes covering too many cells are kept apart
-/// and returned by every query. Queries return indices in ascending order, so the
-/// checks report problems in the same order as comparing every pair would.
-struct Grid {
+/// Bounding boxes bucketed in uniform grids, so the geometric checks only compare
+/// things that are near each other. Level `l` has cells `2^l` times the base cell; a box
+/// goes in the first level where it covers at most 8 cells (boxes too large for every level
+/// are kept apart and returned by every query). Queries return indices in ascending
+/// order, so the checks report problems in the same order as comparing every pair
+/// would. Mesh import healing ([`crate::mesh_heal`]) uses it too.
+pub(crate) struct Grid {
     cell: f64,
-    cells: HashMap<[i64; 3], Vec<usize>>,
+    levels: Vec<Level>,
     big: Vec<usize>,
 }
 
-impl Grid {
-    const MAX_CELLS: i64 = 64;
+/// One level of a [`Grid`]: the boxes of each filled cell, as a range of `items`.
+#[derive(Default)]
+struct Level {
+    /// One over the cell size.
+    scale: f64,
+    cells: FxMap<[i64; 3], (usize, usize)>,
+    items: Vec<usize>,
+}
 
-    fn new(boxes: &[(DVec3, DVec3)]) -> Self {
+impl Grid {
+    const MAX_CELLS: i64 = 8;
+    const LEVELS: usize = 24;
+    const SMALL: usize = 16;
+
+    pub(crate) fn new(boxes: &[(DVec3, DVec3)]) -> Self {
+        Self::with_cell(boxes, Self::median_size(boxes))
+    }
+
+    /// The median largest extent of `boxes`.
+    pub(crate) fn median_size(boxes: &[(DVec3, DVec3)]) -> f64 {
         let mut sizes: Vec<f64> = boxes.iter().map(|(a, b)| (*b - *a).max_element()).collect();
-        sizes.sort_by(f64::total_cmp);
-        let median = sizes.get(sizes.len() / 2).copied().unwrap_or(1.0);
+        if sizes.is_empty() {
+            return 1.0;
+        }
+        let mid = sizes.len() / 2;
+        *sizes.select_nth_unstable_by(mid, f64::total_cmp).1
+    }
+
+    /// A grid with base cells of about `cell` (for points queried with larger boxes).
+    pub(crate) fn with_cell(boxes: &[(DVec3, DVec3)], cell: f64) -> Self {
         let mut grid = Self {
-            cell: median.max(TOL * 8.0),
-            cells: HashMap::new(),
+            cell: cell.max(TOL * 8.0),
+            levels: Vec::new(),
             big: Vec::new(),
         };
-        for (i, (a, b)) in boxes.iter().enumerate() {
-            let (lo, hi) = (grid.key(*a), grid.key(*b));
-            let n = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
-            if n > Self::MAX_CELLS {
-                grid.big.push(i);
-                continue;
-            }
-            for x in lo[0]..=hi[0] {
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        grid.cells.entry([x, y, z]).or_default().push(i);
+        if boxes.len() <= Self::SMALL {
+            // Few boxes: comparing them all is cheaper than hashing.
+            grid.big = (0..boxes.len()).collect();
+            return grid;
+        }
+        let mut pairs: Vec<Vec<([i64; 3], usize)>> = vec![Vec::new(); Self::LEVELS];
+        'boxes: for (i, (a, b)) in boxes.iter().enumerate() {
+            for (level, pairs) in pairs.iter_mut().enumerate() {
+                let (lo, hi) = (grid.key(*a, level), grid.key(*b, level));
+                let n = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
+                if n > Self::MAX_CELLS {
+                    continue;
+                }
+                for x in lo[0]..=hi[0] {
+                    for y in lo[1]..=hi[1] {
+                        for z in lo[2]..=hi[2] {
+                            pairs.push(([x, y, z], i));
+                        }
                     }
                 }
+                continue 'boxes;
             }
+            grid.big.push(i);
         }
+        grid.levels = pairs
+            .into_iter()
+            .enumerate()
+            .filter(|(_, pairs)| !pairs.is_empty())
+            .map(|(l, pairs)| {
+                // Counting sort by cell: boxes of a cell stay in ascending order.
+                let mut cells: FxMap<[i64; 3], (usize, usize)> = FxMap::default();
+                for (k, _) in &pairs {
+                    cells.entry(*k).or_default().1 += 1;
+                }
+                let mut start = 0;
+                for range in cells.values_mut() {
+                    *range = (start, start + range.1);
+                    start = range.1;
+                }
+                let mut fill: FxMap<[i64; 3], usize> = FxMap::default();
+                let mut items = vec![0; pairs.len()];
+                for (k, i) in pairs {
+                    let at = fill.entry(k).or_insert(cells[&k].0);
+                    items[*at] = i;
+                    *at += 1;
+                }
+                Level {
+                    scale: 1.0 / (grid.cell * 2f64.powi(l as i32)),
+                    cells,
+                    items,
+                }
+            })
+            .collect();
         grid
     }
 
-    fn key(&self, p: DVec3) -> [i64; 3] {
-        let k = (p / self.cell).floor();
+    fn key(&self, p: DVec3, level: usize) -> [i64; 3] {
+        let k = (p / (self.cell * 2f64.powi(level as i32))).floor();
         [k.x as i64, k.y as i64, k.z as i64]
     }
 
     /// Indices of boxes that may overlap `a..b`, ascending, without duplicates.
-    fn query(&self, a: DVec3, b: DVec3) -> Vec<usize> {
-        let (lo, hi) = (self.key(a), self.key(b));
-        let mut out = self.big.clone();
-        let n = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
-        if n > Self::MAX_CELLS * 64 {
-            // A query box this large: walk the filled cells instead.
-            for (k, v) in &self.cells {
-                if (0..3).all(|d| lo[d] <= k[d] && k[d] <= hi[d]) {
-                    out.extend(v);
-                }
+    pub(crate) fn query(&self, a: DVec3, b: DVec3) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.visit(a, b, |i| out.push(i));
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Indices of boxes that may overlap `a..b`, without duplicates, in an order that
+    /// depends only on the grid and the query. `seen` holds a mark per box (grown as
+    /// needed) that must not be equal to `mark` before the call; pass a new mark to each
+    /// query.
+    pub(crate) fn query_marked(
+        &self,
+        a: DVec3,
+        b: DVec3,
+        seen: &mut Vec<u32>,
+        mark: u32,
+        out: &mut Vec<usize>,
+    ) {
+        out.clear();
+        self.visit(a, b, |i| {
+            if seen.len() <= i {
+                seen.resize(i + 1, 0);
             }
-        } else {
-            for x in lo[0]..=hi[0] {
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        if let Some(v) = self.cells.get(&[x, y, z]) {
-                            out.extend(v);
+            if seen[i] != mark {
+                seen[i] = mark;
+                out.push(i);
+            }
+        });
+    }
+
+    /// Calls `f` with the index of every box that may overlap `a..b`, some more than once.
+    fn visit(&self, a: DVec3, b: DVec3, mut f: impl FnMut(usize)) {
+        self.big.iter().for_each(|&i| f(i));
+        for Level {
+            scale,
+            cells,
+            items,
+        } in &self.levels
+        {
+            let key = |p: DVec3| {
+                let k = (p * *scale).floor();
+                [k.x as i64, k.y as i64, k.z as i64]
+            };
+            let (lo, hi) = (key(a), key(b));
+            let n = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
+            if n > (cells.len() as i64).min(4096) {
+                // A query box this large: walk the filled cells instead.
+                for (k, &(from, to)) in cells {
+                    if (0..3).all(|d| lo[d] <= k[d] && k[d] <= hi[d]) {
+                        items[from..to].iter().for_each(|&i| f(i));
+                    }
+                }
+            } else {
+                for x in lo[0]..=hi[0] {
+                    for y in lo[1]..=hi[1] {
+                        for z in lo[2]..=hi[2] {
+                            if let Some(&(from, to)) = cells.get(&[x, y, z]) {
+                                items[from..to].iter().for_each(|&i| f(i));
+                            }
                         }
                     }
                 }
             }
         }
-        out.sort_unstable();
-        out.dedup();
-        out
     }
 }
 
-fn overlaps(a: &(DVec3, DVec3), b: &(DVec3, DVec3)) -> bool {
+pub(crate) fn overlaps(a: &(DVec3, DVec3), b: &(DVec3, DVec3)) -> bool {
     a.0.cmple(b.1).all() && b.0.cmple(a.1).all()
 }
 
@@ -285,7 +388,12 @@ fn check_edge_crossings(ents: &Entities, err: &mut impl FnMut(String)) {
         })
         .collect();
     let edge_grid = Grid::new(&boxes);
-    let vertex_grid = Grid::new(&vs.iter().map(|(_, v)| (v.pos, v.pos)).collect::<Vec<_>>());
+    // Vertices in cells the size of the edges that query them (a grid sized for points
+    // would make every long edge walk all of it).
+    let vertex_grid = Grid::with_cell(
+        &vs.iter().map(|(_, v)| (v.pos, v.pos)).collect::<Vec<_>>(),
+        Grid::median_size(&boxes),
+    );
     for (i, (a, ea)) in es.iter().enumerate() {
         let (p0, p1) = (ents.pos(ea.start), ents.pos(ea.end));
         for j in edge_grid.query(boxes[i].0, boxes[i].1) {
