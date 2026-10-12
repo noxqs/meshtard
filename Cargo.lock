@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "mt-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "eframe",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "mt-cuda"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cudarc",
  "glam",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "mt-infer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glam",
  "mt-kernel",
@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "mt-kernel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "earcutr",
  "flate2",
@@ -1747,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "mt-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "earcutr",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "mt-skp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "serde",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "mt-spec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "toml",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "mt-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "egui",
