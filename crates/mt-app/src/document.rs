@@ -312,6 +312,19 @@ pub fn units_from_options(
     (unit, out)
 }
 
+/// A camera as the file's saved view: a parallel view keeps its visible height, a
+/// perspective one its field of view.
+fn view_camera(c: &Camera) -> mt_skp::ViewCamera {
+    mt_skp::ViewCamera {
+        eye: c.eye.to_array(),
+        target: c.target.to_array(),
+        up: c.up().to_array(),
+        fov: c.fov_deg,
+        parallel: !c.perspective,
+        ortho_height: c.view_height(),
+    }
+}
+
 impl Document {
     pub fn open(path: &Path) -> Result<Self, mt_skp::Error> {
         let src = mt_skp::read(path)?;
@@ -359,10 +372,20 @@ impl Document {
         })
     }
 
-    /// The model as `.skp` bytes, with its units.
+    /// The model as `.skp` bytes, with its units and the view it was opened with.
+    #[cfg(test)]
     pub fn to_skp(&self) -> Result<Vec<u8>, mt_skp::WriteError> {
         let options = units_to_options(self.units, &self.unit_options);
-        mt_kernel::export::to_skp_with(&self.model, &options)
+        mt_kernel::export::to_skp_view(&self.model, &options, self.saved_camera.as_ref())
+    }
+
+    /// [`to_skp`](Self::to_skp) saving `camera` as the view the file opens in, as
+    /// SketchUp saves the current view. Two-point perspective is saved as plain
+    /// perspective (its place in the file is unknown).
+    pub fn to_skp_with_camera(&self, camera: &Camera) -> Result<Vec<u8>, mt_skp::WriteError> {
+        let options = units_to_options(self.units, &self.unit_options);
+        let view = view_camera(camera);
+        mt_kernel::export::to_skp_view(&self.model, &options, Some(&view))
     }
 
     /// A new empty model, as SketchUp shows at startup.
@@ -646,6 +669,11 @@ impl Document {
         // this is unverified).
         let star = if self.is_modified() { "*" } else { "" };
         format!("{star}{name} - meshtard")
+    }
+
+    /// Remembers `camera` as the saved view (after a save).
+    pub fn set_saved_camera(&mut self, camera: &Camera) {
+        self.saved_camera = Some(view_camera(camera));
     }
 
     /// The view the model was saved with, which SketchUp reopens at.
@@ -1657,6 +1685,32 @@ mod tests {
         assert!(!scene.edges.is_empty());
         assert!(!scene.indices.is_empty());
         assert_eq!(scene.indices.len() % 3, 0);
+    }
+
+    /// The current view is saved and reopened (perspective and parallel).
+    #[test]
+    fn saved_view_survives_save_and_reopen() {
+        let dir = std::env::temp_dir().join(format!("mt-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("view.skp");
+        let mut doc = Document::untitled();
+        mt_kernel::add_line(&mut doc.model.root, DVec3::ZERO, DVec3::X);
+        for perspective in [true, false] {
+            let cam = Camera {
+                eye: DVec3::new(-120.0, -300.0, 80.0),
+                target: DVec3::new(10.0, 5.0, 2.0),
+                fov_deg: 40.0,
+                perspective,
+                two_point: false,
+            };
+            std::fs::write(&path, doc.to_skp_with_camera(&cam).unwrap()).unwrap();
+            let back = Document::open(&path).unwrap().saved_camera().unwrap();
+            assert!((back.eye - cam.eye).length() < 1e-9);
+            assert!((back.target - cam.target).length() < 1e-9);
+            assert_eq!(back.perspective, perspective);
+            assert!((back.fov_deg - 40.0).abs() < 1e-9, "{}", back.fov_deg);
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

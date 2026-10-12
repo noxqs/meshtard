@@ -17,7 +17,7 @@ use crate::Error;
 use crate::bytes::{f64_at, i32_at, u16_at, u32_at, vec3_at};
 use crate::model::{
     AttrDicts, AttrValue, ConstructionLine, ConstructionPoint, Dimension, EntityId, SectionPlane,
-    StyleItem, TextEntity, Vec3, stringify_attr_dict,
+    StyleItem, TextEntity, Vec3, ViewCamera, stringify_attr_dict,
 };
 use crate::raw::{
     CoEdge, GeometryBuilder, RawDefinition, RawDimension, RawFace, RawInstance, RawMaterial,
@@ -262,6 +262,8 @@ struct V {
     sense: bool,
     /// Edge: slot of its CCurve / CArcCurve, 0 for none.
     curve: u64,
+    /// CArcCurve: the decoded arc.
+    arc: Option<Box<crate::model::ArcCurve>>,
     faces_camera: bool,
     /// Instance: a `CGroup` rather than a `CComponentInstance`.
     group: bool,
@@ -335,6 +337,7 @@ impl Default for V {
             inline_tex: false,
             sense: false,
             curve: 0,
+            arc: None,
             faces_camera: false,
             group: false,
             shadows_face_sun: false,
@@ -952,10 +955,23 @@ impl<'a> Archive<'a> {
                 self.r.u32()?;
             }
             "CArcCurve" => {
+                // OpenSKP `_read_arccurve`: a byte, the segment count, then center,
+                // normal, x axis, start and end angle, y axis.
                 self.preamble()?;
                 v.k = "curve";
-                self.r.raw(5)?;
-                self.r.f64s(14)?;
+                let head = self.r.raw(5)?;
+                let segments = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
+                let f = self.r.f64s(14)?;
+                let p = |i: usize| [f[i], f[i + 1], f[i + 2]];
+                v.arc = Some(Box::new(crate::model::ArcCurve {
+                    center: p(0),
+                    normal: p(3),
+                    x_axis: p(6),
+                    start_angle: f[9],
+                    end_angle: f[10],
+                    y_axis: p(11),
+                    segments,
+                }));
             }
             "CEdgeUse" => {
                 self.early_preamble()?;
@@ -1906,8 +1922,21 @@ fn add_edge(b: &mut GeometryBuilder, s: u64, e: &V, slots: &Slots) {
     if f != 0 {
         b.edge_flags.insert(id, f);
     }
+    // The edge's own layer, from the same drawbase as a face's (OpenSKP keeps it
+    // when nonzero).
+    if e.layer != 0 {
+        b.edge_layers.insert(id, e.layer.to_string());
+    }
     if e.curve != 0 {
         b.edge_curves.insert(id, e.curve as EntityId);
+        // An arc's CArcCurve is read inline on its first edge; later edges back-ref
+        // the same slot, whose value holds the arc.
+        if let Some(arc) = slots
+            .get(&e.curve)
+            .and_then(|c| c.v.as_ref()?.arc.as_deref())
+        {
+            b.arc_curves.insert(e.curve as EntityId, *arc);
+        }
     }
 }
 
@@ -2170,6 +2199,54 @@ fn skip_typed_ref(
     Ok(())
 }
 
+// ── the saved view ──────────────────────────────────────────────────
+//
+// The model's own camera is the first `CCamera` record, declared in the header
+// region before the material manager (definition thumbnails come later). Its
+// 137-byte body starts with eye, target and up (3 f64 each), then two f64 (1.0 and
+// 1000.0 in every corpus file), a perspective byte (1 perspective, 0 parallel), the
+// vertical field of view in degrees (f64) and the parallel view's height (f64). Seen in
+// schema 5 records of SketchUp 6 to 2020 files: the corpus' views give 30 or 35 degree
+// fields of view, an up vector perpendicular to the view direction, and OpenSKP's Iso
+// camera (made with the SDK as a parallel view) differs from the SDK default
+// perspective one in exactly these fields. The rest is unknown.
+const CAMERA_PERSPECTIVE: usize = 88;
+const CAMERA_FOV: usize = 89;
+const CAMERA_HEIGHT: usize = 97;
+
+/// Decodes a schema-5 `CCamera` body (see above).
+pub(crate) fn camera_body(b: &[u8]) -> Option<ViewCamera> {
+    let f = |at: usize| -> Option<f64> {
+        Some(f64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
+    };
+    let v = |at: usize| -> Option<Vec3> { Some([f(at)?, f(at + 8)?, f(at + 16)?]) };
+    let cam = ViewCamera {
+        eye: v(0)?,
+        target: v(24)?,
+        up: v(48)?,
+        parallel: *b.get(CAMERA_PERSPECTIVE)? == 0,
+        fov: f(CAMERA_FOV)?,
+        ortho_height: f(CAMERA_HEIGHT)?,
+    };
+    let finite = [cam.eye, cam.target, cam.up]
+        .iter()
+        .flatten()
+        .chain([&cam.fov, &cam.ortho_height])
+        .all(|x| x.is_finite());
+    (finite && b[CAMERA_PERSPECTIVE] <= 1).then_some(cam)
+}
+
+/// The model's camera: the first schema-5 `CCamera` declaration in `head`.
+fn model_camera(head: &[u8]) -> Option<ViewCamera> {
+    const DECL: &[u8] = b"\x07\x00CCamera";
+    let at = head.windows(DECL.len()).position(|w| w == DECL)?;
+    let schema = u16_at(head, at.checked_sub(2)?).ok()?;
+    if at < 4 || head[at - 4..at - 2] != [0xff, 0xff] || schema != 5 {
+        return None;
+    }
+    camera_body(head.get(at + DECL.len()..at + DECL.len() + 137)?)
+}
+
 // Same byte layout as the CCamera/CDib branches of Archive::read.
 fn read_camera_body(r: &mut R<'_>) -> Result<(), Error> {
     r.raw(137)?;
@@ -2430,6 +2507,8 @@ fn parse_into(data: &[u8], out: &mut RawParsed) -> Result<(), Error> {
                 .ok_or(Error::Truncated)?;
         }
     }
+
+    out.camera = model_camera(&data[..start]);
 
     let bases = if mc >= 2 {
         vec![bootstrap_two_materials(data, ver, start)?]
@@ -2748,6 +2827,78 @@ mod tests {
         assert!(pages[0].hidden_layer_ids.is_empty());
         assert_eq!(pages[1].name, "WithHidden");
         assert_eq!(pages[1].hidden_layer_ids, vec![5, 6]);
+    }
+
+    #[test]
+    fn saved_views() {
+        let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-3);
+        // A SketchUp 2017 save: perspective, 30 degrees.
+        let Some(m) = fixture("capilla_quiroz_v17.skp") else {
+            return;
+        };
+        let c = m.camera.unwrap();
+        assert!(close(c.eye, [325.763, -366.202, 156.457]), "{c:?}");
+        assert!(close(c.target, [291.791, -228.48, 129.557]));
+        assert!(!c.parallel);
+        assert_eq!(c.fov, 30.0);
+        // The view direction and up are perpendicular, as in every corpus camera.
+        let d = [0, 1, 2].map(|i| c.target[i] - c.eye[i]);
+        assert!((d[0] * c.up[0] + d[1] * c.up[1] + d[2] * c.up[2]).abs() < 1e-6);
+        // OpenSKP's writer output: the SDK's parallel Iso view.
+        let c = fixture("create_arc.skp").unwrap().camera.unwrap();
+        assert_eq!((c.eye, c.target), ([100.0, -100.0, 100.0], [0.0; 3]));
+        assert!(c.parallel);
+        assert!((c.ortho_height - 92.8203).abs() < 1e-3);
+        // SketchUp 2020, 35 degrees; SketchUp 2018 front view, parallel.
+        let c = fixture("gondola_v20.skp").unwrap().camera.unwrap();
+        assert!(!c.parallel && c.fov == 35.0);
+        let c = fixture("zero_material_custom_layer_v18.skp")
+            .unwrap()
+            .camera
+            .unwrap();
+        assert!(c.parallel && c.up == [0.0, 0.0, 1.0]);
+        // SketchUp 3 files have no camera record.
+        assert!(fixture("legacy_v3_synthetic.skp").unwrap().camera.is_none());
+    }
+
+    #[test]
+    fn arc_curves_and_edge_layers() {
+        let Some(m) = fixture("create_arc.skp") else {
+            return;
+        };
+        // OpenSKP writer output: a quarter arc about (50, 50, 0), 8 segments.
+        let arcs: Vec<_> = m.root.arc_curves.values().collect();
+        assert_eq!(arcs.len(), 1);
+        let a = arcs[0];
+        assert_eq!((a.center, a.normal), ([50.0, 50.0, 0.0], [0.0, 0.0, 1.0]));
+        assert_eq!(a.segments, 8);
+        assert!((a.end_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        let id = *m.root.arc_curves.keys().next().unwrap();
+        assert_eq!(
+            m.root
+                .edges
+                .values()
+                .filter(|e| e.curve_id == Some(id))
+                .count(),
+            8
+        );
+        // A SketchUp 2020 file with edges on a tag, and real arcs: every circular one
+        // has y = normal x x (the scaled ones are ellipses).
+        let m = fixture("gondola_v20.skp").unwrap();
+        let tagged = m
+            .definitions
+            .values()
+            .flat_map(|d| d.edges.values())
+            .filter(|e| !e.layer.is_empty())
+            .count();
+        assert_eq!(tagged, 1102);
+        let arcs: Vec<_> = m
+            .definitions
+            .values()
+            .flat_map(|d| d.arc_curves.values())
+            .collect();
+        assert_eq!(arcs.len(), 30);
+        assert!(arcs.iter().all(|a| a.start_angle == 0.0 && a.segments >= 1));
     }
 
     #[test]

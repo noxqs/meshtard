@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::{
-    AttrDicts, ConstructionLine, ConstructionPoint, Dimension, EntityId, SectionPlane, StyleItem,
-    StyleWatermark, TextEntity, Vec3, ViewCamera,
+    ArcCurve, AttrDicts, ConstructionLine, ConstructionPoint, Dimension, EntityId, SectionPlane,
+    StyleItem, StyleWatermark, TextEntity, Vec3, ViewCamera,
 };
 
 /// A node of the VFF `model.dat` TLV tree. Container tags have `children`;
@@ -85,6 +85,10 @@ pub struct GeometryBuilder {
     pub edge_flags: BTreeMap<EntityId, i32>,
     /// Edge id to the id of the curve (arc, circle, polyline) it belongs to.
     pub edge_curves: BTreeMap<EntityId, EntityId>,
+    /// Edge id to its own layer id (as text, resolved to the name in `model.rs`).
+    pub edge_layers: BTreeMap<EntityId, String>,
+    /// Curve id to its analytic arc, for `CArcCurve` curves.
+    pub arc_curves: BTreeMap<EntityId, ArcCurve>,
     pub faces: BTreeMap<EntityId, RawFace>,
     pub instances: Vec<RawInstance>,
     pub section_planes: Vec<SectionPlane>,

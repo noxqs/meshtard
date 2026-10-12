@@ -175,7 +175,8 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Writer: Rust port of OpenSKP's legacy v17 (SketchUp 2017) writer, byte-identical to OpenSKP on 17 models; extended with plain edges (per-edge soft/smooth/hidden), root group instances (shared group definitions), a plane tolerance for real models and empty-root files.
 - [x] File > New, Save (Ctrl+S), Save As, Save A Copy As; unsaved changes marked in the title.
 - [x] Every corpus model saves and reopens with identical counts in both our reader and OpenSKP's.
-- [ ] Not saved yet: the camera view (files open in Iso), scenes, styles and shadow settings, units, active section, edge tags, guides and section planes inside components; arcs and circles reopen as polyline curves, not radius-editable arcs.
+- [x] Saved since: the camera view, edge tags, guides and section planes inside components, arcs and circles as radius-editable arcs (M14); styles and units (M14).
+- [ ] Not saved yet: scenes, shadow settings, active section (formats need SketchUp-saved samples, M14).
 - [x] "Save changes?" prompt on New, Open, dropped files and closing.
 - [ ] Check in real SketchUp 2026 that saved files open correctly (during the trial).
 - [ ] VFF (2021+) writing: no reference implementation; needs own research against real SketchUp.
@@ -202,7 +203,7 @@ Reading first means real SketchUp models are available for testing everything el
 
 ### M12: Solid Tools and modeling extras (FEATURES.md items 13, 18-28)
 - [x] Solid Tools (kernel booleans, about 0.7% of near-degenerate random cases refused), Tag and Axes tools, camera tools, Two-Point Perspective, Model Info, Preferences, Revert, Component Edit hiding, Intersect With Context, Soften Edges.
-- Not saved in the .skp yet: model axes, units (writer keeps its template's units), two-point.
+- Not saved in the .skp yet: model axes, two-point (units are saved since M14).
 
 ### M13: Presentation and the rest (FEATURES.md Tier 3)
 - [x] Sandbox From Scratch and From Contours (Delaunay TIN), 3D Text (ttf-parser outlines, bundled Ubuntu Light and Hack), image entities from File > Import (PNG/JPEG) with Explode to a textured face (FEATURES.md items 29, 31, 30 part 1).
@@ -212,7 +213,8 @@ Reading first means real SketchUp models are available for testing everything el
 
 ### M14: Writer completeness (FEATURES.md item 39)
 - [x] Section planes (reopen in their plane around the model), style settings with known style items, units and snapping (`UnitsOptions`), image entities (`CImage`) survive save and reopen; round-trip tests in `crates/mt-kernel/tests/export.rs`.
-- [ ] Scenes, Monochrome, fog, Component Edit hiding, model axes, locks, two-point, active section, saved view: format unknown without SketchUp-saved samples; captures listed in `spec/parity/TRIAL_CHECKLIST.md` section 1b.
+- [x] Formats read from the corpus (reader code plus SketchUp-saved files) and written, round-tripped through our reader and OpenSKP's: the saved view (`CCamera`), arcs and circles (`CArcCurve` through the model's own vertices; the y-axis field fixed, OpenSKP's writer wrote `(0, r, 0)`), edge tags (drawbase layer, as in `gondola_v20.skp`), guides and section planes inside components.
+- [ ] Scenes, Monochrome, fog, Component Edit hiding, model axes, locks, two-point, active section, shadow settings, polygon marks: format unknown without SketchUp-saved samples (the corpus has no v17 scene, only one SketchUp 2020 scene with every property captured); captures listed in `spec/parity/TRIAL_CHECKLIST.md` section 1b. Tag folders (2021) and environments (2025) do not exist in the 2017 format.
 
 ### M15: Toolbars and cursors (FEATURES.md items 40, 41)
 - [x] Item 40: the remaining View > Toolbars toolbars (Standard, Views, Camera, Styles, Edit, Drawing, Principal, Construction, Section, Solid Tools, Tags, Shadows, Sandbox, Measurements), hidden by default, dockable and floating like the others, with own icons for every button; widget items (tag dropdown, shadow sliders, Measurements box) in `toolbars.toml`.

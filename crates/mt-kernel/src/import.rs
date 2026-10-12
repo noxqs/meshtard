@@ -130,7 +130,6 @@ pub fn from_skp(src: &skp::Model) -> Model {
         model.definitions[maps.definitions[&id]].entities = ents;
     }
     model.root = entities(&src.root, &maps);
-    model.root.guides = guides(&src.root);
     // Model-level dimensions are world space (VFF: including those inside components);
     // legacy files list the root's there too.
     if !src.dimensions.is_empty() {
@@ -145,26 +144,7 @@ pub fn from_skp(src: &skp::Model) -> Model {
     };
     let center = crate::group::bounds(&model.root, &all, &model.definitions)
         .map_or(DVec3::ZERO, |(lo, hi)| (lo + hi) / 2.0);
-    model.root.section_planes = src
-        .root
-        .section_planes
-        .iter()
-        .filter_map(|s| {
-            // a x + b y + c z + d = 0. Active state is not read from the file yet.
-            let n = DVec3::new(s.plane[0], s.plane[1], s.plane[2]);
-            let len = n.length();
-            (len > 1e-12).then(|| {
-                let (n, d) = (n / len, s.plane[3] / len);
-                crate::entities::SectionPlane {
-                    point: center - n * (n.dot(center) + d),
-                    normal: n,
-                    name: s.name.clone(),
-                    hidden: s.hidden,
-                    symbol: s.label.clone(),
-                }
-            })
-        })
-        .collect();
+    model.root.section_planes = section_planes(&src.root.section_planes, center);
     for p in &src.pages {
         let (Some(eye), Some(target)) = (p.eye, p.target) else {
             continue;
@@ -382,7 +362,8 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
         vertices.insert(id, ents.add_vertex(DVec3::new(v.x, v.y, v.z)));
     }
     let mut edges: HashMap<i64, EdgeId> = HashMap::new();
-    // One kernel curve per file curve (arc parameters are not read yet: polyline curves).
+    let layer = |name: &str| maps.layers.get(name).copied().filter(|&l| l != 0);
+    // One kernel curve per file curve; arcs get their arc data below.
     let mut curves: HashMap<i64, crate::entities::CurveId> = HashMap::new();
     for (&id, e) in &d.edges {
         let (Some(&a), Some(&b)) = (vertices.get(&e.v1_id), vertices.get(&e.v2_id)) else {
@@ -395,7 +376,7 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             soft: e.soft,
             smooth: e.smooth,
             hidden: e.hidden,
-            layer: None,
+            layer: layer(&e.layer),
             curve: e.curve_id.map(|c| {
                 *curves.entry(c).or_insert_with(|| {
                     ents.curves.insert(crate::entities::Curve {
@@ -407,7 +388,19 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
         };
         edges.insert(id, ents.add_raw_edge(a, b, attrs));
     }
-    let layer = |name: &str| maps.layers.get(name).copied().filter(|&l| l != 0);
+    if !d.arc_curves.is_empty() {
+        let mut members: HashMap<crate::entities::CurveId, Vec<EdgeId>> = HashMap::new();
+        for (id, e) in &ents.edges {
+            if let Some(c) = e.attrs.curve {
+                members.entry(c).or_default().push(id);
+            }
+        }
+        for (file_curve, &curve) in &curves {
+            if let (Some(a), Some(m)) = (d.arc_curves.get(file_curve), members.get(&curve)) {
+                ents.curves[curve].arc = arc_from_skp(&ents, m, a);
+            }
+        }
+    }
     let material = |id: Option<i64>| id.and_then(|i| maps.materials.get(&i).copied());
     for f in d.faces.values() {
         let loops: Option<Vec<Loop>> = f
@@ -463,7 +456,91 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
     }
     ents.texts = texts(d);
     ents.dimensions = dimensions(&d.dimensions);
+    ents.guides = guides(d);
+    // Drawn around the definition's own geometry (the root's are placed around the
+    // whole model by the caller).
+    let (lo, hi) = ents.vertices.values().fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), v| (lo.min(v.pos), hi.max(v.pos)),
+    );
+    let center = if lo.x <= hi.x {
+        (lo + hi) / 2.0
+    } else {
+        DVec3::ZERO
+    };
+    ents.section_planes = section_planes(&d.section_planes, center);
     ents
+}
+
+/// A file arc as the kernel's, when it is circular and every vertex of its edges lies on
+/// it; `None` keeps the curve a plain curve (scaled arcs are ellipses).
+fn arc_from_skp(
+    ents: &Entities,
+    curve_edges: &[EdgeId],
+    a: &skp::ArcCurve,
+) -> Option<crate::entities::Arc> {
+    let (c, n, x, y) = (
+        DVec3::from(a.center),
+        DVec3::from(a.normal).try_normalize()?,
+        DVec3::from(a.x_axis),
+        DVec3::from(a.y_axis),
+    );
+    let r = x.length();
+    let tol = 1e-6 * r.max(1.0);
+    if r < 1e-9 || (n.cross(x) - y).length() > tol {
+        return None;
+    }
+    let on_circle = curve_edges.iter().all(|&e| {
+        let e = &ents.edges[e];
+        [e.start, e.end].iter().all(|&v| {
+            let d = ents.pos(v) - c;
+            d.dot(n).abs() <= tol && (d.length() - r).abs() <= tol
+        })
+    });
+    if !on_circle || curve_edges.is_empty() {
+        return None;
+    }
+    // A full circle stores equal angles (SketchUp) or 0 and 2 pi (the SDK).
+    let end = if a.end_angle == a.start_angle {
+        a.start_angle + std::f64::consts::TAU
+    } else {
+        a.end_angle
+    };
+    Some(crate::entities::Arc {
+        center: c,
+        normal: n,
+        x_axis: x / r,
+        radius: r,
+        start_angle: a.start_angle,
+        end_angle: end,
+        segments: curve_edges.len(),
+    })
+}
+
+/// Section planes from their stored plane, drawn around `center`. Active state is not
+/// read from the file yet.
+fn section_planes(
+    planes: &[skp::SectionPlane],
+    center: DVec3,
+) -> Vec<crate::entities::SectionPlane> {
+    planes
+        .iter()
+        .filter_map(|s| {
+            // a x + b y + c z + d = 0.
+            let n = DVec3::new(s.plane[0], s.plane[1], s.plane[2]);
+            let len = n.length();
+            (len > 1e-12).then(|| {
+                let (n, d) = (n / len, s.plane[3] / len);
+                crate::entities::SectionPlane {
+                    point: center - n * (n.dot(center) + d),
+                    normal: n,
+                    name: s.name.clone(),
+                    hidden: s.hidden,
+                    symbol: s.label.clone(),
+                }
+            })
+        })
+        .collect()
 }
 
 /// Dimensions with known endpoints. A dimension whose offset direction the reader

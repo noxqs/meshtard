@@ -578,10 +578,13 @@ impl App {
             self.prefs.notice = Some(n);
         }
         let origin = doc.has_file.then(|| doc.path.clone());
-        let result = doc.to_skp().map_err(|e| e.to_string()).and_then(|bytes| {
-            crate::welcome::write_recovery(&path, &bytes, origin.as_deref())
-                .map_err(|e| e.to_string())
-        });
+        let result = doc
+            .to_skp_with_camera(&self.camera)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                crate::welcome::write_recovery(&path, &bytes, origin.as_deref())
+                    .map_err(|e| e.to_string())
+            });
         match result {
             Ok(()) => {
                 log::info!("auto-saved to {}", path.display());

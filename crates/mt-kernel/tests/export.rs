@@ -775,3 +775,155 @@ fn images_round_trip() {
     assert!(r.definitions[nested[0].definition].is_image);
     assert!((nested[0].transform.transform_point3(DVec3::ZERO) - DVec3::X * 30.0).length() < 1e-9);
 }
+
+#[test]
+fn arcs_edge_tags_and_definition_guides_round_trip() {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    let mut m = Model::default();
+    m.layers.push(Layer {
+        name: "Curves".into(),
+        visible: true,
+        ..Layer::default()
+    });
+    // A circle about a tilted axis, an arc swept clockwise (negative sweep) from a
+    // nonzero start angle, and a loose edge on a tag.
+    let circle = mt_kernel::Arc {
+        center: DVec3::new(50.0, 0.0, 10.0),
+        normal: DVec3::new(1.0, 1.0, 1.0).normalize(),
+        x_axis: DVec3::new(1.0, -1.0, 0.0).normalize(),
+        radius: 5.0,
+        start_angle: 0.0,
+        end_angle: TAU,
+        segments: 12,
+    };
+    let mut pts = circle.points();
+    pts.pop();
+    pts.push(pts[0]);
+    add_curve(&mut m.root, &pts, Some(circle));
+    let arc = mt_kernel::Arc {
+        center: DVec3::new(0.0, 100.0, 0.0),
+        normal: DVec3::Z,
+        x_axis: DVec3::X,
+        radius: 20.0,
+        start_angle: FRAC_PI_2,
+        end_angle: -FRAC_PI_2 / 2.0,
+        segments: 6,
+    };
+    let edges = add_curve(&mut m.root, &arc.points(), Some(arc));
+    for e in edges {
+        m.root.edges[e].attrs.layer = Some(1);
+    }
+    let e = add_line(
+        &mut m.root,
+        DVec3::new(0.0, -50.0, 0.0),
+        DVec3::new(10.0, -50.0, 0.0),
+    );
+    for e in e {
+        m.root.edges[e].attrs.layer = Some(1);
+    }
+    // A component holding a guide, a guide point and a section plane.
+    let mut ents = Entities::new();
+    square(&mut ents, DVec3::ZERO, 10.0);
+    ents.guides.push(mt_kernel::Guide {
+        point: DVec3::new(0.0, 5.0, 0.0),
+        dir: Some(DVec3::X),
+    });
+    ents.guides.push(mt_kernel::Guide {
+        point: DVec3::new(5.0, 5.0, 0.0),
+        dir: None,
+    });
+    ents.section_planes.push(mt_kernel::SectionPlane {
+        point: DVec3::new(5.0, 5.0, 0.0),
+        normal: DVec3::X,
+        name: String::new(),
+        hidden: false,
+        symbol: String::new(),
+    });
+    let def = m.definitions.insert(mt_kernel::Definition {
+        name: "Cabinet".into(),
+        entities: ents,
+        ..Default::default()
+    });
+    m.root.instances.push(mt_kernel::Instance {
+        definition: def,
+        transform: DMat4::from_translation(DVec3::new(200.0, 0.0, 0.0)),
+        name: String::new(),
+        hidden: false,
+        locked: false,
+        layer: None,
+        material: None,
+        attrs: Default::default(),
+    });
+
+    let r = round_trip(&m);
+    // Both curves come back as arcs, through the same points.
+    let arcs: Vec<_> = r.root.curves.values().filter_map(|c| c.arc).collect();
+    assert_eq!(arcs.len(), 2, "{:?}", r.root.curves);
+    let c = arcs.iter().find(|a| a.is_circle()).unwrap();
+    assert!((c.center - circle.center).length() < 1e-9);
+    assert!((c.normal - circle.normal).length() < 1e-9);
+    assert!((c.radius - 5.0).abs() < 1e-9 && c.segments == 12);
+    let a = arcs.iter().find(|a| !a.is_circle()).unwrap();
+    assert!((a.radius - 20.0).abs() < 1e-9 && a.segments == 6);
+    assert!((a.end_angle - a.start_angle - 0.75 * std::f64::consts::PI).abs() < 1e-9);
+    // Same point set: the arc's own points match the reopened vertices.
+    for p in a.points() {
+        assert!(
+            r.root
+                .vertices
+                .values()
+                .any(|v| (v.pos - p).length() < 1e-9),
+            "{p}"
+        );
+    }
+    // Edge tags.
+    let tagged = r
+        .root
+        .edges
+        .values()
+        .filter(|e| e.attrs.layer == Some(1))
+        .count();
+    assert_eq!(tagged, 7);
+    assert_eq!(r.layers[1].name, "Curves");
+    // Guides and section planes inside the component; the plane is drawn around it.
+    let d = r
+        .definitions
+        .values()
+        .find(|d| d.name == "Cabinet")
+        .unwrap();
+    assert_eq!(d.entities.guides.len(), 2);
+    assert_eq!(d.entities.section_planes.len(), 1);
+    let s = &d.entities.section_planes[0];
+    assert!((s.normal - DVec3::X).length() < 1e-9);
+    assert!(
+        (s.point - DVec3::new(5.0, 5.0, 0.0)).length() < 1e-9,
+        "{}",
+        s.point
+    );
+}
+
+#[test]
+fn saved_view_round_trip() {
+    let mut m = Model::default();
+    square(&mut m.root, DVec3::ZERO, 10.0);
+    let view = mt_skp::ViewCamera {
+        eye: [120.0, -340.0, 95.0],
+        target: [5.0, 5.0, 0.0],
+        up: [0.0, 0.0, 1.0],
+        fov: 42.0,
+        parallel: false,
+        ortho_height: 250.0,
+    };
+    let bytes = export::to_skp_view(&m, &[], Some(&view)).unwrap();
+    let c = mt_skp::parse(&bytes).unwrap().camera.unwrap();
+    assert_eq!(
+        (c.eye, c.target, c.fov, c.parallel),
+        (view.eye, view.target, 42.0, false)
+    );
+    // Without a view: the writer's Iso camera.
+    let c = mt_skp::parse(&export::to_skp(&m).unwrap())
+        .unwrap()
+        .camera
+        .unwrap();
+    assert!(c.parallel);
+}

@@ -162,6 +162,7 @@ fn materials_layers(b: &mut SkpBuilder, _: &Ctx) -> R {
             hidden: true,
             soft: true,
             smooth: true,
+            layer: None,
         },
         ..Face::new([
             [0.0, 0.0, 0.0],
@@ -848,4 +849,351 @@ fn save_writes_the_file() {
     single_face(&mut b, &Ctx::local()).unwrap();
     b.save(&path).unwrap();
     assert_eq!(mt_skp::read(&path).unwrap().root.faces.len(), 1);
+}
+
+// ── Model data beyond OpenSKP's writer API ───────────────────────────────────────
+
+/// Writes `bytes` under `target/write-oracle/extra` and runs a Python oracle script on
+/// it; `None` without the oracle.
+fn python_json(script: &Path, name: &str, bytes: &[u8]) -> Option<Value> {
+    if !oracle_available() {
+        eprintln!("SKIPPED: python3 with openskp not available (see tools/README.md)");
+        return None;
+    }
+    let dir = repo().join("target/write-oracle/extra");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("{name}.skp"));
+    std::fs::write(&file, bytes).unwrap();
+    let out = Command::new("python3")
+        .arg("-I")
+        .arg(script)
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} failed on {name}: {}",
+        script.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(serde_json::from_slice(&out.stdout).unwrap())
+}
+
+fn oracle_dump(name: &str, bytes: &[u8]) -> Option<Value> {
+    python_json(&repo().join("tools/oracle_dump.py"), name, bytes)
+}
+
+fn oracle_arcs(name: &str, bytes: &[u8]) -> Option<Value> {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/oracle/read_arcs.py");
+    python_json(&script, name, bytes)
+}
+
+#[test]
+fn saved_view_round_trip() {
+    use mt_skp::ViewCamera;
+    let views = [
+        ViewCamera {
+            eye: [325.5, -366.25, 156.0],
+            target: [291.75, -228.5, 129.5],
+            up: [0.0, 0.0, 1.0],
+            fov: 35.0,
+            parallel: false,
+            ortho_height: 120.0,
+        },
+        ViewCamera {
+            eye: [0.0, -500.0, 12.0],
+            target: [0.0, 0.0, 12.0],
+            up: [0.0, 0.0, 1.0],
+            fov: 30.0,
+            parallel: true,
+            ortho_height: 48.5,
+        },
+        // Top view: up along the view direction falls back to +Y.
+        ViewCamera {
+            eye: [10.0, 20.0, 400.0],
+            target: [10.0, 20.0, 0.0],
+            up: [0.0, 0.0, 1.0],
+            fov: 35.0,
+            parallel: true,
+            ortho_height: 300.0,
+        },
+    ];
+    for (i, view) in views.iter().enumerate() {
+        let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
+        b.set_camera(view).unwrap();
+        b.add_face(&Face::new(QUAD)).unwrap();
+        let bytes = b.to_bytes().unwrap();
+        let c = mt_skp::parse(&bytes).unwrap().camera.unwrap();
+        assert_eq!((c.eye, c.target), (view.eye, view.target), "view {i}");
+        assert_eq!(
+            (c.fov, c.parallel, c.ortho_height),
+            (view.fov, view.parallel, view.ortho_height)
+        );
+        let d = [0, 1, 2].map(|k| view.target[k] - view.eye[k]);
+        let dot = d[0] * c.up[0] + d[1] * c.up[1] + d[2] * c.up[2];
+        let len = (c.up[0] * c.up[0] + c.up[1] * c.up[1] + c.up[2] * c.up[2]).sqrt();
+        assert!(
+            dot.abs() < 1e-9 && (len - 1.0).abs() < 1e-12,
+            "view {i}: up {:?}",
+            c.up
+        );
+        if i == 0 {
+            // SketchUp's up for this view: Z made perpendicular to the direction.
+            assert!(c.up[2] > 0.9);
+        }
+        if i == 2 {
+            assert_eq!(c.up, [0.0, 1.0, 0.0]);
+        }
+        // Nothing else changes: OpenSKP still reads the same model.
+        if let Some(theirs) = oracle_dump(&format!("view{i}"), &bytes) {
+            let ours = counts(&mt_skp::dump::to_json(&mt_skp::parse(&bytes).unwrap()));
+            assert_eq!(ours, counts(&theirs));
+        }
+    }
+    // Without a view the file keeps OpenSKP's Iso camera; an empty document takes one too.
+    let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
+    b.add_face(&Face::new(QUAD)).unwrap();
+    let iso = mt_skp::parse(&b.to_bytes().unwrap())
+        .unwrap()
+        .camera
+        .unwrap();
+    assert_eq!((iso.eye, iso.parallel), ([100.0, -100.0, 100.0], true));
+    let mut b = SkpBuilder::new();
+    b.set_camera(&views[1]).unwrap();
+    let c = mt_skp::parse(&b.to_empty_document().unwrap())
+        .unwrap()
+        .camera
+        .unwrap();
+    assert_eq!((c.eye, c.ortho_height), (views[1].eye, 48.5));
+    let degenerate = ViewCamera {
+        target: views[1].eye,
+        ..views[1].clone()
+    };
+    assert!(b.set_camera(&degenerate).is_err());
+}
+
+#[test]
+fn arc_curves_round_trip() {
+    use mt_skp::ArcCurve;
+    let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
+    let tag = b.add_layer("Curves", None, true).unwrap();
+    // OpenSKP's calls: a tilted circle and an arc about +Y.
+    b.add_circle(&Circle::new([0.0, 0.0, 50.0], [1.0, 1.0, 1.0], 10.0).segments(8))
+        .unwrap();
+    b.add_arc(&Arc::new([100.0, 0.0, 0.0], [0.0, 1.0, 0.0], 25.0, 0.0, PI / 3.0).segments(7))
+        .unwrap();
+    // A polyline through given points carrying an arc frame (how the kernel saves its
+    // arcs), on a tag.
+    let frame = ArcCurve {
+        center: [0.0, 0.0, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        x_axis: [0.0, 20.0, 0.0],
+        y_axis: [-20.0, 0.0, 0.0],
+        start_angle: 0.0,
+        end_angle: PI,
+        segments: 4,
+    };
+    let pts: Vec<[f64; 3]> = (0..=4)
+        .map(|i| {
+            let t = PI * f64::from(i) / 4.0;
+            [-20.0 * t.sin(), 20.0 * t.cos(), 0.0]
+        })
+        .collect();
+    b.add_polyline(&Polyline {
+        arc: Some(frame),
+        edges: EdgeFlags {
+            layer: Some(tag),
+            ..EdgeFlags::default()
+        },
+        ..Polyline::new(pts.clone())
+    })
+    .unwrap();
+    let bytes = b.to_bytes().unwrap();
+    let m = mt_skp::parse(&bytes).unwrap();
+    let arcs = &m.root.arc_curves;
+    assert_eq!(arcs.len(), 3);
+    // Every arc's y axis is normal x x axis now, also off +Z.
+    for a in arcs.values() {
+        let (n, x, y) = (a.normal, a.x_axis, a.y_axis);
+        let c = [
+            n[1] * x[2] - n[2] * x[1],
+            n[2] * x[0] - n[0] * x[2],
+            n[0] * x[1] - n[1] * x[0],
+        ];
+        assert!((0..3).all(|i| (c[i] - y[i]).abs() < 1e-12), "{a:?}");
+    }
+    let (&id, mine) = arcs.iter().find(|(_, a)| a.end_angle == PI).unwrap();
+    assert_eq!(*mine, frame);
+    // The polyline's edges keep their own points and tag and point at the arc.
+    let edges: Vec<_> = m
+        .root
+        .edges
+        .values()
+        .filter(|e| e.curve_id == Some(id))
+        .collect();
+    assert_eq!(edges.len(), 4);
+    assert!(edges.iter().all(|e| e.layer == "Curves"));
+    let on_arc = m
+        .root
+        .vertices
+        .values()
+        .filter(|v| pts.contains(&[v.x, v.y, v.z]))
+        .count();
+    assert_eq!(on_arc, 5);
+    // More than 255 segments do not fit the record.
+    let many: Vec<[f64; 3]> = (0..300).map(|i| [f64::from(i), 0.0, 0.0]).collect();
+    let mut b = SkpBuilder::new();
+    let too_many = Polyline {
+        arc: Some(frame),
+        ..Polyline::new(many)
+    };
+    assert!(b.add_polyline(&too_many).is_err());
+
+    // OpenSKP decodes the same frames under the same curve ids.
+    let Some(theirs) = oracle_arcs("arcs", &bytes) else {
+        return;
+    };
+    let theirs = theirs.as_object().unwrap();
+    assert_eq!(theirs.len(), arcs.len());
+    for (id, a) in arcs {
+        let t = &theirs[&id.to_string()];
+        let v3 = |k: &str| -> [f64; 3] {
+            let a = t[k].as_array().unwrap();
+            [0, 1, 2].map(|i| a[i].as_f64().unwrap())
+        };
+        assert_eq!(v3("center"), a.center);
+        assert_eq!(v3("normal"), a.normal);
+        assert_eq!(v3("x_axis"), a.x_axis);
+        assert_eq!(v3("y_axis"), a.y_axis);
+        assert_eq!(t["start_angle"].as_f64(), Some(a.start_angle));
+        assert_eq!(t["end_angle"].as_f64(), Some(a.end_angle));
+    }
+}
+
+#[test]
+fn edge_tags_round_trip() {
+    let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
+    let walls = b.add_layer("Walls", None, true).unwrap();
+    let flags = EdgeFlags {
+        layer: Some(walls),
+        ..EdgeFlags::default()
+    };
+    let mut d = b.add_component_definition("Frame", None).unwrap();
+    d.add_edge([0.0; 3], [10.0, 0.0, 0.0], flags).unwrap();
+    let frame = d.finish().unwrap();
+    b.add_edge([0.0; 3], [0.0, 10.0, 0.0], flags).unwrap();
+    b.add_edge([0.0; 3], [0.0, 0.0, 10.0], EdgeFlags::default())
+        .unwrap();
+    b.add_polyline(&Polyline {
+        edges: flags,
+        ..Polyline::new([[50.0, 0.0, 0.0], [60.0, 0.0, 0.0], [60.0, 10.0, 0.0]])
+    })
+    .unwrap();
+    // A face on the tag, to read OpenSKP's id for it.
+    let face = Face::new([[0.0, 0.0, 50.0], [9.0, 0.0, 50.0], [0.0, 9.0, 50.0]]).layer(walls);
+    b.add_face(&face).unwrap();
+    b.add_instance(&frame, &Placement::at([0.0, 0.0, 100.0]))
+        .unwrap();
+    let bytes = b.to_bytes().unwrap();
+    let m = mt_skp::parse(&bytes).unwrap();
+    let tagged = |d: &mt_skp::Definition| {
+        let mut v: Vec<_> = d.edges.values().map(|e| e.layer.clone()).collect();
+        v.sort_unstable();
+        v
+    };
+    // The face's three new edges carry no tag (as before).
+    assert_eq!(tagged(&m.root), ["", "", "", "", "Walls", "Walls", "Walls"]);
+    assert_eq!(tagged(m.definitions.values().next().unwrap()), ["Walls"]);
+    // A foreign layer handle is refused.
+    let other = SkpBuilder::new().add_layer("X", None, true).unwrap();
+    let mut b2 = SkpBuilder::new();
+    let bad = EdgeFlags {
+        layer: Some(other),
+        ..EdgeFlags::default()
+    };
+    assert!(b2.add_edge([0.0; 3], [1.0, 0.0, 0.0], bad).is_err());
+
+    // OpenSKP gives the edges the same layer id as the face on that layer.
+    let Some(j) = oracle_dump("edge_tags", &bytes) else {
+        return;
+    };
+    let face_layer = j["root"]["faces"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()["layer"]
+        .as_i64()
+        .unwrap();
+    assert_ne!(face_layer, 0);
+    let mut layers: Vec<_> = j["root"]["edges"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|e| e["layer"].as_i64())
+        .collect();
+    layers.sort_unstable();
+    let w = Some(face_layer);
+    assert_eq!(layers, [None, None, None, None, w, w, w]);
+    let def = j["definitions"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    let def_layers: Vec<_> = def["edges"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|e| e["layer"].as_i64())
+        .collect();
+    assert_eq!(def_layers, [w]);
+}
+
+#[test]
+fn guides_and_section_planes_in_definitions() {
+    let mut b = SkpBuilder::deterministic(SEED, TIMESTAMP);
+    let mut d = b.add_component_definition("Cabinet", None).unwrap();
+    d.add_face(&Face::new(QUAD)).unwrap();
+    d.add_construction_line(GuideLine::Infinite {
+        point: [0.0, 25.0, 0.0],
+        direction: [1.0, 0.0, 0.0],
+    })
+    .unwrap();
+    d.add_construction_line(GuideLine::Segment {
+        start: [0.0, 0.0, 0.0],
+        end: [0.0, 0.0, 30.0],
+    })
+    .unwrap();
+    d.add_construction_point([5.0, 5.0, 5.0]).unwrap();
+    d.add_section_plane([50.0, 0.0, 0.0], [-2.0, 0.0, 0.0])
+        .unwrap();
+    let cab = d.finish().unwrap();
+    b.add_instance(&cab, &Placement::at([0.0; 3])).unwrap();
+    b.add_section_plane([0.0, 0.0, 10.0], [0.0, 0.0, 1.0])
+        .unwrap();
+    let bytes = b.to_bytes().unwrap();
+    let m = mt_skp::parse(&bytes).unwrap();
+    let def = m.definitions.values().next().unwrap();
+    assert_eq!(def.construction_lines.len(), 2);
+    assert_eq!(def.construction_points.len(), 1);
+    assert_eq!(def.section_planes.len(), 1);
+    assert_eq!(def.section_planes[0].plane, [-1.0, 0.0, 0.0, 50.0]);
+    assert_eq!(m.root.section_planes.len(), 1);
+    let Some(j) = oracle_dump("def_guides", &bytes) else {
+        return;
+    };
+    let ours = mt_skp::dump::to_json(&m);
+    let key = def.id.to_string();
+    for k in [
+        "construction_lines",
+        "construction_points",
+        "section_planes",
+    ] {
+        assert_eq!(
+            ours["definitions"][&key][k], j["definitions"][&key][k],
+            "{k}"
+        );
+    }
+    assert_eq!(counts(&ours), counts(&j));
 }

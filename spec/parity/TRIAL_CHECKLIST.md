@@ -31,6 +31,9 @@ meshtard cannot save these yet because where the SketchUp 2017 format keeps them
 - [ ] Lock: `lock_on.skp` (the group locked).
 - [ ] Two-point: `two_point.skp` (Camera > Two-Point Perspective).
 - [ ] Section planes: `section_active.skp` (a section plane on the box's top face, active) and `section_inactive.skp` (the same plane, not active); `section_moved.skp` (the plane's graphic moved within its plane with Move, if SketchUp allows it).
+- [ ] Shadows: `shadows_on.skp` (Shadows on, nothing else) and `shadows_time.skp` (on, 3 July 09:15, Light 60, Dark 30, On Ground off). Finds the shadow block's on/off byte and time encoding.
+- [ ] Polygon: `polygon.skp` (Polygon tool, 6 sides) next to `circle6.skp` (Circle tool, 6 segments). Finds the polygon mark (`CArcCurve` byte 0 is the candidate).
+- [ ] Saved view (meshtard now writes it; to confirm): open a meshtard-saved file in Perspective and one in Parallel Projection and check SketchUp opens at the same view.
 - [ ] Image: `image.skp` (File > Import a PNG as Image). Confirms OpenSKP's uncalibrated `CImage` schema.
 - [ ] Open a meshtard-saved file with non-default style settings and units (Hidden Line, profiles off, X-ray, Model Info > Units in cm) and check that SketchUp shows them (style records vs. the model's own rendering options).
 
