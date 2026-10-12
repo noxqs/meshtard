@@ -181,7 +181,9 @@ pub(crate) fn pack(dir: &Path) -> Result<Vec<u8>, String> {
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
+        .unix_permissions(0o644)
+        // The host OS byte would differ on Windows and change the checksum.
+        .system(zip::System::Unix);
     for (name, data) in &pkg.files {
         zip.start_file(name.as_str(), opts)
             .map_err(|e| e.to_string())?;
