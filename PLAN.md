@@ -132,7 +132,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] CPU BVH for picking.
 - [ ] CUDA triangulation and BVH build: to be done on the user's Linux machine with an NVIDIA GPU (Remote Control session).
 - [x] Dockable toolbars: drag by the grip to any edge or float; View > Toolbars... and right-click show or hide them; the layout is saved between runs.
-- [ ] Not yet: Environments and Instructor panels.
+- [x] Environments and Instructor panels (M18).
 
 ### M4: Inference engine
 - [x] `mt-infer`: endpoint, midpoint, origin, on edge, on axis, on face.
@@ -140,7 +140,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] Typed lengths in the Measurements box (mm, cm, m, ", ', feet and inches; model units by default).
 - [x] Line tool (brought forward from M5 to exercise inference): chained segments, ends when a face closes, Esc cancels.
 - [x] Center and intersection inferences, 1 s hover delay before acquiring points, square / golden section / half circle / tangent hints.
-- [ ] Not yet: inference on component geometry while editing inside it.
+- [x] Inference on component geometry while editing inside it (FEATURES 49).
 
 ### M5: Drawing tools
 - [x] Line, Freehand, Rectangle, Rotated Rectangle, Circle, Polygon, Arc (center), 2 Point Arc, 3 Point Arc, Pie, Eraser.
