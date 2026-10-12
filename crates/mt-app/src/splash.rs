@@ -15,6 +15,8 @@ use crate::App;
 use crate::document::Document;
 
 pub(crate) const IMAGE: &[u8] = include_bytes!("../assets/splash.png");
+/// Taglines, one per line (`#` lines are comments); one is shown per start.
+const TAGLINES: &str = include_str!("../assets/taglines.txt");
 /// Shortest time the splash stays up (unverified; long enough to be seen).
 const MIN_SECS: f32 = 1.2;
 const FADE_SECS: f32 = 0.35;
@@ -25,6 +27,7 @@ pub struct Splash {
     /// When start-up finished and the fade began.
     fading_since: Option<Instant>,
     done: bool,
+    tagline: &'static str,
 }
 
 /// A model opening on a background thread.
@@ -56,6 +59,7 @@ impl Splash {
             texture: None,
             fading_since: None,
             done: false,
+            tagline: pick_tagline(),
         }
     }
 
@@ -70,6 +74,23 @@ impl Splash {
         }
         self.texture.as_ref()
     }
+}
+
+fn taglines() -> Vec<&'static str> {
+    TAGLINES
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// A tagline picked from the clock: different from one start to the next.
+fn pick_tagline() -> &'static str {
+    let lines = taglines();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as usize ^ d.as_secs() as usize);
+    lines.get(nanos % lines.len().max(1)).copied().unwrap_or("")
 }
 
 impl App {
@@ -151,6 +172,13 @@ impl App {
                     egui::Color32::from_white_alpha(a),
                 );
                 ui.painter().text(
+                    egui::pos2(rect.center().x, rect.bottom() - 36.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("Meshtard - {}", self.splash.tagline),
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgba_unmultiplied(70, 70, 70, a),
+                );
+                ui.painter().text(
                     egui::pos2(rect.center().x, rect.bottom() - 16.0),
                     egui::Align2::CENTER_BOTTOM,
                     status,
@@ -166,5 +194,15 @@ impl App {
                 );
             });
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn taglines_are_listed() {
+        let lines = super::taglines();
+        assert!(lines.len() >= 2);
+        assert!(lines.iter().all(|l| !l.starts_with("Meshtard")));
     }
 }
