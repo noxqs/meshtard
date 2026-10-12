@@ -52,6 +52,11 @@ pub const SOFTEN_ANGLE_DEG: f64 = 20.0;
 /// on other faces. The app replaces it with the image's aspect ratio.
 pub const TEXTURE_TILE: f64 = INCHES_PER_METER;
 
+/// Application-specific vertex attribute (glTF allows names starting with `_`) holding
+/// what f32 `POSITION` rounded off: `POSITION + _POSITION_LO` is the position to about
+/// f64 precision. Other readers ignore it.
+pub const POSITION_LO: &str = "_POSITION_LO";
+
 /// glTF space (meters, Y up) to model space (inches, Z up).
 pub fn gltf_to_model() -> DMat4 {
     let k = INCHES_PER_METER;
@@ -303,6 +308,24 @@ pub fn import(
             mesh.positions
                 .extend(positions.map(|p| DVec3::from_array(p.map(f64::from))));
             let count = mesh.positions.len() - first;
+            // Our own exports carry the f32 rounding of each position.
+            let lo = prim
+                .get(&gltf::Semantic::Extras(POSITION_LO[1..].to_owned()))
+                .filter(|a| {
+                    a.count() == count
+                        && a.data_type() == gltf::accessor::DataType::F32
+                        && a.dimensions() == gltf::accessor::Dimensions::Vec3
+                })
+                .and_then(|a| {
+                    gltf::accessor::Iter::<[f32; 3]>::new(a, |b: gltf::Buffer| {
+                        buffers.get(b.index()).map(Vec::as_slice)
+                    })
+                });
+            if let Some(lo) = lo {
+                for (p, d) in mesh.positions[first..].iter_mut().zip(lo) {
+                    *p += DVec3::from_array(d.map(f64::from));
+                }
+            }
             let material = prim.material().index();
             let set = material.and_then(|m| tex_sets.get(m).copied()).unwrap_or(0);
             let uvs: Vec<DVec2> = reader
@@ -694,22 +717,27 @@ pub fn to_gltf(model: &Model, opts: &GltfOptions) -> Vec<u8> {
             }
             let textured =
                 ex.mats.list[slot].texture.is_some() && group.iter().all(|x| x.uv.is_some());
-            let (mut pos, mut nrm, mut uv, mut idx) =
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            let mut weld: HashMap<[u32; 8], u32> = HashMap::new();
+            let (mut pos, mut lo, mut nrm, mut uv, mut idx) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            // Welded on the full-precision position (and the f32 normal and UV).
+            let mut weld: HashMap<([u64; 3], [u32; 5]), u32> = HashMap::new();
             for side in &group {
                 let n = s.transform_vector3(side.normal).normalize_or_zero();
                 for k in 0..3 {
                     let p = s.transform_point3(side.points[k]);
                     let t = side.uv.map_or(DVec2::ZERO, |u| u[k]);
                     let t = DVec2::new(t.x, 1.0 - t.y);
-                    let vals = [p.x, p.y, p.z, n.x, n.y, n.z, t.x, t.y].map(|v| v as f32);
-                    let key = vals.map(f32::to_bits);
+                    let hi = p.to_array().map(|v| v as f32);
+                    let rest = [n.x, n.y, n.z, t.x, t.y].map(|v| v as f32);
+                    let key = (p.to_array().map(f64::to_bits), rest.map(f32::to_bits));
                     let next = weld.len() as u32;
                     let i = *weld.entry(key).or_insert_with(|| {
-                        pos.extend_from_slice(&vals[0..3]);
-                        nrm.extend_from_slice(&vals[3..6]);
-                        uv.extend_from_slice(&vals[6..8]);
+                        pos.extend_from_slice(&hi);
+                        for (x, h) in p.to_array().into_iter().zip(hi) {
+                            lo.push((x - f64::from(h)) as f32);
+                        }
+                        nrm.extend_from_slice(&rest[0..3]);
+                        uv.extend_from_slice(&rest[3..5]);
                         next
                     });
                     idx.push(i);
@@ -718,6 +746,12 @@ pub fn to_gltf(model: &Model, opts: &GltfOptions) -> Vec<u8> {
             let pa = b.floats(&pos, "VEC3", 3, true);
             let na = b.floats(&nrm, "VEC3", 3, false);
             let mut attrs = format!("\"POSITION\":{pa},\"NORMAL\":{na}");
+            // f32 positions are about 0.005" coarse a kilometer out, coarser than the
+            // kernel's tolerance: the rounding left is written as its own attribute.
+            if lo.iter().any(|&x| x != 0.0) {
+                let la = b.floats(&lo, "VEC3", 3, false);
+                let _ = write!(attrs, ",\"{POSITION_LO}\":{la}");
+            }
             if textured {
                 let ta = b.floats(&uv, "VEC2", 2, false);
                 let _ = write!(attrs, ",\"TEXCOORD_0\":{ta}");
@@ -974,6 +1008,31 @@ mod tests {
     #[test]
     fn gltf_json_round_trip() {
         check_round_trip(false);
+    }
+
+    #[test]
+    fn positions_far_out_round_trip_to_f64_precision() {
+        // A mile out, f32 is about 0.004" coarse: more than the kernel's tolerance.
+        let mut m = Model::default();
+        let o = DVec3::new(63_360.123_456_7, -41_000.987_654_3, 1_234.567_891);
+        let p =
+            [(0., 0.), (3.3, 0.), (3.3, 0.7), (0., 0.7)].map(|(x, y)| o + DVec3::new(x, y, 0.0));
+        for i in 0..4 {
+            crate::add_line(&mut m.root, p[i], p[(i + 1) % 4]);
+        }
+        let opts = GltfOptions {
+            binary: true,
+            two_sided: false,
+        };
+        let back = import(&to_gltf(&m, &opts), &|_| None, true).unwrap();
+        let i = &back.root.instances[0];
+        let ents = &back.definitions[i.definition].entities;
+        assert_eq!(ents.faces.len(), 1);
+        for v in ents.vertices.values() {
+            let w = i.transform.transform_point3(v.pos);
+            let d = p.iter().map(|q| q.distance(w)).fold(f64::MAX, f64::min);
+            assert!(d < 1e-9, "{w} is {d} off");
+        }
     }
 
     #[test]

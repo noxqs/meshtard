@@ -287,11 +287,12 @@ fn sliver_split_in_two_planes() {
     run(&ops).unwrap();
 }
 
-/// Still failing (about one sequence in 140,000 with PROPTEST_CASES=20000 runs): the
-/// last Move rebuilds an edge ending a few thousandths of an inch from an edge it
-/// then grazes within TOL/2. Kept out of the regressions file so the suite stays green.
+/// Also from a long run (about one sequence in 140,000): the last Move rebuilds a steep
+/// edge ending 1.06 TOL from an edge it passes over within TOL/2 just before its end.
+/// The crossing lay within TOL of the line's end along the line, so it was not split,
+/// and the end vertex was too far to snap onto the edge (now the crossing splits both
+/// when the crossed edge passes more than TOL from the line's ends).
 #[test]
-#[ignore = "known tolerance case left by FEATURES 71"]
 fn move_leaves_an_edge_grazing_another() {
     use Op::*;
     let ops = vec![

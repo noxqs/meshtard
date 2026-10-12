@@ -9,6 +9,12 @@
 //! whose area, bounding box, material or texture count differs is marked `DIFF`
 //! (merged face counts may differ: triangles of slightly non-planar polygons do not
 //! merge back).
+//!
+//! The model is also written as `.glb` and `.gltf` and read back: their area must match
+//! the import's within 1e-6 (relative), else marked `DIFF` (zero-area triangles may drop
+//! out). Each import is also checked as kernel geometry (`valid` / `INVALID`, or
+//! `unchecked` for large models): area lost on export comes from faces of invalid
+//! imports, whatever the format.
 
 use std::path::{Path, PathBuf};
 
@@ -164,7 +170,18 @@ fn main() {
                 continue;
             }
         };
-        println!("   {}", line("import", &s0));
+        // Valid kernel geometry (checked when small: validation is quadratic).
+        let valid = (model.root.edges.len() <= 20_000)
+            .then(|| mt_kernel::validate(&model.root, mt_kernel::Checks::ALL).is_empty());
+        println!(
+            "   {} {}",
+            line("import", &s0),
+            match valid {
+                Some(true) => "valid",
+                Some(false) => "INVALID",
+                None => "unchecked",
+            }
+        );
         let stem = src.file_stem().unwrap().to_string_lossy().into_owned();
         let dir = out.join(format!(
             "{stem}_{}",
@@ -230,6 +247,37 @@ fn main() {
                 ExportKind::Fbx | ExportKind::Ply | ExportKind::ThreeMf
             ) {
                 back.push((kind.extension(), p));
+            }
+        }
+        for binary in [true, false] {
+            let label = if binary { "<- glb" } else { "<- gltf" };
+            let bytes = mt_kernel::gltf_io::to_gltf(
+                &model,
+                &mt_kernel::gltf_io::GltfOptions {
+                    binary,
+                    two_sided: false,
+                },
+            );
+            let ext = if binary { "glb" } else { "gltf" };
+            write(&dir, &format!("{stem}.{ext}"), &bytes, &[]);
+            match mt_kernel::gltf_io::import(&bytes, &|_: &str| None, true) {
+                Ok(m) => {
+                    let s = summary(&m, 0);
+                    let ok = (s.area - s0.area).abs() <= 1e-6 * s0.area.max(1e-9);
+                    if !ok {
+                        diffs += 1;
+                    }
+                    println!(
+                        "   {} area rel {:+.1e} {}",
+                        line(label, &s),
+                        (s.area - s0.area) / s0.area.max(1e-9),
+                        if ok { "" } else { "DIFF" }
+                    );
+                }
+                Err(e) => {
+                    diffs += 1;
+                    println!("   {label} failed: {e}");
+                }
             }
         }
         for (label, p) in back {

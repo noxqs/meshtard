@@ -15,7 +15,7 @@ use eframe::egui;
 use egui_wgpu::wgpu;
 use glam::{DVec2, DVec3};
 use mt_infer::Inference;
-use mt_infer::units::LengthUnit;
+use mt_infer::units::{LengthUnit, parse_length};
 use mt_kernel::{EdgeId, Entities, FaceId};
 use mt_spec::MenuItem;
 
@@ -885,8 +885,8 @@ impl App {
 }
 
 /// Divide: the division points follow the cursor along the edge (closer to an end:
-/// more segments, the middle: two), a click divides; or type the count. Escape leaves
-/// it. SketchUp also takes a typed segment length (not done).
+/// more segments, the middle: two), a click divides; or type the count (`5` or `5s`)
+/// or a segment length (`2.5`, `30cm`: the count that comes closest). Escape leaves it.
 pub(crate) struct Divide {
     edge: EdgeId,
     count: usize,
@@ -932,7 +932,8 @@ pub(crate) fn count_at(t: f64, closed: bool) -> usize {
 
 impl ModifyTool for Divide {
     fn status(&self) -> String {
-        "Move along the edge to set the number of segments, click to divide, or type a number."
+        "Move along the edge to set the number of segments, click to divide, or type a \
+         number of segments or a segment length."
             .to_owned()
     }
 
@@ -954,16 +955,11 @@ impl ModifyTool for Divide {
         ctx: &mut Ctx,
         _cur: Option<&Inference>,
         text: &str,
-        _units: LengthUnit,
+        units: LengthUnit,
     ) -> bool {
-        match text
-            .trim()
-            .trim_end_matches(['s', 'S'])
-            .trim()
-            .parse::<usize>()
-        {
-            Ok(n) if n >= 2 => self.apply(ctx.ents, n),
-            _ => false,
+        match typed_count(ctx.ents, self.edge, text, units) {
+            Some(n) => self.apply(ctx.ents, n),
+            None => false,
         }
     }
 
@@ -1041,6 +1037,17 @@ impl ModifyTool for Divide {
     }
 }
 
+/// The segment count typed into Divide on edge `e`: a whole number (optionally
+/// followed by `s`) is a count of two or more; anything else that reads as a length is
+/// a segment length, giving the count that comes closest to it.
+fn typed_count(ents: &Entities, e: EdgeId, text: &str, units: LengthUnit) -> Option<usize> {
+    let text = text.trim();
+    if let Ok(n) = text.trim_end_matches(['s', 'S']).trim().parse::<usize>() {
+        return (n >= 2).then_some(n);
+    }
+    mt_kernel::curves::count_for_length(ents, e, parse_length(text, units)?)
+}
+
 /// The points along `e`'s divide target as it is now (its chain's vertices).
 fn curve_points(ents: &Entities, e: EdgeId) -> Option<Vec<DVec3>> {
     let edges = match ents.edges.get(e)?.attrs.curve {
@@ -1106,6 +1113,25 @@ mod tests {
         assert_eq!(count_at(0.1, false), 5);
         assert_eq!(count_at(0.9, false), 5);
         assert_eq!(count_at(0.0, false), CURSOR_MAX);
+    }
+
+    #[test]
+    fn divide_takes_a_count_or_a_segment_length() {
+        let e = model();
+        // The loose edge is 10" long.
+        let loose = e
+            .edges
+            .keys()
+            .find(|&x| e.pos(e.edges[x].start).x == 50.0)
+            .unwrap();
+        let inch = LengthUnit::Inch;
+        assert_eq!(typed_count(&e, loose, "4", inch), Some(4));
+        assert_eq!(typed_count(&e, loose, "4s", inch), Some(4));
+        assert_eq!(typed_count(&e, loose, "1", inch), None);
+        assert_eq!(typed_count(&e, loose, "2.5", inch), Some(4));
+        assert_eq!(typed_count(&e, loose, "3\"", inch), Some(3));
+        assert_eq!(typed_count(&e, loose, "1'", inch), Some(2));
+        assert_eq!(typed_count(&e, loose, "abc", inch), None);
     }
 
     #[test]

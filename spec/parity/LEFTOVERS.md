@@ -4,10 +4,10 @@ Sub-items noted as "Left" under finished items, ranked by usefulness. Work down 
 
 ## High
 1. [ ] Save the model-only data in the .skp (with the trial's sample files, see 39): scenes, model axes, locks, two-point, fog, snaps, advanced attributes and license, shadow flags, polygon flags, leader and dimension styles, environments, tag folders and dashes, extra styles. L [39]
-2. [ ] Rare kernel failure: after a vertex move an edge can graze another within TOL/2 (`move_leaves_an_edge_grazing_another`, ignored test). M [71]
-3. [ ] glTF round trip drops tiny triangles (11 of 59 test files, up to 0.02% area): keep float64 positions on export or weld more carefully on import. S [64]
-4. [ ] Divide: typed segment length; Divide on free-form (welded / Freehand) curves. S [51]
-5. [ ] Inference: Arc Side and Center and Circle/Polygon Center hints, Intersection with Hidden Section, Shift plane lock for Rotated Rectangle and 3 Point Arc. S [70]
+2. [x] Rare kernel failure: after a vertex move an edge can graze another within TOL/2 (`move_leaves_an_edge_grazing_another`, ignored test). M [71] Done: `ops::chain_between` splits a crossing near the line's end when the crossed edge passes more than TOL from that end; the test runs again, plus a second seed from a long run; 24 x 20,000 sequences pass.
+3. [x] glTF round trip drops tiny triangles (11 of 59 test files, up to 0.02% area): keep float64 positions on export or weld more carefully on import. S [64] Done: export writes a `_POSITION_LO` attribute (the f32 rounding) that import adds back, so every exact difference is gone. What is left is not glTF: those files import with invalid faces (crossing edges, two-edge hole loops, `formats_check` now prints `INVALID`), whose triangulation drops area in every export format alike; triangle counts also differ by zero-area triangles. Better welding, sliver faces and T-junction splitting on mesh import were tried and made the other formats worse (38 to 48+ differences), so mesh import healing is its own task.
+4. [x] Divide: typed segment length; Divide on free-form (welded / Freehand) curves. S [51] Done (`curves::count_for_length`, `divide_length`; Divide tool reads lengths).
+5. [ ] Inference: Arc Side and Center and Circle/Polygon Center hints, Intersection with Hidden Section, Shift plane lock for Rotated Rectangle and 3 Point Arc. S [70] Done: Shift plane lock for Rotated Rectangle and 3 Point Arc; polygons are flagged arc curves, so their center is inferred. Left: Arc Side and Center, Intersection with Hidden Section (what they show is not in our help text: trial).
 6. [ ] Components: Cut Opening applied to the glued face, Always Face Camera drawn, Shadows Face Sun used. M [60]
 
 ## Medium

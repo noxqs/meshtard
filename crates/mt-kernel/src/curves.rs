@@ -3,7 +3,9 @@
 //! Drafts from memory of SketchUp (`spec/parity/STATUS.md`):
 //! - Divide splits a straight edge into `n` equal edges. On an arc or circle it
 //!   re-segments the curve into `n` equal segments and it stays one arc curve
-//!   (unverified). Free-form curves (Freehand, welded edges) are not divided here.
+//!   (unverified). A free-form curve (Freehand, welded edges) is re-segmented into `n`
+//!   chords whose ends are equally spaced along it, and stays one curve (unverified).
+//!   A typed segment length gives the count that comes closest to it.
 //! - Weld Edges joins connected edges into one free-form curve; a chain that branches
 //!   is not welded (unverified: SketchUp may weld the longest chain).
 //! - Explode Curve turns a curve's segments into separate edges.
@@ -73,20 +75,20 @@ pub fn chain_of(ents: &Entities, edges: &[EdgeId]) -> Option<(Vec<EdgeId>, Vec<V
 /// A divide target: its edges and, for an arc, the curve and its arc.
 type Target = (Vec<EdgeId>, Option<(CurveId, Arc)>);
 
-/// What Divide works on for edge `e`: its arc curve's edges, or `e` alone when it is
-/// straight. `None` for an edge of a free-form curve.
+/// What Divide works on for edge `e`: its curve's edges (with the arc for an arc
+/// curve), or `e` alone when it is not on a curve.
 fn divide_target(ents: &Entities, e: EdgeId) -> Option<Target> {
     let edge = ents.edges.get(e)?;
     match edge.attrs.curve {
         None => Some((vec![e], None)),
         Some(c) => {
-            let arc = ents.curves.get(c)?.arc?;
-            Some((ents.curve_edges(c), Some((c, arc))))
+            let arc = ents.curves.get(c)?.arc;
+            Some((ents.curve_edges(c), arc.map(|arc| (c, arc))))
         }
     }
 }
 
-/// Whether Divide can split edge `e` (a straight edge or an arc's segment).
+/// Whether Divide can split edge `e` (a straight edge or a curve's segment).
 pub fn can_divide(ents: &Entities, e: EdgeId) -> bool {
     divide_target(ents, e).is_some_and(|(edges, _)| chain_of(ents, &edges).is_some())
 }
@@ -102,7 +104,29 @@ pub fn divide_points(ents: &Entities, e: EdgeId, n: usize) -> Option<Vec<DVec3>>
     let a = ents.pos(verts[0]);
     let b = ents.pos(*verts.last()?);
     Some(match arc {
-        None => (0..=n).map(|i| a.lerp(b, i as f64 / n as f64)).collect(),
+        None => {
+            // Equally spaced along the chain (one straight edge: along the edge).
+            let pts: Vec<DVec3> = verts.iter().map(|&v| ents.pos(v)).collect();
+            let lens: Vec<f64> = pts.windows(2).map(|w| w[0].distance(w[1])).collect();
+            let total: f64 = lens.iter().sum();
+            let mut out = vec![a];
+            let (mut k, mut start) = (0, 0.0); // Segment k begins `start` along.
+            for i in 1..n {
+                let at = total * i as f64 / n as f64;
+                while k + 1 < lens.len() && start + lens[k] < at {
+                    start += lens[k];
+                    k += 1;
+                }
+                let t = if lens[k] > 0.0 {
+                    (at - start) / lens[k]
+                } else {
+                    0.0
+                };
+                out.push(pts[k].lerp(pts[k + 1], t.clamp(0.0, 1.0)));
+            }
+            out.push(b);
+            out
+        }
         Some((_, arc)) => {
             let mut pts = Arc { segments: n, ..arc }.points();
             // The chain may run from the arc's end to its start.
@@ -130,7 +154,36 @@ pub fn divide_points(ents: &Entities, e: EdgeId, n: usize) -> Option<Vec<DVec3>>
     })
 }
 
-/// Divide: splits edge `e` (or its arc) into `n` equal pieces. Returns the new edges in
+/// Length of what Divide works on for edge `e` (the edge, or its curve along its
+/// segments). `None` when it cannot be divided.
+pub fn divide_length(ents: &Entities, e: EdgeId) -> Option<f64> {
+    let (edges, _) = divide_target(ents, e)?;
+    let (order, _) = chain_of(ents, &edges)?;
+    Some(
+        order
+            .iter()
+            .map(|&x| {
+                ents.pos(ents.edges[x].start)
+                    .distance(ents.pos(ents.edges[x].end))
+            })
+            .sum(),
+    )
+}
+
+/// The segment count for a typed segment length `len`: the count whose segments come
+/// closest to it (at least 2, or 3 around a closed curve, at most [`MAX_DIVISIONS`]).
+pub fn count_for_length(ents: &Entities, e: EdgeId, len: f64) -> Option<usize> {
+    if len.is_nan() || len <= 0.0 {
+        return None;
+    }
+    let (edges, _) = divide_target(ents, e)?;
+    let (_, verts) = chain_of(ents, &edges)?;
+    let least = if verts.first() == verts.last() { 3 } else { 2 };
+    let n = (divide_length(ents, e)? / len).round();
+    Some((n.min(MAX_DIVISIONS as f64) as usize).max(least))
+}
+
+/// Divide: splits edge `e` (or its curve) into `n` equal pieces. Returns the new edges in
 /// order, empty when nothing changed.
 pub fn divide(ents: &mut Entities, e: EdgeId, n: usize) -> Vec<EdgeId> {
     let n = n.min(MAX_DIVISIONS);
@@ -497,8 +550,44 @@ mod tests {
         assert_eq!(weld_edges(&mut e, &sel).len(), 1);
         assert_eq!(e.curves[old].arc, None);
         assert_eq!(e.curve_edges(old).len(), 4);
-        // An arc that is no longer one cannot be divided.
-        assert!(!can_divide(&e, edges[0]));
+        // What is left of the arc divides as a free-form curve.
+        assert!(can_divide(&e, edges[0]));
+        assert_eq!(divide(&mut e, edges[0], 2).len(), 2);
+        assert_eq!(e.curves[old].arc, None);
+        check(&e);
+    }
+
+    #[test]
+    fn divide_free_form_curve_and_by_length() {
+        let mut e = Entities::new();
+        // An L of lengths 6 and 4 welded into one curve.
+        let pts = [p(0.0, 0.0, 0.0), p(6.0, 0.0, 0.0), p(6.0, 4.0, 0.0)];
+        let edges = add_curve(&mut e, &pts, None);
+        let c = e.edges[edges[0]].attrs.curve.unwrap();
+        assert_eq!(divide_length(&e, edges[0]), Some(10.0));
+        // Typed segment lengths: 2.6 gives 4 segments, a long one still 2.
+        assert_eq!(count_for_length(&e, edges[0], 2.6), Some(4));
+        assert_eq!(count_for_length(&e, edges[0], 100.0), Some(2));
+        assert_eq!(count_for_length(&e, edges[0], 0.0), None);
+        // Five points 2.5 apart along the curve: the corner is cut.
+        let got = divide_points(&e, edges[0], 4).unwrap();
+        let want = [
+            p(0.0, 0.0, 0.0),
+            p(2.5, 0.0, 0.0),
+            p(5.0, 0.0, 0.0),
+            p(6.0, 1.5, 0.0),
+            p(6.0, 4.0, 0.0),
+        ];
+        for (g, w) in got.iter().zip(want) {
+            assert!(g.distance(w) < 1e-9, "{g} vs {w}");
+        }
+        let new = divide(&mut e, edges[0], 4);
+        assert_eq!(new.len(), 4);
+        assert!(new.iter().all(|&x| e.edges[x].attrs.curve == Some(c)));
+        assert_eq!(e.curves[c].arc, None);
+        // A straight edge divides by length too.
+        let line = add_line(&mut e, p(0.0, 10.0, 0.0), p(9.0, 10.0, 0.0));
+        assert_eq!(count_for_length(&e, line[0], 3.0), Some(3));
         check(&e);
     }
 }
