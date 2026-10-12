@@ -186,7 +186,8 @@ Reading first means real SketchUp models are available for testing everything el
 - [x] CUDA falls back to the CPU when the NVIDIA driver or NVRTC is missing (Windows needs the CUDA Toolkit's NVRTC for the GPU path).
 - [x] macOS: native menu bar from `menus.toml` (Cmd shortcuts, enabled and checked states), Cmd for Ctrl shortcuts, Mac symbols in menus.
 - [x] A `.skp` dropped on the window opens; a `.skp` path on the command line opens.
-- [ ] Not yet: tried by hand on Windows and macOS hardware; SketchUp for Mac's own menu layout and shortcuts (the spec covers Windows); installers and app bundles (on hold); HiDPI check on Windows/macOS.
+- [x] SketchUp for Mac's menu layout and default shortcuts: `spec/menus_mac.toml`, `spec/keymap_mac.toml` (sources `spec/parity/MAC.md`; mostly inferred, unverified), applied on macOS only, both layouts tested on every system.
+- [ ] Not yet: tried by hand on Windows and macOS hardware; installers and app bundles (on hold); HiDPI check on Windows/macOS.
 
 ### Later
 - Ruby plugin API (kept in view).

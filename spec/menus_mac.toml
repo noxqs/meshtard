@@ -1,0 +1,30 @@
+# macOS changes to menus.toml (SketchUp 2026 for Mac). Applied on macOS only.
+# Sources and [doc]/[inf] marks: spec/parity/MAC.md. DRAFT: not checked in SketchUp for Mac.
+#
+# Every command keeps exactly one place: a command listed in `app_menu` is taken out
+# of its Windows menu. Separators left at the start or end of a menu, or doubled,
+# are dropped.
+verified = false
+
+# Flattened submenus ("Menu/Submenu"): their items take the submenu's place.
+# Mac has no Default Tray; its panels are separate windows ("dialogs") [doc].
+flatten = ["Window/Default Tray"]
+
+# The application menu, first in the menu bar and named after the app [doc: the
+# "SketchUp" menu holds Settings]. The native menu bar adds the system's Services,
+# Hide, Hide Others and Show All before the separator that precedes Quit.
+[app_menu]
+label = "Meshtard"
+items = [
+  { id = "help.about", label = "About Meshtard" },
+  { separator = true },
+  { id = "window.preferences", label = "Settings..." },
+  { separator = true },
+  { id = "file.exit", label = "Quit Meshtard" },
+]
+
+# New labels by command id.
+[relabel]
+# Hide Dialogs / Show Dialogs in SketchUp for Mac's Window menu [doc]; ours is one
+# checked toggle of the tray that holds the panels [inf].
+"window.tray_show" = "Show Dialogs"

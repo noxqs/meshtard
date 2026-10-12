@@ -975,7 +975,7 @@ impl App {
         let filter = d.filter.to_lowercase();
         let rows = self.shortcut_rows();
         egui::ScrollArea::vertical()
-            .max_height(230.0)
+            .max_height(255.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new("mt_pref_shortcuts")

@@ -152,33 +152,33 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
                     ui.text_edit_singleline(&mut d.filter);
-                    ui.checkbox(&mut d.all, "Commands without a shortcut");
                 });
+                ui.checkbox(&mut d.all, "Also list commands without a shortcut");
                 let filter = d.filter.to_lowercase();
                 egui::ScrollArea::vertical()
                     .max_height(380.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let mut group = None;
-                        for r in &rows {
-                            let key = key_label(bindings, &r.id);
-                            if (key.is_empty() && !d.all) || !matches(r, &key, &filter) {
-                                continue;
-                            }
-                            if group != Some(&r.group) {
-                                ui.add_space(4.0);
-                                ui.strong(&r.group);
-                                group = Some(&r.group);
-                            }
-                            ui.horizontal(|ui| {
-                                ui.add_space(12.0);
-                                ui.label(&r.function);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| ui.monospace(&key),
-                                );
+                        egui::Grid::new("mt_shortcut_list")
+                            .num_columns(2)
+                            .spacing([24.0, 3.0])
+                            .show(ui, |ui| {
+                                let mut group = None;
+                                for r in &rows {
+                                    let key = key_label(bindings, &r.id);
+                                    if (key.is_empty() && !d.all) || !matches(r, &key, &filter) {
+                                        continue;
+                                    }
+                                    if group != Some(&r.group) {
+                                        ui.strong(&r.group);
+                                        ui.end_row();
+                                        group = Some(&r.group);
+                                    }
+                                    ui.label(format!("    {}", r.function));
+                                    ui.monospace(&key);
+                                    ui.end_row();
+                                }
                             });
-                        }
                     });
                 ui.separator();
                 ui.horizontal(|ui| {

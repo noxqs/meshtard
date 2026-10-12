@@ -127,12 +127,15 @@ fn menu_items(ui: &mut egui::Ui, items: &[MenuItem], frame: &Items, clicked: &mu
 /// Shortcut text shown right of a menu item, e.g. `Ctrl+S`.
 pub(crate) fn shortcut_text(spec: &Spec, id: &str) -> Option<String> {
     let text = spec.keymap.shortcut(id).map(|s| s.label())?;
-    // macOS shows Cmd for the keymap's Ctrl (SketchUp for Mac's own shortcut list is
-    // not covered by the spec yet).
+    // macOS shows Mac symbols: Cmd for the keymap's Ctrl (the Mac shortcuts
+    // themselves come from spec/keymap_mac.toml).
     if cfg!(target_os = "macos") {
         return Some(
             text.replace("Ctrl+", "\u{2318}")
-                .replace("Shift+", "\u{21e7}"),
+                .replace("Shift+", "\u{21e7}")
+                .replace("Alt+", "\u{2325}")
+                .replace("Backspace", "\u{232b}")
+                .replace("Comma", ","),
         );
     }
     Some(text)
