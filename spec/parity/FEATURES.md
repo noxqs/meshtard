@@ -217,6 +217,15 @@ Out of scope: Live Components / Modify Face, Dynamic Components, Classifier/IFC,
     - [x] OBJ import reads texture coordinates and `map_Kd` textures; polygons that visit a vertex twice (hole joined by a bridge) and non-planar polygons are ear-clipped instead of dropped / fanned.
     - [ ] Left: FBX node hierarchy as groups (import and export), 3DS export, USDZ and XSI export, "Export only current selection", PLY UV export, STL ASCII export, IFC.
 
+## Keyboard shortcuts (requested 2026-10-12)
+
+SketchUp 2026 (Windows) defaults with sources: `spec/parity/SHORTCUTS.md`. Every default key of a command Meshtard has is bound in `spec/keymap.toml`; Preferences > Shortcuts got Keep Original / Replace, Import / Export and Show All, and Help > Keyboard Shortcuts lists every shortcut.
+
+73. [ ] **Image Igloo (Camera > Image Igloo, I)** M. Default key I [doc: help.sketchup.com/en/default-keyboard-shortcuts]. Views the photos placed by Match Photo / geo-location from inside, as a panorama around the camera (behavior from memory, unverified). Needs `camera.image_igloo` in menus.toml and the `I` binding.
+74. [ ] **Context Help (Shift+F1)** S. In the 2017 Windows shortcut export as "Sketchup/Context Help" [inf]: opens the help page of the active tool. Meshtard: open the project's docs for the active tool (or the Instructor panel) and bind Shift+F1.
+75. [ ] **More than one key per command** S. The Windows export has second keys: Zoom Extents Ctrl+Shift+E, Undo Alt+Backspace, Cut Shift+Delete, Copy Ctrl+Insert, Paste Shift+Insert [inf]. `keymap.toml` holds one key per id; allow a list (after the macOS keymap overlay lands, to keep the merge simple), show all keys in Preferences > Shortcuts (SketchUp's Assigned list holds several) and the menus (first key only).
+76. [ ] **Tool modifier keys as on the 2026 Windows Quick Reference Card** S. QRC [doc] vs Meshtard: Orbit suspends gravity with Alt (Meshtard Ctrl); Eraser unsoftens with Alt (Meshtard Ctrl+Shift); 3 Point Arc changes segments with Alt +/- (Meshtard Ctrl); Lasso uses Shift add/subtract, Alt add, Shift+Alt subtract (Meshtard: Select's Ctrl/Shift); missing: Rectangle Alt draws from the center, Follow Me Alt uses the face perimeter as path, Protractor Ctrl toggles guide creation. Line Alt: QRC says "lock in current inference direction", the drawing-basics page says Alt cycles inference modes (Meshtard); check in the trial.
+
 ## Tier 4: online services and plugins (not planned now)
 
 - `file.send_to_layout` (LayOut is a separate Trimble product)

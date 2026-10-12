@@ -277,7 +277,7 @@ impl App {
                             .spec
                             .keymap
                             .shortcut(&h.id)
-                            .map(|x| x.to_string())
+                            .map(|x| x.label())
                             .unwrap_or_default();
                         let weak = ui.visuals().weak_text_color();
                         let text = if on { ui.visuals().text_color() } else { weak };
