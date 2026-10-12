@@ -425,28 +425,6 @@ impl App {
                 }
                 changed
             }
-            Event::TagSelectAll(t) => {
-                let layer = (t > 0).then_some(t);
-                let ents = doc.active();
-                let mut items: Vec<Owner> = Vec::new();
-                items.extend(
-                    (ents.faces.iter())
-                        .filter(|(_, f)| f.attrs.layer == layer)
-                        .map(|(k, _)| Owner::Face(k)),
-                );
-                items.extend(
-                    (ents.edges.iter())
-                        .filter(|(_, e)| e.attrs.layer == layer)
-                        .map(|(k, _)| Owner::Edge(k)),
-                );
-                items.extend(
-                    (ents.instances.iter().enumerate())
-                        .filter(|(_, i)| i.layer == layer)
-                        .map(|(k, _)| Owner::Instance(k)),
-                );
-                self.selection.apply(Mode::Replace, items);
-                true
-            }
             Event::ColorByTag(on) => {
                 doc.model.color_by_tag = on;
                 true

@@ -151,6 +151,8 @@ pub fn purge_tags(model: &mut Model) -> usize {
         used.extend(ents.edges.values().filter_map(|e| e.attrs.layer));
         used.extend(ents.faces.values().filter_map(|f| f.attrs.layer));
         used.extend(ents.instances.iter().filter_map(|i| i.layer));
+        used.extend(ents.dimensions.iter().filter_map(|d| d.layer));
+        used.extend(ents.texts.iter().filter_map(|t| t.layer));
     }
     let map = remap(model.layers.len(), &used, true);
     let before = model.layers.len();
@@ -169,6 +171,12 @@ pub fn purge_tags(model: &mut Model) -> usize {
         }
         for inst in &mut ents.instances {
             fix(&mut inst.layer);
+        }
+        for d in &mut ents.dimensions {
+            fix(&mut d.layer);
+        }
+        for t in &mut ents.texts {
+            fix(&mut t.layer);
         }
     }
     for page in &mut model.pages {

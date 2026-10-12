@@ -60,6 +60,19 @@ pub struct TrayData {
     /// Styles panel Edit tab extras and watermarks (bottom first).
     pub style_extras: crate::StyleExtras,
     pub watermarks: Vec<crate::WatermarkRow>,
+    /// Tags panel Details > Show New Tags (new tags visible in existing scenes).
+    pub show_new_tags: bool,
+    /// Library collections of the Materials, Components and Styles panels (the
+    /// collection dropdown lists "In Model" first, then these).
+    pub material_collections: Vec<crate::Collection>,
+    pub component_collections: Vec<crate::Collection>,
+    pub style_collections: Vec<crate::Collection>,
+    /// Components panel Statistics tab for [`TrayData::current_component`]: rows
+    /// of (label, count in the definition itself, count with nested components
+    /// expanded).
+    pub component_stats: Vec<(String, usize, usize)>,
+    /// Scenes panel thumbnails, one per entry of `scenes` (`None`: not rendered yet).
+    pub scene_thumbnails: Vec<Option<egui::TextureId>>,
 }
 
 impl Default for TrayData {
@@ -95,6 +108,12 @@ impl Default for TrayData {
             can_replace_component: false,
             style_extras: Default::default(),
             watermarks: Vec::new(),
+            show_new_tags: true,
+            material_collections: Vec::new(),
+            component_collections: Vec::new(),
+            style_collections: Vec::new(),
+            component_stats: Vec::new(),
+            scene_thumbnails: Vec::new(),
         }
     }
 }
@@ -161,6 +180,34 @@ pub fn tag_tree_rows(
     collapsed: &HashSet<usize>,
     filter: &str,
 ) -> Vec<(TagTreeItem, usize)> {
+    tag_tree_rows_sorted(tags, folders, collapsed, filter, TagSort::Model)
+}
+
+/// Order of the Tags panel's rows within each folder (column header clicks).
+/// "Untagged" stays first (unverified).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TagSort {
+    /// Model order.
+    #[default]
+    Model,
+    /// By name, A to Z (folders too).
+    NameUp,
+    /// By name, Z to A (folders too).
+    NameDown,
+    /// Visible tags first, then by name.
+    VisibleFirst,
+    /// Hidden tags first, then by name.
+    HiddenFirst,
+}
+
+/// [`tag_tree_rows`] in `sort` order.
+pub fn tag_tree_rows_sorted(
+    tags: &[TagRow],
+    folders: &[TagFolderRow],
+    collapsed: &HashSet<usize>,
+    filter: &str,
+    sort: TagSort,
+) -> Vec<(TagTreeItem, usize)> {
     let filter = filter.trim().to_lowercase();
     let tag_matches = |i: usize| filter.is_empty() || tags[i].name.to_lowercase().contains(&filter);
     // Whether a folder holds a matching tag anywhere below it.
@@ -184,13 +231,38 @@ pub fn tag_tree_rows(
         folders: &[TagFolderRow],
         collapsed: &HashSet<usize>,
         filtering: bool,
+        sort: TagSort,
         m: &dyn Fn(usize) -> bool,
         out: &mut Vec<(TagTreeItem, usize)>,
     ) {
         if depth > folders.len() {
             return;
         }
-        for f in 0..folders.len() {
+        let by_name = |a: &str, b: &str| natural_cmp(a, b);
+        let mut folder_order: Vec<usize> = (0..folders.len()).collect();
+        match sort {
+            TagSort::Model => {}
+            TagSort::NameDown => {
+                folder_order.sort_by(|&a, &b| by_name(&folders[b].name, &folders[a].name));
+            }
+            _ => folder_order.sort_by(|&a, &b| by_name(&folders[a].name, &folders[b].name)),
+        }
+        let mut tag_order: Vec<usize> = (1..tags.len()).collect();
+        let name = |t: usize| tags[t].name.as_str();
+        match sort {
+            TagSort::Model => {}
+            TagSort::NameUp => tag_order.sort_by(|&a, &b| by_name(name(a), name(b))),
+            TagSort::NameDown => tag_order.sort_by(|&a, &b| by_name(name(b), name(a))),
+            TagSort::VisibleFirst | TagSort::HiddenFirst => {
+                let first = sort == TagSort::VisibleFirst;
+                tag_order.sort_by(|&a, &b| {
+                    (tags[b].visible == first)
+                        .cmp(&(tags[a].visible == first))
+                        .then_with(|| by_name(name(a), name(b)))
+                });
+            }
+        }
+        for f in folder_order {
             let parent_ok = match parent {
                 Some(p) => folders[f].parent == Some(p),
                 // Folders whose parent is missing are listed at the top.
@@ -208,12 +280,14 @@ pub fn tag_tree_rows(
                     folders,
                     collapsed,
                     filtering,
+                    sort,
                     m,
                     out,
                 );
             }
         }
-        for (t, tag) in tags.iter().enumerate().skip(1) {
+        for t in tag_order {
+            let tag = &tags[t];
             let here = match parent {
                 Some(p) => tag.folder == Some(p),
                 None => tag.folder.is_none_or(|p| p >= folders.len()),
@@ -234,10 +308,105 @@ pub fn tag_tree_rows(
         folders,
         collapsed,
         !filter.is_empty(),
+        sort,
         &tag_matches,
         &mut out,
     );
     out
+}
+
+/// A library collection of the Materials, Components or Styles panel: a folder of
+/// files (or a built-in set) the app lists.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Collection {
+    pub name: String,
+    pub items: Vec<CollectionItem>,
+}
+
+/// One entry of a [`Collection`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CollectionItem {
+    pub name: String,
+    /// Swatch color (materials; a texture's average color).
+    pub color: Option<[u8; 3]>,
+    /// Image shown instead of the swatch or icon, once the app has loaded it.
+    pub thumbnail: Option<egui::TextureId>,
+}
+
+/// A style the Styles panel's Mix tab takes settings from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleSource {
+    /// An "In Model" style.
+    InModel(usize),
+    /// Item `item` of style collection `collection`.
+    Collection { collection: usize, item: usize },
+}
+
+/// The setting groups of the Styles panel's Mix tab, in [`STYLE_PARTS`] order.
+pub const STYLE_PARTS: [&str; 5] = [
+    "Edge Settings",
+    "Face Settings",
+    "Background Settings",
+    "Watermark Settings",
+    "Modeling Settings",
+];
+
+/// How the Materials panel draws swatches (Details > thumbnail style). Auto draws
+/// the model's textured materials as cubes, colors flat and a collection's images
+/// as the image (unverified); Cube draws every swatch as a cube of its color, Flat
+/// as a square.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThumbnailStyle {
+    #[default]
+    Auto,
+    Cube,
+    Flat,
+}
+
+impl ThumbnailStyle {
+    /// Whether a swatch is drawn as a cube.
+    pub fn cube(self, textured: bool) -> bool {
+        match self {
+            Self::Auto => textured,
+            Self::Cube => true,
+            Self::Flat => false,
+        }
+    }
+}
+
+/// Shades of a color for a cube swatch's top, left and right faces.
+pub fn cube_shades(c: [u8; 3]) -> [[u8; 3]; 3] {
+    let scale = |k: f32| c.map(|v| (f32::from(v) * k).round().clamp(0.0, 255.0) as u8);
+    let lift = c.map(|v| (f32::from(v) + (255.0 - f32::from(v)) * 0.25).round() as u8);
+    [lift, c, scale(0.72)]
+}
+
+/// The Scenes panel's View Options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScenesView {
+    #[default]
+    List,
+    SmallThumbnails,
+    LargeThumbnails,
+}
+
+/// Indices of `names` that contain `query` (case-insensitive; all for an empty
+/// query), for the scene tab search.
+pub fn search_names(names: &[String], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    (0..names.len())
+        .filter(|&i| q.is_empty() || names[i].to_lowercase().contains(&q))
+        .collect()
+}
+
+/// Rows from `from` to `to` (inclusive, either order) of `rows`: Shift+click range
+/// selection; just `to` when `from` is not listed.
+pub fn range_select<T: Copy + PartialEq>(rows: &[T], from: Option<T>, to: T) -> Vec<T> {
+    let b = rows.iter().position(|r| *r == to);
+    match (from.and_then(|f| rows.iter().position(|r| *r == f)), b) {
+        (Some(a), Some(b)) => rows[a.min(b)..=a.max(b)].to_vec(),
+        _ => vec![to],
+    }
 }
 
 /// Names of the scene properties a scene can save, in [`SceneDetails::props`] order.
@@ -436,6 +605,11 @@ pub enum OutlinerKind {
     Component {
         definition: String,
     },
+    /// A section plane (listed after the groups and components of its parent; its
+    /// path index is past them). `active` = the parent's active cut.
+    SectionPlane {
+        active: bool,
+    },
 }
 
 /// A group or component instance in the Outliner tree.
@@ -491,6 +665,8 @@ impl OutlinerNode {
                 format!("<{definition}>")
             }
             OutlinerKind::Component { definition } => format!("{} <{definition}>", self.name),
+            OutlinerKind::SectionPlane { .. } if self.name.is_empty() => "Section Plane".to_owned(),
+            OutlinerKind::SectionPlane { .. } => self.name.clone(),
         }
     }
 }
@@ -763,11 +939,79 @@ pub fn outliner_rows(
     expanded: &HashSet<Vec<usize>>,
     filter: &str,
 ) -> Vec<OutlinerRow> {
+    outliner_rows_sorted(nodes, expanded, filter, false)
+}
+
+/// [`outliner_rows`], with `sort` the siblings listed by label (case-insensitive,
+/// numbers in names compared by value; ties in model order) instead of in model
+/// order. Paths stay model indices.
+pub fn outliner_rows_sorted(
+    nodes: &[OutlinerNode],
+    expanded: &HashSet<Vec<usize>>,
+    filter: &str,
+    sort: bool,
+) -> Vec<OutlinerRow> {
     let filter = filter.trim().to_lowercase();
     let mut rows = Vec::new();
     let mut path = Vec::new();
-    walk(nodes, expanded, &filter, &mut path, &mut rows);
+    walk(nodes, expanded, &filter, sort, &mut path, &mut rows);
     rows
+}
+
+/// Paths of every node with children (Outliner Expand All).
+pub fn outliner_parent_paths(nodes: &[OutlinerNode]) -> HashSet<Vec<usize>> {
+    fn go(nodes: &[OutlinerNode], path: &mut Vec<usize>, out: &mut HashSet<Vec<usize>>) {
+        for (i, n) in nodes.iter().enumerate() {
+            if n.children.is_empty() {
+                continue;
+            }
+            path.push(i);
+            out.insert(path.clone());
+            go(&n.children, path, out);
+            path.pop();
+        }
+    }
+    let mut out = HashSet::new();
+    go(nodes, &mut Vec::new(), &mut out);
+    out
+}
+
+/// Compares names as people sort them: case-insensitive, runs of digits by value
+/// (`Box 2` before `Box 10`).
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
+                let take = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                    let mut s = String::new();
+                    while let Some(c) = it.peek().copied().filter(char::is_ascii_digit) {
+                        s.push(c);
+                        it.next();
+                    }
+                    s
+                };
+                let (m, n) = (take(&mut x), take(&mut y));
+                let (m, n) = (m.trim_start_matches('0'), n.trim_start_matches('0'));
+                let o = m.len().cmp(&n.len()).then_with(|| m.cmp(n));
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            (Some(c), Some(d)) => {
+                if c != d {
+                    return c.cmp(&d);
+                }
+                x.next();
+                y.next();
+            }
+        }
+    }
 }
 
 fn matches(node: &OutlinerNode, filter: &str) -> bool {
@@ -782,10 +1026,16 @@ fn walk(
     nodes: &[OutlinerNode],
     expanded: &HashSet<Vec<usize>>,
     filter: &str,
+    sort: bool,
     path: &mut Vec<usize>,
     rows: &mut Vec<OutlinerRow>,
 ) {
-    for (i, node) in nodes.iter().enumerate() {
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    if sort {
+        order.sort_by(|&a, &b| natural_cmp(&nodes[a].label(), &nodes[b].label()));
+    }
+    for i in order {
+        let node = &nodes[i];
         if !filter.is_empty() && !subtree_matches(node, filter) {
             continue;
         }
@@ -804,7 +1054,7 @@ fn walk(
             open,
         });
         if open {
-            walk(&node.children, expanded, filter, path, rows);
+            walk(&node.children, expanded, filter, sort, path, rows);
         }
         path.pop();
     }
@@ -1046,5 +1296,103 @@ mod tests {
         assert_eq!(SelectMode::from_modifiers(true, false), SelectMode::Add);
         assert_eq!(SelectMode::from_modifiers(false, true), SelectMode::Toggle);
         assert_eq!(SelectMode::from_modifiers(true, true), SelectMode::Remove);
+    }
+
+    #[test]
+    fn natural_order_compares_numbers_by_value() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("Box 2", "box 10"), Less);
+        assert_eq!(natural_cmp("Box 010", "Box 10"), Equal);
+        assert_eq!(natural_cmp("a", "B"), Less);
+        assert_eq!(natural_cmp("Wall", "Wall 1"), Less);
+    }
+
+    #[test]
+    fn outliner_sort_and_expand_all_keep_model_paths() {
+        let nodes = vec![
+            group("b", vec![comp("", "Z"), comp("", "A")]),
+            group("a", vec![]),
+            OutlinerNode {
+                kind: OutlinerKind::SectionPlane { active: true },
+                ..OutlinerNode::default()
+            },
+        ];
+        assert_eq!(nodes[2].label(), "Section Plane");
+        let all = outliner_parent_paths(&nodes);
+        assert_eq!(all, HashSet::from([vec![0]]));
+        let rows = outliner_rows_sorted(&nodes, &all, "", true);
+        let paths: Vec<Vec<usize>> = rows.into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths,
+            vec![vec![1], vec![0], vec![0, 1], vec![0, 0], vec![2]],
+            "a, b, <A>, <Z>, Section Plane"
+        );
+        let plain: Vec<Vec<usize>> = outliner_rows(&nodes, &all, "")
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(plain[0], vec![0]);
+    }
+
+    #[test]
+    fn tag_sorts() {
+        let tag = |name: &str, visible: bool| TagRow {
+            name: name.into(),
+            visible,
+            ..TagRow::default()
+        };
+        let tags = vec![
+            tag("Untagged", true),
+            tag("Walls 10", true),
+            tag("Doors", false),
+            tag("Walls 9", false),
+        ];
+        let folders = vec![
+            TagFolderRow {
+                name: "Z".into(),
+                parent: None,
+                visible: true,
+            },
+            TagFolderRow {
+                name: "A".into(),
+                parent: None,
+                visible: true,
+            },
+        ];
+        let order = |sort| -> Vec<TagTreeItem> {
+            tag_tree_rows_sorted(&tags, &folders, &HashSet::new(), "", sort)
+                .into_iter()
+                .map(|r| r.0)
+                .collect()
+        };
+        use TagTreeItem::{Folder as F, Tag as T};
+        assert_eq!(order(TagSort::Model), [T(0), F(0), F(1), T(1), T(2), T(3)]);
+        assert_eq!(order(TagSort::NameUp), [T(0), F(1), F(0), T(2), T(3), T(1)]);
+        assert_eq!(
+            order(TagSort::NameDown),
+            [T(0), F(0), F(1), T(1), T(3), T(2)]
+        );
+        assert_eq!(
+            order(TagSort::VisibleFirst),
+            [T(0), F(1), F(0), T(1), T(2), T(3)]
+        );
+        assert_eq!(
+            order(TagSort::HiddenFirst),
+            [T(0), F(1), F(0), T(2), T(3), T(1)]
+        );
+    }
+
+    #[test]
+    fn range_and_search_helpers() {
+        let rows = [1, 2, 3, 4, 5];
+        assert_eq!(range_select(&rows, Some(4), 2), vec![2, 3, 4]);
+        assert_eq!(range_select(&rows, None, 2), vec![2]);
+        assert_eq!(range_select(&rows, Some(9), 2), vec![2]);
+        let names: Vec<String> = ["Front", "Back", "Front detail"].map(String::from).to_vec();
+        assert_eq!(search_names(&names, " front"), vec![0, 2]);
+        assert_eq!(search_names(&names, ""), vec![0, 1, 2]);
+        assert!(search_names(&names, "x").is_empty());
+        assert!(ThumbnailStyle::Auto.cube(true) && !ThumbnailStyle::Auto.cube(false));
+        assert!(ThumbnailStyle::Cube.cube(false) && !ThumbnailStyle::Flat.cube(true));
     }
 }

@@ -82,7 +82,17 @@ pub fn tag_entities(ents: &mut Entities, items: &[Owner], layer: Option<usize>) 
                     set(&mut x.layer);
                 }
             }
-            Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
+            Owner::Dimension(i) => {
+                if let Some(x) = ents.dimensions.get_mut(i) {
+                    set(&mut x.layer);
+                }
+            }
+            Owner::Text(i) => {
+                if let Some(x) = ents.texts.get_mut(i) {
+                    set(&mut x.layer);
+                }
+            }
+            Owner::Section(_) => {}
         }
     }
     changed
@@ -116,7 +126,9 @@ pub fn tag_of(ents: &Entities, o: Owner) -> Option<usize> {
         Owner::Edge(e) => ents.edges.get(e).map(|x| x.attrs.layer),
         Owner::Face(f) => ents.faces.get(f).map(|x| x.attrs.layer),
         Owner::Instance(i) => ents.instances.get(i).map(|x| x.layer),
-        Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => None,
+        Owner::Dimension(i) => ents.dimensions.get(i).map(|x| x.layer),
+        Owner::Text(i) => ents.texts.get(i).map(|x| x.layer),
+        Owner::Section(_) => None,
     }
     .map(|l| l.unwrap_or(0))
 }

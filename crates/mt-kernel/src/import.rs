@@ -190,8 +190,17 @@ pub fn from_skp(src: &skp::Model) -> Model {
 /// files; see [`crate::export::style_items`] for the ids and what is unverified).
 /// Items a style lacks keep their current value.
 fn read_style(style: &skp::Style, out: &mut crate::model::StyleSettings) {
+    read_style_items(&|id| style.items.get(&id).map(|i| i.value.as_str()), out);
+}
+
+/// [`read_style`] over any source of item values (text as in `style.xml`; e.g. the
+/// Styles panel's `.style` files). Items `item` lacks keep their current value.
+pub fn read_style_items<'a>(
+    item: &dyn Fn(i32) -> Option<&'a str>,
+    out: &mut crate::model::StyleSettings,
+) {
     use crate::model::FaceStyle;
-    let item = |id: i32| style.items.get(&id).map(|i| i.value.trim());
+    let item = |id: i32| item(id).map(str::trim);
     let int = |id: i32| item(id).and_then(|v| v.parse::<i64>().ok());
     let bool_ = |id: i32| int(id).map(|v| v != 0);
     let width = |id: i32| int(id).filter(|&v| v > 0).map(|v| v as f32);

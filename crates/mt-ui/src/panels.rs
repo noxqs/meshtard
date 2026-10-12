@@ -25,7 +25,7 @@ const ICON_BUTTON: f32 = 22.0;
 /// Panel-local UI state that is not model data.
 #[derive(Debug, Default)]
 pub(crate) struct TrayUi {
-    material_tab: MaterialTab,
+    pub(crate) material_tab: MaterialTab,
     /// Name field of the Materials panel and the material it was loaded from.
     material_name: String,
     material_name_of: Option<usize>,
@@ -74,10 +74,11 @@ enum ComponentTab {
     #[default]
     Select,
     Edit,
+    Statistics,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum MaterialTab {
+pub(crate) enum MaterialTab {
     #[default]
     Select,
     Edit,
@@ -210,14 +211,10 @@ impl Shell {
 
         match self.tray_ui.material_tab {
             MaterialTab::Select => {
-                ui.horizontal(|ui| {
-                    ui.label("In Model");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, &t, "Create Material", true, paint_plus).clicked() {
-                            self.pending.push(Event::MaterialCreate);
-                        }
-                    });
-                });
+                if self.materials_select_header(ui, data) {
+                    return;
+                }
+                let style = self.tray_ui.more.thumbnail_style;
                 // The Default material (no material) first, then the model's.
                 let cells: Vec<Option<usize>> = std::iter::once(None)
                     .chain((0..data.materials.len()).map(Some))
@@ -235,13 +232,21 @@ impl Shell {
                             let name = match cell {
                                 Some(i) => {
                                     let m = &data.materials[i];
-                                    paint_swatch(
-                                        ui.painter(),
-                                        rect.shrink(2.0),
-                                        m.color,
-                                        m.opacity,
-                                        &t,
-                                    );
+                                    if style.cube(m.texture.is_some()) {
+                                        crate::panels3::paint_cube_swatch(
+                                            ui.painter(),
+                                            rect.shrink(2.0),
+                                            m.color,
+                                        );
+                                    } else {
+                                        paint_swatch(
+                                            ui.painter(),
+                                            rect.shrink(2.0),
+                                            m.color,
+                                            m.opacity,
+                                            &t,
+                                        );
+                                    }
                                     m.name.as_str()
                                 }
                                 None => {
@@ -267,6 +272,11 @@ impl Shell {
                             let r = r.on_hover_text(name);
                             if let Some(i) = cell {
                                 r.context_menu(|ui| {
+                                    crate::panels3::thumbnail_menu(
+                                        ui,
+                                        &mut self.tray_ui.more.thumbnail_style,
+                                    );
+                                    ui.separator();
                                     if ui.button("Duplicate").clicked() {
                                         self.pending.push(Event::MaterialDuplicate(i));
                                         ui.close();
@@ -559,12 +569,12 @@ impl Shell {
     /// description fields.
     ///
     /// Unverified against SketchUp 2026: SketchUp edits name and description in the
-    /// header fields and its Edit tab holds the component behaviors (Glue to, Cut
-    /// opening, Always face camera, Shadows face sun, axes), which are left out; the
+    /// header fields (here in the Edit tab, with the behaviors Glue to, Cut opening,
+    /// Always face camera, Shadows face sun; axes are left out); the
     /// list shows rendered thumbnails (a drawn icon here) in an icon grid by default
     /// (the Details menu's List view is used); the instance count is shown here on
-    /// each row and in the tooltip, SketchUp shows it in the Statistics tab (left
-    /// out); the 3D Warehouse search field and collection navigation are left out.
+    /// each row and in the tooltip (and in the Statistics tab, `panels3.rs`); the 3D
+    /// Warehouse search field is left out; collections are in `panels3.rs`.
     fn components_panel(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
         let t = self.theme.clone();
         let current = data
@@ -610,6 +620,7 @@ impl Shell {
             for (tab, label) in [
                 (ComponentTab::Select, "Select"),
                 (ComponentTab::Edit, "Edit"),
+                (ComponentTab::Statistics, "Statistics"),
             ] {
                 if tab_button(ui, &t, label, self.tray_ui.component_tab == tab).clicked() {
                     self.tray_ui.component_tab = tab;
@@ -620,6 +631,7 @@ impl Shell {
         match self.tray_ui.component_tab {
             ComponentTab::Select => self.components_select(ui, data, current, &t),
             ComponentTab::Edit => self.components_edit(ui, data, current, &t),
+            ComponentTab::Statistics => self.components_stats(ui, data, current),
         }
     }
 
@@ -631,12 +643,17 @@ impl Shell {
         t: &Theme32,
     ) {
         ui.horizontal(|ui| {
-            ui.label("In Model");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = icon_button(ui, t, "Details", true, paint_details);
                 let any_unused = data.components.iter().any(|c| c.instances == 0);
                 egui::Popup::menu(&r).show(|ui| {
-                    ui.set_min_width(140.0);
+                    ui.set_min_width(180.0);
+                    if ui.button("Open or Create a Collection...").clicked() {
+                        self.pending
+                            .push(Event::CollectionAdd(crate::CollectionKind::Components));
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui
                         .add_enabled(any_unused, egui::Button::new("Purge Unused"))
                         .clicked()
@@ -645,8 +662,29 @@ impl Shell {
                         ui.close();
                     }
                 });
+                let pick = crate::panels3::collection_combo(
+                    ui,
+                    "mt_ui_component_collection",
+                    &data.component_collections,
+                    &mut self.tray_ui.more.component_collection,
+                );
+                if let Some(c) = pick {
+                    self.pending.push(Event::CollectionOpened {
+                        kind: crate::CollectionKind::Components,
+                        collection: c,
+                    });
+                }
             });
         });
+        if let Some(c) = self
+            .tray_ui
+            .more
+            .component_collection
+            .filter(|&c| c < data.component_collections.len())
+        {
+            self.component_collection_list(ui, data, c);
+            return;
+        }
         if data.components.is_empty() {
             ui.label(RichText::new("No components in the model.").color(t.text_disabled));
             return;
@@ -1014,6 +1052,8 @@ impl Shell {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.add_space(4.0);
+            // Scene search (SketchUp 2026, unverified look): find a scene by name.
+            self.scene_tab_search(ui, &data);
             for (i, name) in data.scenes.iter().enumerate() {
                 let active = data.active_scene == Some(i);
                 // Scenes left out of the animation in parentheses (Scenes panel).
@@ -1599,6 +1639,8 @@ mod tests {
         let mut edited = None;
         for y in (150..600).step_by(6) {
             only_components(&mut s);
+            // Stay on the Edit tab if a click hit the Statistics tab.
+            s.tray_ui.component_tab = ComponentTab::Edit;
             run(&ctx, &mut s, &spec, click(pos2(x, y as f32)));
             if !ctx.egui_wants_keyboard_input() {
                 continue;

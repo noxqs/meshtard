@@ -50,6 +50,9 @@ pub struct Dimension {
     /// Font, alignment and endpoints set by Model Info > Dimensions > Update Selected;
     /// `None` follows the model's `dimension_style` (not saved in .skp).
     pub style: Option<crate::model_data::DimensionStyle>,
+    /// Its tag (index into `Model::layers`; `None` = Untagged). Hidden tags hide it
+    /// and Color by Tag colors it. Not saved in .skp.
+    pub layer: Option<usize>,
 }
 
 impl Dimension {
@@ -63,6 +66,7 @@ impl Dimension {
             hidden: false,
             text_position: TextPosition::Center,
             style: None,
+            layer: None,
         }
     }
 
@@ -153,6 +157,8 @@ pub struct Text {
     /// Font, color and leader set by Model Info > Text > Update Selected; `None`
     /// follows the model's `text_style` (not saved in .skp).
     pub style: Option<crate::model_data::TextStyle>,
+    /// Its tag (see [`Dimension::layer`]). Not saved in .skp.
+    pub layer: Option<usize>,
 }
 
 impl Text {
@@ -164,6 +170,7 @@ impl Text {
             screen: false,
             hidden: false,
             style: None,
+            layer: None,
         }
     }
 
@@ -175,6 +182,7 @@ impl Text {
             screen: true,
             hidden: false,
             style: None,
+            layer: None,
         }
     }
 }

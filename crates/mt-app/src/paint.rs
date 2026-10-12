@@ -144,6 +144,8 @@ pub struct PaintBucket {
     sampled: Option<Option<usize>>,
     /// Shift's model-wide replacement, made by the app as one undo step.
     edit: Option<ModelEdit>,
+    /// Sample Paint (Materials panel): the next click samples.
+    sample_next: bool,
 }
 
 impl std::fmt::Debug for PaintBucket {
@@ -170,7 +172,7 @@ impl PaintBucket {
         let Some(picked) = ctx.picked else {
             return false;
         };
-        if held.alt {
+        if std::mem::take(&mut self.sample_next) || held.alt {
             // Sample the material under the cursor: the one shown (also inside groups
             // and components), else the clicked side's or instance's.
             let m = match picked {
@@ -304,6 +306,10 @@ impl ModifyTool for PaintBucket {
 
     fn take_sampled_material(&mut self) -> Option<Option<usize>> {
         self.sampled.take()
+    }
+
+    fn start_sample(&mut self) {
+        self.sample_next = true;
     }
 
     fn take_model_edit(&mut self) -> Option<ModelEdit> {
@@ -474,6 +480,25 @@ mod tests {
         let def = &model.definitions.values().next().unwrap().entities;
         assert_eq!(def.faces[a].attrs.material, Some(4));
         assert_eq!(def.faces[b].attrs.material, Some(3));
+    }
+
+    /// Materials panel Sample Paint: one plain click samples, the next paints.
+    #[test]
+    fn sample_paint_samples_once() {
+        let (mut ents, _) = cube_and_square();
+        let t = top(&ents);
+        ents.faces[t].attrs.material = Some(5);
+        let mut pb = PaintBucket::default();
+        pb.set_material(Some(0));
+        pb.start_sample();
+        assert!(!click(&mut pb, &mut ents, t, Mods::default()));
+        assert_eq!(pb.take_sampled_material(), Some(Some(5)));
+        ents.faces[t].attrs.material = Some(1);
+        assert!(
+            click(&mut pb, &mut ents, t, Mods::default()),
+            "paints again"
+        );
+        assert_eq!(ents.faces[t].attrs.material, Some(5));
     }
 
     #[test]

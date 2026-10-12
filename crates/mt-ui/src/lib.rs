@@ -125,6 +125,7 @@ pub mod icons;
 mod menu;
 mod panels;
 mod panels2;
+mod panels3;
 mod status;
 mod style_panel;
 mod theme;
@@ -146,6 +147,11 @@ pub use style_panel::{
 };
 pub use theme::apply as apply_theme;
 pub use tray_data::{
+    Collection, CollectionItem, STYLE_PARTS, ScenesView, StyleSource, TagSort, ThumbnailStyle,
+    cube_shades, natural_cmp, outliner_parent_paths, outliner_rows_sorted, range_select,
+    search_names, tag_tree_rows_sorted,
+};
+pub use tray_data::{
     ComponentBehavior, ComponentRow, DASH_NAMES, FaceStyle, FogSettings, GLUE_NAMES, MaterialRow,
     OutlinerKind, OutlinerNode, OutlinerRow, SCENE_PROPS, SceneDetails, SelectMode, ShadowSettings,
     SoftenSettings, StyleSettings, TagFolderRow, TagRow, TagTreeItem, TextureAction, TextureRow,
@@ -154,6 +160,15 @@ pub use tray_data::{
     tag_tree_rows, time_label, utc_label,
 };
 pub use trays::{TrayDef, TrayLayout};
+
+/// Which panel's library a [`Event::CollectionOpened`] or [`Event::CollectionAdd`]
+/// is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionKind {
+    Materials,
+    Components,
+    Styles,
+}
 
 /// What the Entity Info panel shows: a title (e.g. "Edge", "Face", "No Selection"),
 /// editable [`InfoField`]s and read-only rows of label and value (e.g. "Volume",
@@ -417,6 +432,57 @@ pub enum Event {
     StylePurge,
     /// Styles: a style clicked in the Select tab: apply it.
     StyleApply(usize),
+
+    /// Tags: Delete with several tags selected (never 0); one undo step.
+    TagsDelete(Vec<usize>),
+    /// Tags: the eye of a selected tag clicked with several selected: all of them get
+    /// this visibility (one undo step).
+    TagsVisible(Vec<usize>, bool),
+    /// Tags: several tags moved into a folder (`None`: out of every folder).
+    TagsMove {
+        tags: Vec<usize>,
+        folder: Option<usize>,
+    },
+    /// Tags: Select All Tagged with several tags selected.
+    TagsSelectTagged(Vec<usize>),
+    /// Tags: Details > Apply Tags to Scenes: the current visibility of `tags` is
+    /// written into `scenes`.
+    TagsApplyToScenes {
+        tags: Vec<usize>,
+        scenes: Vec<usize>,
+    },
+    /// Tags: Details > Show New Tags toggled; its new state.
+    ShowNewTags(bool),
+
+    /// Materials: the Sample Paint (eyedropper) button: the next click in the
+    /// viewport takes the material under the cursor (sent after
+    /// `Command("tool.paint_bucket")`).
+    MaterialSample,
+    /// Materials, Components, Styles: a collection chosen in the dropdown (the app
+    /// may load its thumbnails).
+    CollectionOpened {
+        kind: CollectionKind,
+        collection: usize,
+    },
+    /// Materials, Components, Styles: Details > Open or Create a Collection... (the
+    /// app asks for a folder).
+    CollectionAdd(CollectionKind),
+    /// Materials: a swatch of a collection clicked: the app adds the material to the
+    /// model (or reuses one of that name) and makes it current.
+    MaterialFromCollection { collection: usize, item: usize },
+    /// Components: an entry of a collection clicked: the app loads it into the model
+    /// and starts placing it.
+    ComponentFromCollection { collection: usize, item: usize },
+    /// Styles: a style of a collection clicked: the app adds it to "In Model" and
+    /// applies it.
+    StyleFromCollection { collection: usize, item: usize },
+    /// Styles: Details > Save As...: write the In Model style to a `.style` file.
+    StyleSaveFile(usize),
+    /// Styles: Details > Open...: read a `.style` file into "In Model".
+    StyleOpenFile,
+    /// Styles, Mix tab: apply setting group `part` (index into [`STYLE_PARTS`]) of
+    /// `source` to the current settings.
+    StyleMix { source: StyleSource, part: usize },
 
     /// Environments: a library environment clicked (`None`: no environment).
     EnvironmentSelect(Option<usize>),

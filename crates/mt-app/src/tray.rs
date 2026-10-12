@@ -10,7 +10,7 @@ use crate::selection::Mode;
 
 impl App {
     /// What the tray panels show this frame.
-    pub(crate) fn tray_data(&self) -> TrayData {
+    pub(crate) fn tray_data(&mut self) -> TrayData {
         let mut data = TrayData {
             active_tag: self.active_tag,
             current_material: self.current_material,
@@ -95,7 +95,17 @@ impl App {
         } else {
             Vec::new()
         };
-        data.outliner = outliner(m, &m.root, &selected, Some(&doc.context), 0);
+        let sections: Vec<usize> = if doc.context.is_empty() {
+            (self.selection.items().iter())
+                .filter_map(|o| match o {
+                    Owner::Section(i) => Some(*i),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        data.outliner = outliner(m, &m.root, (&selected, &sections), Some(&doc.context), 0);
         let defs = component_definitions(m);
         data.components = defs
             .iter()
@@ -153,7 +163,9 @@ impl App {
                 Owner::Edge(e) => ents.edges.get(e).map(|x| x.attrs.layer),
                 Owner::Face(f) => ents.faces.get(f).map(|x| x.attrs.layer),
                 Owner::Instance(i) => ents.instances.get(i).map(|x| x.layer),
-                Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => None,
+                Owner::Dimension(i) => ents.dimensions.get(i).map(|x| x.layer),
+                Owner::Text(i) => ents.texts.get(i).map(|x| x.layer),
+                Owner::Section(_) => None,
             }
             .map(|l| l.unwrap_or(0))
         };
@@ -171,6 +183,7 @@ impl App {
             use_sun_for_shading: s.use_sun_for_shading,
             from_edges: s.from_edges,
         };
+        self.tray_data_extra(&mut data);
         data
     }
 
@@ -188,6 +201,12 @@ impl App {
             | Event::WatermarkAdd
             | Event::WatermarkRemove(_)
             | Event::WatermarkChanged(..)) => return self.style_extras_event(e),
+            e @ (Event::OutlinerSelect { .. }
+            | Event::OutlinerRename { .. }
+            | Event::OutlinerVisible { .. }) => match self.outliner_section_event(e) {
+                Ok(rebuild) => return rebuild,
+                Err(e) => e,
+            },
             e => e,
         };
         let Some(doc) = self.document.as_mut() else {
@@ -204,49 +223,16 @@ impl App {
                     visible: true,
                     ..Layer::default()
                 });
+                crate::tray_extra::new_tag_in_scenes(m, m.layers.len() - 1);
                 true
             }),
             Event::TagDelete(i) if i > 0 => {
                 if self.active_tag == i {
                     self.active_tag = 0;
                 }
-                doc.edit_model(|m, ents| {
-                    if i >= m.layers.len() {
-                        return false;
-                    }
-                    m.layers.remove(i);
-                    // Entities on the deleted tag go to Untagged (SketchUp asks; this is
-                    // its default choice, unverified).
-                    let remap = |l: &mut Option<usize>| {
-                        *l = match *l {
-                            Some(x) if x == i => None,
-                            Some(x) if x > i => Some(x - 1),
-                            other => other,
-                        }
-                    };
-                    for e in std::iter::once(ents)
-                        .chain(m.definitions.values_mut().map(|d| &mut d.entities))
-                        .chain(std::iter::once(&mut m.root))
-                    {
-                        for x in e.edges.values_mut() {
-                            remap(&mut x.attrs.layer);
-                        }
-                        for x in e.faces.values_mut() {
-                            remap(&mut x.attrs.layer);
-                        }
-                        for x in &mut e.instances {
-                            remap(&mut x.layer);
-                        }
-                    }
-                    for p in &mut m.pages {
-                        p.hidden_layers.retain(|&x| x != i);
-                        p.hidden_layers
-                            .iter_mut()
-                            .filter(|x| **x > i)
-                            .for_each(|x| *x -= 1);
-                    }
-                    true
-                })
+                // Entities on the deleted tag go to Untagged (SketchUp asks; this is
+                // its default choice, unverified).
+                doc.edit_model(|m, ents| crate::tray_extra::delete_tags(m, ents, &[i]))
             }
             Event::TagRename(i, name) if i > 0 => doc.edit_model(|m, _| {
                 m.layers.get_mut(i).is_some_and(|l| {
@@ -334,7 +320,17 @@ impl App {
                                     x.layer = layer;
                                 }
                             }
-                            Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => {}
+                            Owner::Dimension(i) => {
+                                if let Some(x) = ents.dimensions.get_mut(i) {
+                                    x.layer = layer;
+                                }
+                            }
+                            Owner::Text(i) => {
+                                if let Some(x) = ents.texts.get_mut(i) {
+                                    x.layer = layer;
+                                }
+                            }
+                            Owner::Section(_) => {}
                         }
                     }
                     !items.is_empty()
@@ -501,7 +497,10 @@ impl App {
                 sh.from_edges = s.from_edges;
                 true
             }
-            e => self.tray_more_event(e),
+            e => match self.tray_extra_event(e) {
+                Ok(rebuild) => rebuild,
+                Err(e) => self.tray_more_event(e),
+            },
         }
     }
 }
@@ -603,11 +602,12 @@ fn tag_color(i: usize) -> [u8; 3] {
 fn outliner(
     m: &Model,
     ents: &Entities,
-    selected: &[usize],
+    (selected, sections): (&[usize], &[usize]),
     open: Option<&[usize]>,
     depth: usize,
 ) -> Vec<OutlinerNode> {
-    ents.instances
+    let mut nodes: Vec<OutlinerNode> = ents
+        .instances
         .iter()
         .enumerate()
         .map(|(i, inst)| {
@@ -629,7 +629,9 @@ fn outliner(
                 selected: depth == 0 && selected.contains(&i),
                 // Guard against definitions that contain themselves.
                 children: match def {
-                    Some(d) if depth < 32 => outliner(m, &d.entities, &[], child_open, depth + 1),
+                    Some(d) if depth < 32 => {
+                        outliner(m, &d.entities, (&[], &[]), child_open, depth + 1)
+                    }
                     _ => Vec::new(),
                 },
                 instance_hidden: inst.hidden,
@@ -637,7 +639,26 @@ fn outliner(
                 open: child_open.is_some(),
             }
         })
-        .collect()
+        .collect();
+    // Section planes after the groups and components (path index past them).
+    nodes.extend(
+        ents.section_planes
+            .iter()
+            .enumerate()
+            .map(|(k, s)| OutlinerNode {
+                name: s.name.clone(),
+                kind: OutlinerKind::SectionPlane {
+                    active: ents.active_section == Some(k),
+                },
+                hidden: s.hidden,
+                selected: depth == 0 && sections.contains(&k),
+                children: Vec::new(),
+                instance_hidden: s.hidden,
+                locked: false,
+                open: false,
+            }),
+    );
+    nodes
 }
 
 #[cfg(test)]

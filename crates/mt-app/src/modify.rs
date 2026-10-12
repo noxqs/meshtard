@@ -159,6 +159,9 @@ pub trait ModifyTool {
     fn take_sampled_material(&mut self) -> Option<Option<usize>> {
         None
     }
+    /// Materials panel Sample Paint: the next click samples like Alt+click (Paint
+    /// Bucket), then the tool paints again.
+    fn start_sample(&mut self) {}
     /// Points to draw over the view (context space) for the cursor at `cur`.
     fn markers(&self, _cur: &Inference) -> Vec<Marker> {
         Vec::new()

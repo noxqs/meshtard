@@ -108,6 +108,10 @@ pub fn collect(doc: &Document, scene: &mut Scene) {
         show_hidden: doc.model.style.hidden_objects,
         dimension: doc.model.dimension_style,
         text: doc.model.text_style,
+        tags: (0..doc.model.layers.len())
+            .map(|l| (doc.model.layer_shown(l), doc.model.layers[l].color))
+            .collect(),
+        color_by_tag: doc.model.color_by_tag,
     };
     add(&doc.model.root, DMat4::IDENTITY, root, &o, scene);
     if !root {
@@ -122,27 +126,54 @@ struct Options {
     show_hidden: bool,
     dimension: DimensionStyle,
     text: TextStyle,
+    /// Per tag: shown (tag and folders visible) and color.
+    tags: Vec<(bool, [u8; 3])>,
+    /// Tags panel Color by Tag: labels and lines in their tag's color.
+    color_by_tag: bool,
+}
+
+impl Options {
+    /// Whether an annotation on `layer` is drawn (its tag is shown).
+    fn shown(&self, layer: Option<usize>) -> bool {
+        layer.is_none_or(|l| self.tags.get(l).is_none_or(|t| t.0))
+    }
+
+    /// The Color by Tag color for `layer` (Untagged's for `None`), when on.
+    fn tag_color(&self, layer: Option<usize>) -> Option<[u8; 3]> {
+        self.color_by_tag
+            .then(|| self.tags.get(layer.unwrap_or(0)).map(|t| t.1))
+            .flatten()
+    }
+}
+
+fn rgba(c: [u8; 3]) -> [f32; 4] {
+    [
+        f32::from(c[0]) / 255.0,
+        f32::from(c[1]) / 255.0,
+        f32::from(c[2]) / 255.0,
+        1.0,
+    ]
 }
 
 fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) {
     let (units, show_hidden) = (o.units, o.show_hidden);
     let w = |p: DVec3| xf.transform_point3(p);
     let f = |p: DVec3| w(p).as_vec3().to_array();
-    let mut line = |a: DVec3, b: DVec3, owner: Option<Owner>| {
-        scene
-            .edges
-            .push(Segment::line(f(a), f(b), LINE_COLOR, [1.0, 0.0]));
+    let mut line = |a: DVec3, b: DVec3, owner: Option<Owner>, color: Option<[u8; 3]>| {
+        let c = color.map_or(LINE_COLOR, rgba);
+        scene.edges.push(Segment::line(f(a), f(b), c, [1.0, 0.0]));
         scene.edge_owner.push(owner);
     };
     let mut labels = Vec::new();
     for (i, d) in ents.dimensions.iter().enumerate() {
-        if d.hidden && !show_hidden {
+        if (d.hidden && !show_hidden) || !o.shown(d.layer) {
             continue;
         }
         let owner = owned.then_some(Owner::Dimension(i));
+        let tag_color = o.tag_color(d.layer);
         // Extension lines overshoot by a tenth of the offset (unverified).
         for [a, b] in d.segments(d.offset.length() * 0.1) {
-            line(a, b, owner);
+            line(a, b, owner, tag_color);
         }
         let [p, q] = d.line();
         let arrows = match d.kind {
@@ -159,15 +190,16 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
             arrows,
             endpoint: style.endpoint,
             font_size: style.font_size,
-            color: [0, 0, 0],
+            color: tag_color.unwrap_or([0, 0, 0]),
             // Radial dimensions keep their text on the leader, facing the screen.
             along: (d.kind == DimensionKind::Linear).then_some(([w(p), w(q)], style.align)),
         });
     }
     for (i, t) in ents.texts.iter().enumerate() {
-        if t.hidden && !show_hidden {
+        if (t.hidden && !show_hidden) || !o.shown(t.layer) {
             continue;
         }
+        let tag_color = o.tag_color(t.layer);
         let owner = owned.then_some(Owner::Text(i));
         let style = t.style.unwrap_or(o.text);
         let leader = !t.screen && style.leader != LeaderKind::Hidden;
@@ -175,7 +207,7 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
             Anchor::Screen(t.point.truncate())
         } else {
             if leader && t.leader.length() > mt_kernel::TOL {
-                line(t.point, t.point + t.leader, owner);
+                line(t.point, t.point + t.leader, owner, tag_color);
             }
             Anchor::World(w(t.point + t.leader))
         };
@@ -190,7 +222,7 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
             },
             endpoint: style.endpoint,
             font_size: style.font_size,
-            color: style.color,
+            color: tag_color.unwrap_or(style.color),
             along: None,
         });
     }

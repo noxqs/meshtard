@@ -67,6 +67,7 @@ mod texture_position;
 mod tool_extra;
 mod tools;
 mod tray;
+mod tray_extra;
 mod tray_more;
 mod welcome;
 
@@ -496,6 +497,8 @@ struct App {
     match_photo: match_photo::MatchPhoto,
     /// Extensions: Rhai scripts, the Extension Manager and Warehouse.
     extensions: extensions::Extensions,
+    /// Tray panel collections and thumbnails.
+    tray_lib: tray_extra::TrayLib,
 }
 
 impl App {
@@ -613,6 +616,7 @@ impl App {
             small: Default::default(),
             match_photo: Default::default(),
             extensions: Default::default(),
+            tray_lib: Default::default(),
         };
         // SketchUp starts with an empty model ready to draw in.
         app.document = Some(Document::untitled());
@@ -2801,6 +2805,7 @@ impl eframe::App for App {
             }
         }
         self.apply_model_edit(frame);
+        self.tray_lib_ui(ui.ctx(), frame);
         if self.poll_external_texture(ui.ctx())
             && let Some(rs) = frame.wgpu_render_state()
         {

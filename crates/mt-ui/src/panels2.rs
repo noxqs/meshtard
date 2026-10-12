@@ -21,7 +21,7 @@ use crate::panels::{
 use crate::theme::Theme32;
 use crate::tray_data::{
     DASH_NAMES, OutlinerKind, SCENE_PROPS, SelectMode, TagTreeItem, TrayData, outliner_can_move,
-    outliner_node, outliner_rows, tag_tree_rows,
+    outliner_node, outliner_parent_paths, outliner_rows_sorted, range_select, tag_tree_rows_sorted,
 };
 use crate::{Event, Shell};
 
@@ -31,19 +31,38 @@ pub(crate) struct MoreUi {
     /// Styles Edit tab, Watermark page: the selected watermark.
     pub(crate) watermark_selected: Option<usize>,
     tag_filter: String,
-    /// Row selected in the Tags list (target of Delete and Add Folder).
+    /// Row last clicked in the Tags list (target of Add Folder; anchor of Shift
+    /// range selection).
     tag_selected: Option<TagTreeItem>,
+    /// Rows selected in the Tags list (Ctrl toggles, Shift selects a range).
+    pub(crate) tag_set: Vec<TagTreeItem>,
+    pub(crate) tag_sort: crate::tray_data::TagSort,
+    /// Apply Tags to Scenes dialog: the scenes checked.
+    pub(crate) tag_apply: Option<Vec<bool>>,
     /// Tag or folder being renamed, the text, and whether focus was requested.
-    tag_rename: Option<(TagTreeItem, String, bool)>,
+    pub(crate) tag_rename: Option<(TagTreeItem, String, bool)>,
     folders_collapsed: HashSet<usize>,
     /// A tag being dragged onto a folder.
-    tag_drag: Option<usize>,
+    pub(crate) tag_drag: Option<usize>,
     outliner_expanded: HashSet<Vec<usize>>,
     outliner_root_collapsed: bool,
     outliner_filter: String,
     outliner_rename: Option<(Vec<usize>, String, bool)>,
     /// An Outliner row being dragged onto another.
     outliner_drag: Option<Vec<usize>>,
+    /// Outliner Details > Sort by Name.
+    pub(crate) outliner_sort: bool,
+    /// Materials and Components panels: the collection shown (`None`: In Model)
+    /// and the Materials thumbnail style.
+    pub(crate) material_collection: Option<usize>,
+    pub(crate) component_collection: Option<usize>,
+    pub(crate) thumbnail_style: crate::tray_data::ThumbnailStyle,
+    /// Components Statistics tab: count nested components' contents.
+    pub(crate) stats_expand: bool,
+    /// Scenes panel View Options.
+    pub(crate) scenes_view: crate::tray_data::ScenesView,
+    /// Scene tab search: popup open and its text.
+    pub(crate) scene_search: Option<String>,
     /// Scene detail fields and the scene they were loaded from.
     scene_fields_of: Option<usize>,
     scene_name: String,
@@ -52,7 +71,13 @@ pub(crate) struct MoreUi {
     scene_update: Option<(usize, [bool; 7])>,
     /// Scenes panel details shown (SketchUp's Show Details toggle).
     scene_details_hidden: bool,
-    styles_edit: bool,
+    /// Styles panel tab: 0 Select, 1 Edit, 2 Mix.
+    pub(crate) styles_tab: u8,
+    /// Collection shown in the Styles Select tab (`None`: In Model) and in the Mix
+    /// tab's browser, and the Mix tab's chosen source.
+    pub(crate) style_collection: Option<usize>,
+    pub(crate) mix_collection: Option<usize>,
+    pub(crate) mix_source: Option<crate::tray_data::StyleSource>,
     style_selected: Option<usize>,
 }
 
@@ -102,17 +127,38 @@ impl Shell {
     /// a folder.
     pub(crate) fn tags_panel2(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
         let t = self.theme.clone();
-        let rows = tag_tree_rows(
+        let rows = tag_tree_rows_sorted(
             &data.tags,
             &data.tag_folders,
             &self.tray_ui.more.folders_collapsed,
             &self.tray_ui.more.tag_filter,
+            self.tray_ui.more.tag_sort,
         );
         let valid = |item: TagTreeItem| match item {
             TagTreeItem::Tag(i) => i < data.tags.len(),
             TagTreeItem::Folder(f) => f < data.tag_folders.len(),
         };
         let selected = self.tray_ui.more.tag_selected.filter(|&s| valid(s));
+        self.tray_ui.more.tag_set.retain(|&s| valid(s));
+        let set = self.tray_ui.more.tag_set.clone();
+        // Selected tags (not Untagged) and folders, for the commands on several rows.
+        let mut set_tags: Vec<usize> = set
+            .iter()
+            .filter_map(|r| match r {
+                TagTreeItem::Tag(i) if *i > 0 => Some(*i),
+                _ => None,
+            })
+            .collect();
+        set_tags.sort_unstable();
+        let mut set_folders: Vec<usize> = set
+            .iter()
+            .filter_map(|r| match r {
+                TagTreeItem::Folder(f) => Some(*f),
+                _ => None,
+            })
+            .collect();
+        set_folders.sort_unstable();
+        self.tag_apply_dialog(ui, data, &set_tags);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if icon_button(ui, &t, "Add Tag", true, paint_plus).clicked() {
@@ -126,34 +172,75 @@ impl Shell {
                 };
                 self.pending.push(Event::TagFolderAdd { parent, tag });
             }
-            let can_delete = matches!(selected, Some(TagTreeItem::Folder(_)))
-                || matches!(selected, Some(TagTreeItem::Tag(i)) if i > 0);
+            let can_delete = !set_tags.is_empty() || !set_folders.is_empty();
             if icon_button(ui, &t, "Delete", can_delete, paint_minus).clicked() {
-                match selected {
-                    Some(TagTreeItem::Tag(i)) if i > 0 => self.pending.push(Event::TagDelete(i)),
-                    Some(TagTreeItem::Folder(f)) => self.pending.push(Event::TagFolderDelete(f)),
-                    _ => {}
+                // Folders from the last (indices of the others stay valid), then the
+                // tags as one step.
+                for &f in set_folders.iter().rev() {
+                    self.pending.push(Event::TagFolderDelete(f));
+                }
+                match set_tags.as_slice() {
+                    [] => {}
+                    [i] => self.pending.push(Event::TagDelete(*i)),
+                    many => self.pending.push(Event::TagsDelete(many.to_vec())),
                 }
                 self.tray_ui.more.tag_selected = None;
+                self.tray_ui.more.tag_set.clear();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = icon_button(ui, &t, "Details", true, paint_details);
                 egui::Popup::menu(&r).show(|ui| {
-                    ui.set_min_width(160.0);
-                    if ui.button("Purge").clicked() {
-                        self.pending.push(Event::TagPurge);
+                    ui.set_min_width(180.0);
+                    if ui.button("Select All").clicked() {
+                        self.tray_ui.more.tag_set = rows.iter().map(|r| r.0).collect();
                         ui.close();
                     }
-                    let tag = match selected {
-                        Some(TagTreeItem::Tag(i)) => Some(i),
-                        _ => None,
-                    };
+                    if ui.button("Expand All").clicked() {
+                        self.tray_ui.more.folders_collapsed.clear();
+                        ui.close();
+                    }
+                    if ui.button("Collapse All").clicked() {
+                        self.tray_ui.more.folders_collapsed = (0..data.tag_folders.len()).collect();
+                        ui.close();
+                    }
+                    ui.separator();
+                    // The selected tags (Untagged included when it is selected).
+                    let mut tagged: Vec<usize> = set
+                        .iter()
+                        .filter_map(|r| match r {
+                            TagTreeItem::Tag(i) => Some(*i),
+                            _ => None,
+                        })
+                        .collect();
+                    tagged.sort_unstable();
                     if ui
-                        .add_enabled(tag.is_some(), egui::Button::new("Select All Tagged"))
+                        .add_enabled(!tagged.is_empty(), egui::Button::new("Select All Tagged"))
                         .clicked()
-                        && let Some(i) = tag
                     {
-                        self.pending.push(Event::TagSelectAll(i));
+                        self.pending.push(match tagged.as_slice() {
+                            [i] => Event::TagSelectAll(*i),
+                            many => Event::TagsSelectTagged(many.to_vec()),
+                        });
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !data.scenes.is_empty(),
+                            egui::Button::new("Apply Tags to Scenes..."),
+                        )
+                        .clicked()
+                    {
+                        self.tray_ui.more.tag_apply = Some(vec![true; data.scenes.len()]);
+                        ui.close();
+                    }
+                    let mut show_new = data.show_new_tags;
+                    if ui.checkbox(&mut show_new, "Show New Tags").changed() {
+                        data.show_new_tags = show_new;
+                        self.pending.push(Event::ShowNewTags(show_new));
+                    }
+                    ui.separator();
+                    if ui.button("Purge").clicked() {
+                        self.pending.push(Event::TagPurge);
                         ui.close();
                     }
                 });
@@ -176,16 +263,66 @@ impl Shell {
         ui.spacing_mut().item_spacing.y = 0.0;
         let (head, _) = ui.allocate_exact_size(vec2(w, ROW), Sense::hover());
         let cols = Columns::new(head);
+        // Column headers sort: Name A-Z / Z-A, eye visible / hidden first.
+        let name_head = ui.interact(
+            cols.name,
+            ui.id().with("mt_ui_tags_sort_name"),
+            Sense::click(),
+        );
+        let eye_head = ui.interact(
+            cols.eye,
+            ui.id().with("mt_ui_tags_sort_eye"),
+            Sense::click(),
+        );
+        {
+            use crate::tray_data::TagSort;
+            let sort = &mut self.tray_ui.more.tag_sort;
+            if name_head.on_hover_text("Sort by name").clicked() {
+                *sort = if *sort == TagSort::NameUp {
+                    TagSort::NameDown
+                } else {
+                    TagSort::NameUp
+                };
+            }
+            if eye_head.on_hover_text("Sort by visibility").clicked() {
+                *sort = if *sort == TagSort::VisibleFirst {
+                    TagSort::HiddenFirst
+                } else {
+                    TagSort::VisibleFirst
+                };
+            }
+        }
         let p = ui.painter();
         p.rect_filled(head, 0.0, t.panel_header);
         let font = FontId::proportional(t.sizes.font);
-        p.text(
-            pos2(cols.name.left() + 4.0, head.center().y),
-            Align2::LEFT_CENTER,
-            "Name",
-            font.clone(),
-            t.text,
-        );
+        let name_end = p
+            .text(
+                pos2(cols.name.left() + 4.0, head.center().y),
+                Align2::LEFT_CENTER,
+                "Name",
+                font.clone(),
+                t.text,
+            )
+            .right();
+        // Sort arrow after "Name": up for A-Z, down for Z-A.
+        let up = match self.tray_ui.more.tag_sort {
+            crate::tray_data::TagSort::NameUp => Some(true),
+            crate::tray_data::TagSort::NameDown => Some(false),
+            _ => None,
+        };
+        if let Some(up) = up {
+            let c = pos2(name_end + 8.0, head.center().y);
+            let k = if up { -1.0 } else { 1.0 };
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(c.x - 3.5, c.y - 2.0 * k),
+                    pos2(c.x + 3.5, c.y - 2.0 * k),
+                    pos2(c.x, c.y + 2.5 * k),
+                ],
+                t.text,
+                Stroke::NONE,
+            ));
+        }
         paint_eye(p, cols.eye, t.text, true);
         p.text(
             pos2(cols.dashes.left() + 4.0, head.center().y),
@@ -197,11 +334,13 @@ impl Shell {
 
         let released = ui.input(|i| i.pointer.any_released());
         let pointer = ui.input(|i| i.pointer.latest_pos());
+        let mods = ui.input(|i| i.modifiers);
         let mut drop_on: Option<Option<usize>> = None;
-        for (item, depth) in rows {
+        let items: Vec<TagTreeItem> = rows.iter().map(|r| r.0).collect();
+        for &(item, depth) in &rows {
             let (row, resp) = ui.allocate_exact_size(vec2(w, ROW), Sense::click_and_drag());
             let cols = Columns::new(row);
-            let is_sel = selected == Some(item);
+            let is_sel = set.contains(&item);
             let dragging_here = self.tray_ui.more.tag_drag.is_some()
                 && matches!(item, TagTreeItem::Folder(_))
                 && pointer.is_some_and(|q| row.contains(q));
@@ -214,7 +353,20 @@ impl Shell {
             };
             ui.painter().rect_filled(row, 0.0, fill);
             if resp.clicked() {
-                self.tray_ui.more.tag_selected = Some(item);
+                let more = &mut self.tray_ui.more;
+                if mods.shift {
+                    more.tag_set = range_select(&items, selected, item);
+                } else if mods.command || mods.ctrl {
+                    if let Some(k) = more.tag_set.iter().position(|&x| x == item) {
+                        more.tag_set.remove(k);
+                    } else {
+                        more.tag_set.push(item);
+                    }
+                    more.tag_selected = Some(item);
+                } else {
+                    more.tag_set = vec![item];
+                    more.tag_selected = Some(item);
+                }
             }
             let indent = 14.0 * depth as f32;
             let name_rect = Rect::from_min_max(
@@ -316,7 +468,18 @@ impl Shell {
                     let ink = if can_hide { t.text } else { t.text_disabled };
                     paint_eye(ui.painter(), cols.eye, ink, tag.visible);
                     if eye.clicked() {
-                        self.pending.push(Event::TagVisible(i, !tag.visible));
+                        // With several tags selected, the eye of one of them sets all
+                        // of them (the active tag stays visible).
+                        let many: Vec<usize> = set_tags
+                            .iter()
+                            .copied()
+                            .filter(|&k| k != data.active_tag)
+                            .collect();
+                        if is_sel && many.len() > 1 {
+                            self.pending.push(Event::TagsVisible(many, !tag.visible));
+                        } else {
+                            self.pending.push(Event::TagVisible(i, !tag.visible));
+                        }
                     }
                     let mut color = tag.color;
                     let swatch = cols.color.shrink2(vec2(4.0, 3.0));
@@ -352,12 +515,39 @@ impl Shell {
                         data.tags[i].dashes = dashes;
                         self.pending.push(Event::TagDashes(i, dashes));
                     }
+                    // The right-click acts on the whole selection when the row is in it.
+                    let group: Vec<usize> = if is_sel && set_tags.len() > 1 {
+                        set_tags.clone()
+                    } else {
+                        vec![i]
+                    };
                     resp.context_menu(|ui| {
                         if ui.button("Select All Tagged").clicked() {
-                            self.pending.push(Event::TagSelectAll(i));
+                            self.pending.push(match group.as_slice() {
+                                [_, _, ..] => Event::TagsSelectTagged(group.clone()),
+                                _ => Event::TagSelectAll(i),
+                            });
                             ui.close();
                         }
-                        if i > 0 {
+                        if group.len() > 1 {
+                            ui.menu_button("Move to Folder", |ui| {
+                                let choices = std::iter::once(("(No Folder)", None)).chain(
+                                    data.tag_folders
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(f, x)| (x.name.as_str(), Some(f))),
+                                );
+                                for (label, folder) in choices {
+                                    if ui.button(label).clicked() {
+                                        self.pending.push(Event::TagsMove {
+                                            tags: group.clone(),
+                                            folder,
+                                        });
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        } else if i > 0 {
                             ui.menu_button("Move to Folder", |ui| {
                                 if ui
                                     .add_enabled(
@@ -472,11 +662,38 @@ impl Shell {
     /// tool's add/toggle keys.
     pub(crate) fn outliner_panel2(&mut self, ui: &mut egui::Ui, data: &TrayData) {
         let t = self.theme.clone();
-        ui.add(
-            egui::TextEdit::singleline(&mut self.tray_ui.more.outliner_filter)
-                .hint_text("Filter")
-                .desired_width(ui.available_width()),
-        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let r = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let r = icon_button(ui, &t, "Details", true, paint_details);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tray_ui.more.outliner_filter)
+                        .hint_text("Filter")
+                        .desired_width(ui.available_width()),
+                );
+                r
+            });
+            egui::Popup::menu(&r.inner).show(|ui| {
+                ui.set_min_width(150.0);
+                let more = &mut self.tray_ui.more;
+                if ui.button("Expand All").clicked() {
+                    more.outliner_expanded = outliner_parent_paths(&data.outliner);
+                    more.outliner_root_collapsed = false;
+                    ui.close();
+                }
+                if ui.button("Collapse All").clicked() {
+                    more.outliner_expanded.clear();
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .checkbox(&mut more.outliner_sort, "Sort by Name")
+                    .clicked()
+                {
+                    ui.close();
+                }
+            });
+        });
         ui.add_space(2.0);
         let w = ui.available_width();
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -517,10 +734,11 @@ impl Shell {
         let mut drop: Option<Vec<usize>> = over_root.then(Vec::new);
 
         if !self.tray_ui.more.outliner_root_collapsed {
-            let rows = outliner_rows(
+            let rows = outliner_rows_sorted(
                 &data.outliner,
                 &self.tray_ui.more.outliner_expanded,
                 &self.tray_ui.more.outliner_filter,
+                self.tray_ui.more.outliner_sort,
             );
             let mods = ui.input(|i| i.modifiers);
             for r in rows {
@@ -528,14 +746,17 @@ impl Shell {
                     continue;
                 };
                 let (row, resp) = ui.allocate_exact_size(vec2(w, ROW), Sense::click_and_drag());
-                let over = self
-                    .tray_ui
-                    .more
-                    .outliner_drag
-                    .as_ref()
-                    .is_some_and(|from| {
-                        outliner_can_move(from, &r.path) && pointer.is_some_and(|q| row.contains(q))
-                    });
+                let section = matches!(node.kind, OutlinerKind::SectionPlane { .. });
+                let over = !section
+                    && self
+                        .tray_ui
+                        .more
+                        .outliner_drag
+                        .as_ref()
+                        .is_some_and(|from| {
+                            outliner_can_move(from, &r.path)
+                                && pointer.is_some_and(|q| row.contains(q))
+                        });
                 if over {
                     drop = Some(r.path.clone());
                 }
@@ -575,6 +796,9 @@ impl Shell {
                 match node.kind {
                     OutlinerKind::Group => paint_group_icon(ui.painter(), icon, ink),
                     OutlinerKind::Component { .. } => paint_component_icon(ui.painter(), icon, ink),
+                    OutlinerKind::SectionPlane { active } => {
+                        crate::panels3::paint_section_icon(ui.painter(), icon, ink, active);
+                    }
                 }
                 // Status icons at the right: eye, lock, open.
                 let eye = Rect::from_min_max(pos2(row.right() - 22.0, row.top()), row.max);
@@ -635,7 +859,7 @@ impl Shell {
                         more.outliner_rename = Some((r.path.clone(), node.name.clone(), false));
                     }
                 }
-                if resp.drag_started() {
+                if resp.drag_started() && !section {
                     self.tray_ui.more.outliner_drag = Some(r.path.clone());
                 }
                 if resp.clicked() {
@@ -663,7 +887,8 @@ impl Shell {
     /// Scenes panel: Update (asks which properties), Add, Delete, Move Up, Move Down,
     /// the scene list (scenes left out of the animation in parentheses) and the
     /// selected scene's details: name, description, Include in Animation and the
-    /// properties it saves. Thumbnails are left out.
+    /// properties it saves. View Options shows the list with thumbnails
+    /// ([`TrayData::scene_thumbnails`], rendered by the app).
     pub(crate) fn scenes_panel2(&mut self, ui: &mut egui::Ui, data: &TrayData) {
         let t = self.theme.clone();
         let n = data.scenes.len();
@@ -700,15 +925,35 @@ impl Shell {
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let hidden = &mut self.tray_ui.more.scene_details_hidden;
-                let label = if *hidden {
-                    "Show Details"
-                } else {
-                    "Hide Details"
-                };
-                if ui.small_button(label).clicked() {
-                    *hidden ^= true;
-                }
+                // View Options: list or thumbnails (SketchUp's menu also has Details
+                // and a Scene Manager layout; unverified).
+                let r = icon_button(ui, &t, "View Options", true, paint_details);
+                egui::Popup::menu(&r).show(|ui| {
+                    use crate::tray_data::ScenesView;
+                    ui.set_min_width(150.0);
+                    let view = &mut self.tray_ui.more.scenes_view;
+                    for (v, label) in [
+                        (ScenesView::List, "List"),
+                        (ScenesView::SmallThumbnails, "Small Thumbnails"),
+                        (ScenesView::LargeThumbnails, "Large Thumbnails"),
+                    ] {
+                        if ui.selectable_label(*view == v, label).clicked() {
+                            *view = v;
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    let hidden = &mut self.tray_ui.more.scene_details_hidden;
+                    let label = if *hidden {
+                        "Show Details"
+                    } else {
+                        "Hide Details"
+                    };
+                    if ui.button(label).clicked() {
+                        *hidden ^= true;
+                        ui.close();
+                    }
+                });
             });
         });
         self.scene_update_dialog(ui, data);
@@ -719,8 +964,14 @@ impl Shell {
         }
         ui.spacing_mut().item_spacing.y = 0.0;
         let top = ui.cursor().top();
+        let thumb_h = match self.tray_ui.more.scenes_view {
+            crate::tray_data::ScenesView::List => 0.0,
+            crate::tray_data::ScenesView::SmallThumbnails => 36.0,
+            crate::tray_data::ScenesView::LargeThumbnails => 72.0,
+        };
         for (i, name) in data.scenes.iter().enumerate() {
-            let (row, r) = ui.allocate_exact_size(vec2(w, ROW + 4.0), Sense::click());
+            let (row, r) =
+                ui.allocate_exact_size(vec2(w, (ROW + 4.0).max(thumb_h + 6.0)), Sense::click());
             let (fill, ink) = if active == Some(i) {
                 (t.selection, Color32::WHITE)
             } else if r.hovered() {
@@ -738,8 +989,37 @@ impl Shell {
             } else {
                 format!("({name})")
             };
+            let text_x = if thumb_h > 0.0 {
+                // Thumbnail at 16:9 (a frame until the app has rendered it).
+                let thumb = Rect::from_min_size(
+                    pos2(row.left() + 4.0, row.top() + 3.0),
+                    vec2(thumb_h * 16.0 / 9.0, thumb_h),
+                );
+                match data.scene_thumbnails.get(i).copied().flatten() {
+                    Some(tex) => {
+                        ui.painter().image(
+                            tex,
+                            thumb,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    None => {
+                        ui.painter().rect_filled(thumb, 0.0, t.panel_header);
+                    }
+                }
+                ui.painter().rect_stroke(
+                    thumb,
+                    0.0,
+                    Stroke::new(1.0, t.border),
+                    StrokeKind::Inside,
+                );
+                thumb.right() + 6.0
+            } else {
+                row.left() + 8.0
+            };
             ui.painter().with_clip_rect(row).text(
-                pos2(row.left() + 8.0, row.center().y),
+                pos2(text_x, row.center().y),
                 Align2::LEFT_CENTER,
                 text,
                 FontId::proportional(t.sizes.font),
@@ -854,20 +1134,28 @@ impl Shell {
 
     /// Styles panel: the Select tab lists the model's styles (click applies one) with
     /// Create, Update, Delete and Purge Unused; the Edit tab edits the current
-    /// settings. Collections, the Mix tab and .style files are left out.
+    /// settings; the Mix tab and collections are in `panels3.rs`, `.style` files are
+    /// read and written by the app (Details > Open..., Save As...).
     pub(crate) fn styles_panel2(&mut self, ui: &mut egui::Ui, data: &mut TrayData) {
         let t = self.theme.clone();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            for (edit, label) in [(false, "Select"), (true, "Edit")] {
-                if tab_button(ui, &t, label, self.tray_ui.more.styles_edit == edit).clicked() {
-                    self.tray_ui.more.styles_edit = edit;
+            for (tab, label) in [(0, "Select"), (1, "Edit"), (2, "Mix")] {
+                if tab_button(ui, &t, label, self.tray_ui.more.styles_tab == tab).clicked() {
+                    self.tray_ui.more.styles_tab = tab;
                 }
             }
         });
-        if self.tray_ui.more.styles_edit {
-            self.styles_edit(ui, data);
-            return;
+        match self.tray_ui.more.styles_tab {
+            1 => {
+                self.styles_edit(ui, data);
+                return;
+            }
+            2 => {
+                self.styles_mix(ui, data);
+                return;
+            }
+            _ => {}
         }
         let n = data.styles.len();
         let selected = self
@@ -902,7 +1190,25 @@ impl Shell {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = icon_button(ui, &t, "Details", true, paint_details);
                 egui::Popup::menu(&r).show(|ui| {
-                    ui.set_min_width(140.0);
+                    ui.set_min_width(180.0);
+                    if ui.button("Open...").clicked() {
+                        self.pending.push(Event::StyleOpenFile);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(selected.is_some(), egui::Button::new("Save As..."))
+                        .clicked()
+                        && let Some(i) = selected
+                    {
+                        self.pending.push(Event::StyleSaveFile(i));
+                        ui.close();
+                    }
+                    if ui.button("Open or Create a Collection...").clicked() {
+                        self.pending
+                            .push(Event::CollectionAdd(crate::CollectionKind::Styles));
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui
                         .add_enabled(n > 0, egui::Button::new("Purge Unused"))
                         .clicked()
@@ -913,7 +1219,27 @@ impl Shell {
                 });
             });
         });
-        ui.label("In Model");
+        let pick = crate::panels3::collection_combo(
+            ui,
+            "mt_ui_style_collection",
+            &data.style_collections,
+            &mut self.tray_ui.more.style_collection,
+        );
+        if let Some(c) = pick {
+            self.pending.push(Event::CollectionOpened {
+                kind: crate::CollectionKind::Styles,
+                collection: c,
+            });
+        }
+        if let Some(c) = self
+            .tray_ui
+            .more
+            .style_collection
+            .filter(|&c| c < data.style_collections.len())
+        {
+            self.style_collection_list(ui, data, c);
+            return;
+        }
         if n == 0 {
             ui.label(
                 RichText::new(

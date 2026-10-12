@@ -343,6 +343,9 @@ pub struct Model {
     pub tag_folders: Vec<crate::model_data::TagFolder>,
     /// Tags panel "Color by tag": faces and edges drawn in their tag's color.
     pub color_by_tag: bool,
+    /// Tags panel Details > Show New Tags: a tag added later is visible in the
+    /// scenes that already exist (on), or hidden in them (off). Model-only.
+    pub show_new_tags: bool,
     /// Styles panel "In Model" styles and the one last applied.
     pub styles: Vec<crate::model_data::NamedStyle>,
     pub active_style: Option<usize>,
@@ -378,6 +381,7 @@ impl Default for Model {
             axes: DMat4::IDENTITY,
             tag_folders: Vec::new(),
             color_by_tag: false,
+            show_new_tags: true,
             styles: Vec::new(),
             active_style: None,
             edit_fade: Default::default(),
