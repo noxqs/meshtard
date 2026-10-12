@@ -1,11 +1,12 @@
-//! The macOS menu bar: the same menus as `spec/menus.toml`, as a native NSMenu (via
+//! The macOS menu bar: the spec's menus after `Spec::mac_layout` (SketchUp for Mac's
+//! layout: application menu first, `spec/menus_mac.toml`) as a native NSMenu (via
 //! `muda`) instead of the in-window menu bar the shell draws on Windows and Linux.
 //!
 //! Shortcuts with a modifier become menu key equivalents (Ctrl in the keymap is Cmd).
-//! Single-key tool shortcuts (L, R, Space...) are left to the app's own handling so
-//! they don't fire while typing in a text field. SketchUp for Mac's menu layout differs
-//! from Windows (an application menu, Preferences under it); this uses the Windows
-//! layout plus a minimal application menu (unverified against SketchUp for Mac).
+//! Single-key tool shortcuts (L, R, Space, Backspace...) are left to the app's own
+//! handling so they don't fire while typing in a text field. The system's own items
+//! are added here: Services, Hide, Hide Others and Show All in the application menu,
+//! Minimize and Zoom at the top of the Window menu.
 
 use std::collections::HashMap;
 
@@ -31,23 +32,48 @@ impl NativeMenu {
     pub fn install(spec: &Spec, toggles: &[&str]) -> Self {
         let menu = Menu::new();
         let mut items = Vec::new();
-        let app = Submenu::new("meshtard", true);
-        let _ = app.append_items(&[
-            &PredefinedMenuItem::about(None, None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::hide(None),
-            &PredefinedMenuItem::hide_others(None),
-            &PredefinedMenuItem::show_all(None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::quit(None),
-        ]);
+        let mut menus = spec.menus.menu.iter();
+        let app = Submenu::new("Meshtard", true);
+        if spec.is_mac_layout() {
+            let m = menus
+                .next()
+                .expect("the Mac layout has an application menu");
+            fill_app_menu(&app, &m.items, spec, toggles, &mut items);
+        } else {
+            // Windows layout (main applies the Mac one): a minimal application menu.
+            for item in system_items() {
+                let _ = app.append(&item);
+            }
+            let _ = app.append(&PredefinedMenuItem::separator());
+            let _ = app.append(&PredefinedMenuItem::quit(None));
+        }
         let _ = menu.append(&app);
-        for m in &spec.menus.menu {
+        let mut window_menu = None;
+        let mut help_menu = None;
+        for m in menus {
             let sub = Submenu::new(&m.label, true);
+            if m.label == "Window" {
+                let _ = sub.append_items(&[
+                    &PredefinedMenuItem::minimize(None),
+                    &PredefinedMenuItem::maximize(Some("Zoom")),
+                    &PredefinedMenuItem::separator(),
+                ]);
+            }
             fill(&sub, &m.items, spec, toggles, &mut items);
             let _ = menu.append(&sub);
+            match m.label.as_str() {
+                "Window" => window_menu = Some(sub),
+                "Help" => help_menu = Some(sub),
+                _ => {}
+            }
         }
         menu.init_for_nsapp();
+        if let Some(sub) = &window_menu {
+            sub.set_as_windows_menu_for_nsapp();
+        }
+        if let Some(sub) = &help_menu {
+            sub.set_as_help_menu_for_nsapp();
+        }
         Self {
             _menu: menu,
             items,
@@ -80,6 +106,38 @@ impl NativeMenu {
             self.state.insert(id.clone(), now);
         }
     }
+}
+
+/// Services, Hide, Hide Others, Show All.
+fn system_items() -> [PredefinedMenuItem; 5] {
+    [
+        PredefinedMenuItem::services(None),
+        PredefinedMenuItem::separator(),
+        PredefinedMenuItem::hide(None),
+        PredefinedMenuItem::hide_others(None),
+        PredefinedMenuItem::show_all(None),
+    ]
+}
+
+/// The application menu from the spec, with the system's items put before the
+/// separator that precedes the last item (Quit).
+fn fill_app_menu(
+    sub: &Submenu,
+    items: &[SpecItem],
+    spec: &Spec,
+    toggles: &[&str],
+    out: &mut Vec<(String, Item)>,
+) {
+    let split = items
+        .iter()
+        .rposition(|it| matches!(it, SpecItem::Separator { .. }))
+        .unwrap_or(items.len());
+    fill(sub, &items[..split], spec, toggles, out);
+    let _ = sub.append(&PredefinedMenuItem::separator());
+    for item in system_items() {
+        let _ = sub.append(&item);
+    }
+    fill(sub, &items[split..], spec, toggles, out);
 }
 
 fn accelerator(spec: &Spec, id: &str) -> Option<Accelerator> {

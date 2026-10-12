@@ -9,6 +9,8 @@ Everything meshtard copies from SketchUp 2026 (Windows) lives here as data. The 
 | `default_model.toml` | What a new model looks like: camera, sky, ground, axes |
 | `toolbars.toml` | Toolbars of the default workspace: dock side, row, columns, buttons (command id + tooltip), separators, flyouts |
 | `tray.toml` | Default Tray: name, width, panels in order (id = Window menu command) and which start expanded |
+| `menus_mac.toml` | macOS only: application menu, flattened submenus, new labels (SketchUp for Mac; sources in `parity/MAC.md`) |
+| `keymap_mac.toml` | macOS only: shortcuts that differ from `keymap.toml` |
 | `ui_theme.toml` | Window chrome colors (Windows light theme), icon palette, sizes (font, toolbar button, status bar, Measurements box) |
 | `parity/` | Scripted scenarios to run in SketchUp and in meshtard, and the status of each |
 

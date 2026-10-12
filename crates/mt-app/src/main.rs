@@ -335,6 +335,15 @@ fn main() -> eframe::Result {
         Some(dir) => Spec::load_dir(dir.as_ref()),
         None => Spec::builtin(),
     }
+    // SketchUp for Mac's menu layout and default shortcuts (spec/menus_mac.toml,
+    // spec/keymap_mac.toml).
+    .and_then(|spec| {
+        if cfg!(target_os = "macos") {
+            spec.mac_layout()
+        } else {
+            Ok(spec)
+        }
+    })
     .unwrap_or_else(|e| {
         eprintln!("spec error: {e}");
         std::process::exit(1);

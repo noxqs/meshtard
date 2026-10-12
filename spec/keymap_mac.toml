@@ -1,0 +1,16 @@
+# macOS changes to keymap.toml (SketchUp 2026 for Mac). Applied on macOS only.
+# Sources and [doc]/[inf] marks: spec/parity/MAC.md. DRAFT: not checked in SketchUp for Mac.
+#
+# "Cmd" is the Command key (the same as "Ctrl" in keymap.toml, which macOS reads as
+# Command). An empty string removes the Windows default. Single-key tool shortcuts
+# are the same on both systems (Quick Reference Card 2026, Mac and Windows) [doc].
+verified = false
+
+[bindings]
+"edit.redo" = "Cmd+Shift+Z"          # [inf] forum + macOS convention; Windows Ctrl+Y
+"edit.select_none" = "Cmd+Shift+A"   # [inf] forum; Windows Ctrl+T (Cmd+T is the Fonts panel)
+"edit.delete" = "Backspace"          # [inf] the Mac "delete" key; Windows Delete
+"window.preferences" = "Cmd+Comma"   # [inf] macOS convention for Settings
+"file.exit" = "Cmd+Q"                # [inf] macOS convention for Quit
+"window.entity_info" = "Cmd+I"       # [inf] older Mac book (Missing Manual)
+"window.materials" = "Cmd+Shift+C"   # [inf] forum: Colors palette (Materials)

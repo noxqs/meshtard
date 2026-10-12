@@ -253,7 +253,9 @@ Nothing has been compared with real SketchUp 2026 yet (the trial is still to com
 | Platform | Linux (X11, Wayland) | unverified | main dev platform |
 | Platform | Windows build | unverified | CI-built, not yet run by hand |
 | Platform | macOS build | unverified | CI-built, not yet run by hand |
-| Platform | macOS native menu bar, Cmd shortcuts, Mac symbols | differs | Windows menu layout plus minimal app menu; SketchUp for Mac's layout differs |
+| Platform | macOS native menu bar, Cmd shortcuts, Mac symbols | unverified | native NSMenu; Ctrl in the keymap is Cmd; menu text uses Mac symbols (Cmd, Shift, Option, delete) |
+| Platform | SketchUp for Mac menu layout | unverified | `spec/menus_mac.toml` (sources in `MAC.md`): app menu Meshtard (About Meshtard, Settings... [doc: Settings in the SketchUp menu], Services/Hide/Hide Others/Show All, Quit Meshtard [inf]); File without Exit, Help without About, Window without Preferences; Default Tray submenu flattened (no trays on Mac [doc]), Show Tray named Show Dialogs [inf: SketchUp has Hide/Show Dialogs]; Window menu starts with system Minimize and Zoom [inf]. Panels stay in the tray (SketchUp: separate windows [doc]); Preferences > Workspace Mac options missing |
+| Platform | SketchUp for Mac default shortcuts | unverified | `spec/keymap_mac.toml`, all [inf] (no official Mac list of menu shortcuts found; tool keys identical per the 2026 Quick Reference Cards [doc]): Redo Cmd+Shift+Z, Select None Cmd+Shift+A, Delete = Backspace, Settings Cmd+,, Quit Cmd+Q, Entity Info Cmd+I, Materials Cmd+Shift+C; other Ctrl shortcuts become Cmd. Model Info (old sources: Shift+Cmd+I, taken by Invert Selection) unbound; forward Delete not bound on Mac; tool modifiers still Ctrl/Alt, not Command/Option |
 | Platform | HiDPI on Windows and macOS | unverified | not checked |
 | Performance | CUDA acceleration | unverified | pick index (LBVH) and ray batches on the GPU from 20k triangles with `--features cuda`; CPU fallback without driver or NVRTC; threshold being measured |
 

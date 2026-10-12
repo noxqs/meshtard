@@ -1,5 +1,6 @@
 //! Loads the SketchUp behavior spec from `spec/*.toml`: menus, keymap, default model,
-//! toolbars, the Default Tray and the window theme.
+//! toolbars, the Default Tray and the window theme, plus the macOS overlay
+//! (`menus_mac.toml`, `keymap_mac.toml`) that [`Spec::mac_layout`] applies.
 //!
 //! The spec files are embedded at compile time so the binary is self-contained.
 //! `Spec::load_dir` reads them from disk instead, for editing without rebuilding.
@@ -11,7 +12,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 mod instructor;
+mod mac;
 pub use instructor::{Instructor, ModifierHelp, ToolHelp};
+pub use mac::{MacKeymap, MacMenus, MacOverlay};
 
 const MENUS: &str = include_str!("../../../spec/menus.toml");
 const KEYMAP: &str = include_str!("../../../spec/keymap.toml");
@@ -19,6 +22,8 @@ const DEFAULT_MODEL: &str = include_str!("../../../spec/default_model.toml");
 const TOOLBARS: &str = include_str!("../../../spec/toolbars.toml");
 const TRAY: &str = include_str!("../../../spec/tray.toml");
 const UI_THEME: &str = include_str!("../../../spec/ui_theme.toml");
+const MENUS_MAC: &str = include_str!("../../../spec/menus_mac.toml");
+const KEYMAP_MAC: &str = include_str!("../../../spec/keymap_mac.toml");
 
 /// The text of every spec file, before parsing.
 struct Sources<'a> {
@@ -28,6 +33,8 @@ struct Sources<'a> {
     toolbars: &'a str,
     tray: &'a str,
     ui_theme: &'a str,
+    menus_mac: &'a str,
+    keymap_mac: &'a str,
 }
 
 const BUILTIN: Sources<'static> = Sources {
@@ -37,6 +44,8 @@ const BUILTIN: Sources<'static> = Sources {
     toolbars: TOOLBARS,
     tray: TRAY,
     ui_theme: UI_THEME,
+    menus_mac: MENUS_MAC,
+    keymap_mac: KEYMAP_MAC,
 };
 
 #[derive(Debug)]
@@ -61,6 +70,8 @@ pub struct Spec {
     pub toolbars: Toolbars,
     pub tray: Tray,
     pub ui_theme: UiTheme,
+    /// The macOS changes, applied by [`Spec::mac_layout`].
+    pub mac: MacOverlay,
 }
 
 impl Spec {
@@ -84,6 +95,8 @@ impl Spec {
             toolbars: &read("toolbars.toml")?,
             tray: &read("tray.toml")?,
             ui_theme: &read("ui_theme.toml")?,
+            menus_mac: &read("menus_mac.toml")?,
+            keymap_mac: &read("keymap_mac.toml")?,
         })
     }
 
@@ -95,8 +108,14 @@ impl Spec {
             toolbars: parse_toml("toolbars.toml", src.toolbars)?,
             tray: parse_toml("tray.toml", src.tray)?,
             ui_theme: parse_toml("ui_theme.toml", src.ui_theme)?,
+            mac: MacOverlay {
+                menus: parse_toml("menus_mac.toml", src.menus_mac)?,
+                keymap: parse_toml("keymap_mac.toml", src.keymap_mac)?,
+            },
         };
         spec.validate()?;
+        // The Mac layout must hold up too, whatever system this runs on.
+        spec.mac_layout()?;
         Ok(spec)
     }
 
@@ -243,6 +262,9 @@ fn parse_toml<T: for<'de> Deserialize<'de>>(file: &'static str, text: &str) -> R
 pub struct Menus {
     pub verified: bool,
     pub menu: Vec<Menu>,
+    /// `menu[0]` is the macOS application menu (set by [`Spec::mac_layout`]).
+    #[serde(skip)]
+    pub app_menu: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,7 +280,7 @@ impl Menu {
     }
 }
 
-fn visit_items(items: &[MenuItem], f: &mut impl FnMut(&str, &str)) {
+pub(crate) fn visit_items(items: &[MenuItem], f: &mut impl FnMut(&str, &str)) {
     for item in items {
         match item {
             MenuItem::Command { id, label } => f(id, label),
@@ -316,6 +338,8 @@ impl Shortcut {
                 "Ctrl" => &mut shortcut.ctrl,
                 "Shift" => &mut shortcut.shift,
                 "Alt" => &mut shortcut.alt,
+                // macOS: the Command key, which the app reads where "Ctrl" is written.
+                "Cmd" => &mut shortcut.ctrl,
                 other => return Err(format!("unknown modifier `{other}`")),
             };
             if std::mem::replace(flag, true) {
@@ -639,6 +663,11 @@ mod tests {
         assert!(Shortcut::parse("Ctrl+").is_err());
         assert!(Shortcut::parse("Hyper+L").is_err());
         assert!(Shortcut::parse("Ctrl+Ctrl+L").is_err());
+        assert!(Shortcut::parse("Cmd+Ctrl+L").is_err());
+        assert_eq!(
+            Shortcut::parse("Cmd+Shift+Z").unwrap(),
+            Shortcut::parse("Ctrl+Shift+Z").unwrap()
+        );
     }
 
     #[test]
