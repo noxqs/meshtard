@@ -1,9 +1,10 @@
 //! The open model: loading a `.skp` into the kernel and turning it into renderer input.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use glam::{DMat3, DMat4, DVec3};
+use mt_kernel::spatial::{FxMap, FxSet};
 use mt_kernel::{
     DefinitionId, EdgeId, Entities, FaceId, MaterialId, Model, import, tessellate, texture,
     visibility,
@@ -131,18 +132,61 @@ pub struct Scene {
     pub textures: Vec<mt_render::TextureSource>,
     /// Indices into `edges` of hidden entities drawn by View > Hidden Geometry (not
     /// snapped to).
-    pub hidden_edges: HashSet<usize>,
+    pub hidden_edges: FxSet<usize>,
     /// The group or component (relative to the open context) of edges and triangles
     /// inside one, by index into `edges` / `triangles`, for the inference tooltip
-    /// ("Endpoint in Group").
-    pub edge_container: HashMap<usize, mt_infer::Container>,
-    pub tri_container: HashMap<usize, mt_infer::Container>,
+    /// ("Endpoint in Group"). Shorter than `edges` / `triangles` when the last ones are
+    /// in none (missing entries are `None`).
+    pub edge_container: Vec<Option<mt_infer::Container>>,
+    pub tri_container: Vec<Option<mt_infer::Container>>,
     /// Index into `textures` of each model material (`FaceVertex::NO_TEXTURE` when
     /// untextured).
     texture_of: Vec<u32>,
     /// Vertex ranges of face-camera components with "Shadows face sun", and the
     /// rotation turning each from the camera to the sun (see [`Scene::shadow_casters`]).
     pub sun_facing: Vec<(std::ops::Range<usize>, DMat4)>,
+    /// Culling index over `edges` for picking, built on first use (see
+    /// [`Scene::edges_near`]).
+    edge_index: std::sync::OnceLock<mt_infer::cull::BoxIndex>,
+}
+
+/// Records that entry `i` of `edges` or `triangles` lies in container `c`.
+fn set_container(list: &mut Vec<Option<mt_infer::Container>>, i: usize, c: mt_infer::Container) {
+    if list.len() <= i {
+        list.resize(i + 1, None);
+    }
+    list[i] = Some(c);
+}
+
+/// Below this many edges picking tests every one (no index).
+const EDGE_INDEX_MIN: usize = 1024;
+
+impl Scene {
+    /// Indices (ascending) of the edges that may pass within `radius` pixels of
+    /// `cursor`: every edge that does is included. `None` means all edges.
+    pub fn edges_near(
+        &self,
+        camera: &Camera,
+        viewport: glam::DVec2,
+        cursor: glam::DVec2,
+        radius: f64,
+    ) -> Option<Vec<usize>> {
+        if self.edges.len() < EDGE_INDEX_MIN {
+            return None;
+        }
+        let index = self.edge_index.get_or_init(|| {
+            mt_infer::cull::BoxIndex::segments(
+                self.edges
+                    .iter()
+                    .map(|s| [s.a, s.b].map(|p| glam::Vec3::from(p).as_dvec3())),
+            )
+        });
+        // Edges added after the index was built: test them all.
+        if index.len() != self.edges.len() {
+            return None;
+        }
+        index.near(camera, viewport, cursor, radius)
+    }
 }
 
 /// Where entities being collected sit relative to the open context.
@@ -154,6 +198,18 @@ enum Level<'a> {
     Inside(Owner),
     /// Elsewhere: faded and not selectable.
     Outside,
+}
+
+/// State of one walk over the model ([`Document::collect`]).
+#[derive(Default)]
+struct Walk {
+    /// Definitions being walked (a definition containing itself is skipped).
+    active: HashSet<DefinitionId>,
+    /// Times each entities collection (by address) has been reached so far.
+    visits: FxMap<usize, u32>,
+    /// Triangles of the faces of collections reached more than once (component
+    /// definitions placed many times), in their own coordinates: tessellated once.
+    triangles: FxMap<(usize, FaceId), Vec<[DVec3; 3]>>,
 }
 
 /// What an instance passes to its contents.
@@ -684,14 +740,13 @@ impl Document {
             };
             scene.texture_of.push(layer);
         }
-        let mut active = HashSet::new();
         let root = &self.model.root;
         self.collect(
             root,
             DMat4::IDENTITY,
             Inherited::default(),
             Level::Context(&self.context),
-            &mut active,
+            &mut Walk::default(),
             &mut scene,
         );
         let f = |p: DVec3| p.as_vec3().to_array();
@@ -753,7 +808,7 @@ impl Document {
             Inherited::default(),
             // Owners are not used: the ghost is not pickable.
             Level::Inside(Owner::Instance(usize::MAX)),
-            &mut HashSet::new(),
+            &mut Walk::default(),
             &mut scene,
         );
         scene
@@ -872,7 +927,7 @@ impl Document {
         xf: DMat4,
         inherited: Inherited,
         level: Level,
-        active: &mut HashSet<DefinitionId>,
+        walk: &mut Walk,
         out: &mut Scene,
     ) {
         let show_hidden = self.model.style.hidden_geometry;
@@ -972,7 +1027,7 @@ impl Document {
                 ],
             );
             if let Some(c) = container {
-                out.edge_container.insert(out.edges.len(), c);
+                set_container(&mut out.edge_container, out.edges.len(), c);
             }
             if hidden {
                 out.hidden_edges.insert(out.edges.len());
@@ -999,6 +1054,12 @@ impl Document {
 
         // "Cut opening" components glued here cut holes into the faces they sit on.
         let openings = self.cut_openings(ents);
+        // A collection reached again (another instance of its definition) reuses the
+        // triangles of its faces (they depend only on the collection).
+        let key = std::ptr::from_ref(ents) as usize;
+        let visit = walk.visits.entry(key).or_insert(0);
+        *visit += 1;
+        let reused = *visit > 1;
         for (f, face) in &ents.faces {
             let hidden = ghost || face.attrs.hidden;
             if rest_here
@@ -1052,11 +1113,20 @@ impl Document {
             let layer = |t: &Side| t.as_ref().map_or(FaceVertex::NO_TEXTURE, |t| t.0);
             let texture = [layer(&front_tex), layer(&back_tex)];
             let n = world_normal(f);
-            let tris = (!openings.is_empty())
-                .then(|| mt_kernel::behavior::cut_face(ents, f, &openings))
-                .flatten()
-                .unwrap_or_else(|| tessellate::triangulate(ents, f));
-            for local in tris {
+            let tessellate = || {
+                (!openings.is_empty())
+                    .then(|| mt_kernel::behavior::cut_face(ents, f, &openings))
+                    .flatten()
+                    .unwrap_or_else(|| tessellate::triangulate(ents, f))
+            };
+            let own;
+            let tris: &[[DVec3; 3]] = if reused {
+                walk.triangles.entry((key, f)).or_insert_with(tessellate)
+            } else {
+                own = tessellate();
+                &own
+            };
+            for &local in tris {
                 let [a, b, c] = local.map(|p| xf.transform_point3(p));
                 // A mirroring transform flips the winding; keep it counter-clockwise
                 // around the front normal.
@@ -1093,7 +1163,7 @@ impl Document {
                     }
                 }
                 if let Some(c) = container {
-                    out.tri_container.insert(out.triangles.len(), c);
+                    set_container(&mut out.tri_container, out.triangles.len(), c);
                 }
                 out.triangles.push(tri);
                 out.tri_owner.push(owner_of(Owner::Face(f)));
@@ -1113,7 +1183,7 @@ impl Document {
                 continue;
             };
             // A definition containing itself would recurse forever; skip it.
-            if !active.insert(i.definition) {
+            if !walk.active.insert(i.definition) {
                 continue;
             }
             let child = match level {
@@ -1157,11 +1227,11 @@ impl Document {
                 }
             }
             let start = out.vertices.len();
-            self.collect(&def.entities, ix, parent, child, active, out);
+            self.collect(&def.entities, ix, parent, child, walk, out);
             if let Some(turn) = sun_turn {
                 out.sun_facing.push((start..out.vertices.len(), turn));
             }
-            active.remove(&i.definition);
+            walk.active.remove(&i.definition);
         }
     }
 

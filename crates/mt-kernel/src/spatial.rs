@@ -107,13 +107,13 @@ impl Aabb {
 
 /// FxHash: a fast hasher for integer cell coordinates.
 #[derive(Default)]
-pub(crate) struct FxHasher(u64);
+pub struct FxHasher(u64);
 
 /// A hash map keyed by integer cell coordinates (or other small integers).
-pub(crate) type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+pub type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// A hash set of small integers.
-pub(crate) type FxSet<K> = std::collections::HashSet<K, BuildHasherDefault<FxHasher>>;
+pub type FxSet<K> = std::collections::HashSet<K, BuildHasherDefault<FxHasher>>;
 
 impl Hasher for FxHasher {
     fn finish(&self) -> u64 {

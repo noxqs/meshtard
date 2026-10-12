@@ -41,6 +41,11 @@ rhai = "1.23"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 
+[dev-dependencies]
+# The large-model benchmark (`src/bench.rs`): a headless wgpu device and scene checksums.
+pollster.workspace = true
+bytemuck.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }
 
