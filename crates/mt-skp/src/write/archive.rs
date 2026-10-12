@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use super::{AttributeDict, AttributeValue, Point3, WriteError, hex_bytes};
+use super::{AttributeDict, AttributeValue, LayerId, Point3, WriteError, hex_bytes};
 
 /// `CAttributeContainer` is declared in the scaffold prefix, always at slot 3.
 const ATTR_CONTAINER_SLOT: u32 = 3;
@@ -92,9 +92,11 @@ pub(super) struct ArcParams {
     pub normal: Point3,
     /// The 0-angle direction, scaled by the radius.
     pub xaxis: Point3,
+    /// The 90-degree direction, scaled by the radius: `normal x xaxis` for a circle
+    /// (see `crate::model::ArcCurve`).
+    pub yaxis: Point3,
     pub start_angle: f64,
     pub end_angle: f64,
-    pub radius: f64,
     pub segments: u32,
 }
 
@@ -107,12 +109,16 @@ pub(super) enum CurveKind {
     Polyline(u32),
 }
 
-/// Edge display flags, applied to edges newly declared by a call.
+/// Edge display flags and tag, applied to edges newly declared by a call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EdgeFlags {
     pub hidden: bool,
     pub soft: bool,
     pub smooth: bool,
+    /// The edges' own tag, written in their drawbase's layer field like a face's
+    /// (SketchUp 2020's `gondola_v20.skp` has edges tagged this way; both readers
+    /// decode it). `None` is untagged.
+    pub layer: Option<LayerId>,
 }
 
 /// Vertex and edge sharing state of one entity list (the root or one
@@ -416,7 +422,11 @@ impl ArchiveWriter {
         self.f64s(&a.center);
         self.f64s(&a.normal);
         self.f64s(&a.xaxis);
-        self.f64s(&[a.start_angle, a.end_angle, 0.0, a.radius, 0.0]);
+        self.f64s(&[a.start_angle, a.end_angle]);
+        // OpenSKP's writer stores (0, radius, 0) here, right only for arcs about +Z:
+        // the field is the arc's y axis (OpenSKP's reader; `normal x xaxis` in every
+        // circular arc SketchUp saved in the corpus).
+        self.f64s(&a.yaxis);
         slot
     }
 
@@ -622,7 +632,7 @@ impl ArchiveWriter {
             }
             let edge = self.new_object("CEdge", 2);
             self.preamble();
-            self.drawbase(0, 0, flags.hidden, flags);
+            self.drawbase(0, flags.layer.map_or(0, |l| l.slot), flags.hidden, flags);
             for idx in [i1, i2] {
                 match point_slots[idx] {
                     Some(s) => self.backref(s),

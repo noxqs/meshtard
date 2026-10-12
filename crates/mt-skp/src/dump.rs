@@ -71,6 +71,10 @@ fn definition(d: &Definition) -> Value {
             if let Some(c) = e.curve_id {
                 v["curve_id"] = json!(c);
             }
+            // The edge's own tag, only when the file gives one.
+            if !e.layer.is_empty() {
+                v["layer"] = json!(e.layer);
+            }
             (e.id.to_string(), v)
         })
         .collect();

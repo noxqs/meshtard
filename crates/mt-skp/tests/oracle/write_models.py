@@ -12,6 +12,11 @@ and definitions with `time.time()`. Both are replaced here, inside
 (`SkpBuilder::deterministic(SEED, TIMESTAMP)`): GUIDs from SplitMix64 seeded
 with SEED (each GUID = two consecutive outputs, little-endian), and a fixed
 timestamp. Both are reset before each model.
+
+One deliberate difference from OpenSKP is patched in below: `CArcCurve`'s last three
+doubles are the arc's y axis (`normal x xaxis`, as OpenSKP's own reader decodes them
+and SketchUp writes them), where OpenSKP's writer stores `(0, radius, 0)`, right only
+for arcs about +Z.
 """
 
 import importlib
@@ -28,6 +33,22 @@ Point3d = create_mod.Point3d
 Vector3d = create_mod.Vector3d
 Length = create_mod.Length
 Timestamp = create_mod.Timestamp
+
+def _write_arc_curve(self, center, normal, xaxis, start_angle, end_angle, radius, num_segments):
+    if not (0 <= num_segments <= 0xFF):
+        raise create_mod.SkpWriteError(f"num_segments must be between 0 and 255, got {num_segments}")
+    slot = self._new_of_known_class("CArcCurve", schema=create_mod._ARCCURVE_SCHEMA)
+    self._preamble()
+    self.buf += bytes([0, num_segments]) + bytes(3)
+    yaxis = (normal[1] * xaxis[2] - normal[2] * xaxis[1],
+             normal[2] * xaxis[0] - normal[0] * xaxis[2],
+             normal[0] * xaxis[1] - normal[1] * xaxis[0])
+    for v in (*center, *normal, *xaxis, start_angle, end_angle, *yaxis):
+        self.buf += struct.pack("<d", v)
+    return slot
+
+
+create_mod._ArchiveWriter.write_arc_curve = _write_arc_curve
 
 SEED = 0x5EED
 TIMESTAMP = 1_700_000_000

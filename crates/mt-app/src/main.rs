@@ -1545,14 +1545,16 @@ impl App {
         let Some(doc) = self.document.as_mut() else {
             return false;
         };
+        // The current view is saved, as SketchUp does.
         let result = doc
-            .to_skp()
+            .to_skp_with_camera(&self.camera)
             .map_err(|e| e.to_string())
             .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
         match result {
             Ok(()) => {
                 self.prefs.after_save(&path);
                 if id != "file.save_copy_as" {
+                    doc.set_saved_camera(&self.camera);
                     doc.mark_saved(&path);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(doc.title()));
                 }

@@ -6,19 +6,18 @@
 //! with its soft/smooth/hidden flags, curves, guides, section planes, dimensions and
 //! leader texts (root only; see `annotation::write_root` for what of them is lost).
 //!
+//! Also written: edge tags, arcs and circles as arc curves (`CArcCurve`, through the
+//! model's own vertices), guides and section planes inside definitions, and the saved
+//! view ([`to_skp_view`]).
+//!
 //! Known gaps (format support missing in the writer, see `mt_skp::write`):
-//! - Arcs and circles are written as polyline curves through their actual vertices, so
-//!   they reopen as curves, not as arcs editable by radius. (The writer's true arcs
-//!   compute their own points, which would not coincide with the model's vertices.)
 //! - Style settings are saved as the style items whose meaning is known (see
 //!   [`style_items`]); fog, Component Edit hiding and the Monochrome face style are
 //!   not (their items are unknown). Units go in through [`to_skp_with`].
-//! - Edge tags, the saved view (files open in the writer's Iso view), scenes,
-//!   shadow settings, model axes, instance locks, two-point perspective and the
-//!   active section plane are not saved: where the v17 format keeps them is not
-//!   known (no SketchUp-saved sample has them).
-//! - Guides and section planes inside definitions are not saved (the writer has no
-//!   definition-level calls for them).
+//! - Scenes, shadow settings, model axes, instance locks, two-point perspective, the
+//!   active section plane and Convert to Polygon (saved as a plain arc) are not saved:
+//!   where the v17 format keeps them is not known (no SketchUp-saved sample in the
+//!   corpus has them; see `spec/parity/LEFTOVERS.md` item 1).
 //! - Section planes are saved as their plane only (as SketchUp does); the point
 //!   they are drawn around is recomputed on import.
 
@@ -43,7 +42,20 @@ pub type NamedOption<'a> = (&'a str, &'a str, OptionValue);
 /// [`to_skp`] that also writes `options` (units and snapping kept outside the
 /// kernel model).
 pub fn to_skp_with(model: &Model, options: &[NamedOption]) -> Result<Vec<u8>, WriteError> {
+    to_skp_view(model, options, None)
+}
+
+/// [`to_skp_with`] that also saves the view the file opens in (default: the writer's
+/// parallel Iso view).
+pub fn to_skp_view(
+    model: &Model,
+    options: &[NamedOption],
+    view: Option<&mt_skp::ViewCamera>,
+) -> Result<Vec<u8>, WriteError> {
     let mut b = SkpBuilder::new();
+    if let Some(v) = view {
+        b.set_camera(v)?;
+    }
     b.set_face_colors(model.front_color, model.back_color);
     for (id, value) in style_items(&model.style) {
         b.set_style_item(id, value);
@@ -234,19 +246,6 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
     let root = &model.root;
     b.begin_root()?;
     write_body(&mut RootSink(b), model, root, &maps, &written)?;
-    for g in &root.guides {
-        let p = g.point.to_array();
-        match g.dir {
-            Some(dir) => b.add_construction_line(w::GuideLine::Infinite {
-                point: p,
-                direction: dir.to_array(),
-            })?,
-            None => b.add_construction_point(p)?,
-        }
-    }
-    for s in &root.section_planes {
-        b.add_section_plane(s.point.to_array(), s.normal.to_array())?;
-    }
     crate::annotation::write_root(b, root)?;
     Ok(())
 }
@@ -328,12 +327,25 @@ trait Sink {
         group: bool,
     ) -> Result<(), WriteError>;
     fn image(&mut self, def: &w::DefinitionId, p: &Placement) -> Result<(), WriteError>;
+    fn guide_line(&mut self, line: w::GuideLine) -> Result<(), WriteError>;
+    fn guide_point(&mut self, p: DVec3) -> Result<(), WriteError>;
+    fn section_plane(&mut self, point: DVec3, normal: DVec3) -> Result<(), WriteError>;
 }
 
 struct RootSink<'a>(&'a mut SkpBuilder);
 struct DefSink<'a, 'b>(&'a mut w::DefinitionBuilder<'b>);
 
 impl Sink for RootSink<'_> {
+    fn guide_line(&mut self, line: w::GuideLine) -> Result<(), WriteError> {
+        self.0.add_construction_line(line)
+    }
+    fn guide_point(&mut self, p: DVec3) -> Result<(), WriteError> {
+        self.0.add_construction_point(p.to_array())
+    }
+    fn section_plane(&mut self, point: DVec3, normal: DVec3) -> Result<(), WriteError> {
+        self.0
+            .add_section_plane(point.to_array(), normal.to_array())
+    }
     fn edge(&mut self, a: DVec3, b: DVec3, flags: EdgeFlags) -> Result<(), WriteError> {
         self.0.add_edge(a.to_array(), b.to_array(), flags)
     }
@@ -361,6 +373,16 @@ impl Sink for RootSink<'_> {
 }
 
 impl Sink for DefSink<'_, '_> {
+    fn guide_line(&mut self, line: w::GuideLine) -> Result<(), WriteError> {
+        self.0.add_construction_line(line)
+    }
+    fn guide_point(&mut self, p: DVec3) -> Result<(), WriteError> {
+        self.0.add_construction_point(p.to_array())
+    }
+    fn section_plane(&mut self, point: DVec3, normal: DVec3) -> Result<(), WriteError> {
+        self.0
+            .add_section_plane(point.to_array(), normal.to_array())
+    }
     fn edge(&mut self, a: DVec3, b: DVec3, flags: EdgeFlags) -> Result<(), WriteError> {
         self.0.add_edge(a.to_array(), b.to_array(), flags)
     }
@@ -387,12 +409,13 @@ impl Sink for DefSink<'_, '_> {
     }
 }
 
-fn flags(ents: &Entities, e: EdgeId) -> EdgeFlags {
+fn flags(ents: &Entities, e: EdgeId, maps: &Maps) -> EdgeFlags {
     let a = &ents.edges[e].attrs;
     EdgeFlags {
         hidden: a.hidden,
         soft: a.soft,
         smooth: a.smooth,
+        layer: maps.layer(a.layer),
     }
 }
 
@@ -413,13 +436,17 @@ fn write_body(
         };
         let mut p = w::Polyline::new(points.iter().map(|p| p.to_array()));
         p.closed = closed;
-        p.edges = flags(ents, edges[0]);
+        p.edges = flags(ents, edges[0], maps);
+        p.arc = ents.curves[c]
+            .arc
+            .as_ref()
+            .and_then(|a| arc_frame(a, &points, closed));
         sink.polyline(&p)?;
         done.extend(edges);
     }
     for (id, e) in &ents.edges {
         if !done.contains(&id) {
-            sink.edge(ents.pos(e.start), ents.pos(e.end), flags(ents, id))?;
+            sink.edge(ents.pos(e.start), ents.pos(e.end), flags(ents, id, maps))?;
         }
     }
     for face in ents.faces.values() {
@@ -456,7 +483,66 @@ fn write_body(
             }
         }
     }
+    for g in &ents.guides {
+        match g.dir {
+            Some(dir) => sink.guide_line(w::GuideLine::Infinite {
+                point: g.point.to_array(),
+                direction: dir.to_array(),
+            })?,
+            None => sink.guide_point(g.point)?,
+        }
+    }
+    for s in &ents.section_planes {
+        sink.section_plane(s.point, s.normal)?;
+    }
     Ok(())
+}
+
+/// The file's arc record for a kernel arc whose curve runs through `points` (chain
+/// order), or `None` (written as a plain curve) when the points are not on it. Written
+/// as SketchUp saves arcs: starting at angle 0 (the x axis through the first end) and
+/// sweeping counter-clockwise about the normal; a circle spans 2 pi.
+fn arc_frame(a: &crate::entities::Arc, points: &[DVec3], closed: bool) -> Option<mt_skp::ArcCurve> {
+    use std::f64::consts::TAU;
+    let n = a.normal.try_normalize()?;
+    let x = a.x_axis.try_normalize()?;
+    let y = n.cross(x);
+    let r = a.radius;
+    let circle = a.is_circle();
+    let segments = if closed {
+        points.len()
+    } else {
+        points.len() - 1
+    };
+    if r <= 1e-9 || circle != closed || segments > 255 {
+        return None;
+    }
+    let mut sweep = a.end_angle - a.start_angle;
+    let x0 = x * a.start_angle.cos() + y * a.start_angle.sin();
+    let n0 = if sweep < 0.0 { -n } else { n };
+    sweep = if circle { TAU } else { sweep.abs() };
+    let y0 = n0.cross(x0);
+    let tol = 1e-6 * r.max(1.0);
+    let on_arc = points.iter().all(|&p| {
+        let d = p - a.center;
+        let (u, v) = (d.dot(x0), d.dot(y0));
+        let mut t = v.atan2(u);
+        if t < -1e-9 {
+            t += TAU;
+        }
+        d.dot(n0).abs() <= tol
+            && ((u * u + v * v).sqrt() - r).abs() <= tol
+            && (circle || t <= sweep + 1e-9)
+    });
+    on_arc.then(|| mt_skp::ArcCurve {
+        center: a.center.to_array(),
+        normal: n0.to_array(),
+        x_axis: (x0 * r).to_array(),
+        y_axis: (y0 * r).to_array(),
+        start_angle: 0.0,
+        end_angle: sweep,
+        segments: segments as u32,
+    })
 }
 
 /// Three texture pins reproducing a positioned texture on one side of `face` (`None`

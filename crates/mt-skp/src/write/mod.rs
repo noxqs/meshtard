@@ -115,6 +115,12 @@ const ISO_CAMERA_PREFIX_PATCH: [u8; 98] = hex_bytes(concat!(
     "ea3f000000000000f03f0000000000408f40000000000000003e402adf272c80",
     "3457",
 ));
+/// The scaffold's model `CCamera` body (its class declaration is the 13 bytes
+/// before). Eye, target, up, the perspective byte, field of view and parallel height
+/// sit at the offsets the reader decodes (`legacy::camera_body`); OpenSKP's Iso patch
+/// above covers bytes 6 to 104 of it.
+const CAMERA_BODY_POS: usize = 2987;
+
 const ISO_CAMERA_TAIL_PATCH_A: (usize, [u8; 16]) =
     (509, hex_bytes("d0a869613c442d4799a4667d1adfa836"));
 const ISO_CAMERA_TAIL_PATCH_B: (usize, [u8; 15]) =
@@ -420,6 +426,12 @@ pub struct Polyline {
     /// Also connect the last point back to the first.
     pub closed: bool,
     pub edges: EdgeFlags,
+    /// Write the curve as this analytic arc (`CArcCurve`) instead, so SketchUp edits
+    /// it as an arc or circle, while the edges stay exactly on `points` (unlike
+    /// [`Arc`] and [`Circle`], which compute their own points). The points should lie
+    /// on the arc; at most 255 segments (the count is stored in a byte). Not part of
+    /// OpenSKP's API.
+    pub arc: Option<crate::model::ArcCurve>,
 }
 
 impl Polyline {
@@ -721,6 +733,8 @@ pub struct SkpBuilder {
     /// Named options (section, key, value) written into the scaffold.
     options: Vec<(String, String, OptionValue)>,
     font_slot: Option<u32>,
+    /// The saved view, written over the Iso camera.
+    camera: Option<crate::model::ViewCamera>,
 }
 
 impl Default for SkpBuilder {
@@ -766,6 +780,7 @@ impl SkpBuilder {
             style_items: Vec::new(),
             options: Vec::new(),
             font_slot: None,
+            camera: None,
         }
     }
 
@@ -1224,6 +1239,7 @@ impl SkpBuilder {
         let material = self.material_slot(f.material)?;
         let back_material = self.material_slot(f.back_material)?;
         let layer = self.layer_slot(f.layer)?;
+        self.layer_slot(f.edges.layer)?;
         if f.outer.len() < 3 {
             return Err(invalid("a face needs at least 3 points"));
         }
@@ -1293,9 +1309,9 @@ impl SkpBuilder {
             center: c.center,
             normal,
             xaxis: u.map(|x| c.radius * x),
+            yaxis: geom::cross(normal, u.map(|x| c.radius * x)),
             start_angle: 0.0,
             end_angle: 2.0 * std::f64::consts::PI,
-            radius: c.radius,
             segments: c.segments,
         });
         let points = geom::circle_points(c.center, c.radius, c.segments, u, w);
@@ -1328,6 +1344,7 @@ impl SkpBuilder {
             ));
         }
         check_points(&[a.center, a.normal, [a.radius, a.start_angle, a.end_angle]])?;
+        self.layer_slot(a.edges.layer)?;
         let normal = geom::normalize3(a.normal)?;
         if s == Section::Root {
             self.ensure_geometry_writer()?;
@@ -1337,9 +1354,9 @@ impl SkpBuilder {
             center: a.center,
             normal,
             xaxis: u.map(|x| a.radius * x),
+            yaxis: geom::cross(normal, u.map(|x| a.radius * x)),
             start_angle: a.start_angle,
             end_angle: a.end_angle,
-            radius: a.radius,
             segments: a.segments,
         });
         let points = geom::arc_points(
@@ -1360,18 +1377,35 @@ impl SkpBuilder {
             return Err(invalid("a polyline needs at least 2 points"));
         }
         check_points(&p.points)?;
+        self.layer_slot(p.edges.layer)?;
+        let n = p.points.len() as u32;
+        let pairs = if p.closed { n } else { n - 1 };
+        let curve = match &p.arc {
+            None => CurveKind::Polyline(pairs),
+            Some(a) => {
+                if pairs > 255 {
+                    return Err(invalid(format!(
+                        "an arc curve has at most 255 segments, got {pairs}"
+                    )));
+                }
+                let angles = [a.start_angle, a.end_angle, 0.0];
+                check_points(&[a.center, a.normal, a.x_axis, a.y_axis, angles])?;
+                CurveKind::Arc(ArcParams {
+                    center: a.center,
+                    normal: a.normal,
+                    xaxis: a.x_axis,
+                    yaxis: a.y_axis,
+                    start_angle: a.start_angle,
+                    end_angle: a.end_angle,
+                    segments: pairs,
+                })
+            }
+        };
         if s == Section::Root {
             self.ensure_geometry_writer()?;
         }
-        let n = p.points.len() as u32;
-        let pairs = if p.closed { n } else { n - 1 };
-        self.writer(s).edges(
-            &p.points,
-            body,
-            p.closed,
-            p.edges,
-            CurveKind::Polyline(pairs),
-        );
+        self.writer(s)
+            .edges(&p.points, body, p.closed, p.edges, curve);
         Ok(())
     }
 
@@ -1387,6 +1421,7 @@ impl SkpBuilder {
         if a == b {
             return Err(invalid("an edge needs two different points"));
         }
+        self.layer_slot(flags.layer)?;
         if s == Section::Root {
             self.ensure_geometry_writer()?;
         }
@@ -1652,6 +1687,17 @@ impl SkpBuilder {
 
     /// A construction (guide) line.
     pub fn add_construction_line(&mut self, line: GuideLine) -> Result<(), WriteError> {
+        self.with_root(|s, b| s.construction_line_op(Section::Root, b, line))?;
+        self.root_items += 1;
+        Ok(())
+    }
+
+    fn construction_line_op(
+        &mut self,
+        s: Section,
+        body: &mut Body,
+        line: GuideLine,
+    ) -> Result<(), WriteError> {
         let (point, dir, start, end) = match line {
             GuideLine::Segment { start, end } => {
                 check_points(&[start, end])?;
@@ -1672,11 +1718,11 @@ impl SkpBuilder {
                 (point, d.map(|c| c / len), -CLINE_INFINITE, CLINE_INFINITE)
             }
         };
-        self.ensure_geometry_writer()?;
-        self.writer(Section::Root)
-            .construction_line(point, dir, start, end);
-        self.body.new_entities += 1;
-        self.root_items += 1;
+        if s == Section::Root {
+            self.ensure_geometry_writer()?;
+        }
+        self.writer(s).construction_line(point, dir, start, end);
+        body.new_entities += 1;
         Ok(())
     }
 
@@ -1689,6 +1735,18 @@ impl SkpBuilder {
 
     /// A section plane through `point` with `normal` (any nonzero length).
     pub fn add_section_plane(&mut self, point: Point3, normal: Point3) -> Result<(), WriteError> {
+        self.with_root(|s, b| s.section_plane_op(Section::Root, b, point, normal))?;
+        self.root_items += 1;
+        Ok(())
+    }
+
+    fn section_plane_op(
+        &mut self,
+        s: Section,
+        body: &mut Body,
+        point: Point3,
+        normal: Point3,
+    ) -> Result<(), WriteError> {
         check_points(&[point, normal])?;
         let n = normal;
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
@@ -1697,10 +1755,11 @@ impl SkpBuilder {
         }
         let (a, b, c) = (n[0] / len, n[1] / len, n[2] / len);
         let d = -(a * point[0] + b * point[1] + c * point[2]);
-        self.ensure_geometry_writer()?;
-        self.writer(Section::Root).section_plane([a, b, c, d]);
-        self.body.new_entities += 1;
-        self.root_items += 1;
+        if s == Section::Root {
+            self.ensure_geometry_writer()?;
+        }
+        self.writer(s).section_plane([a, b, c, d]);
+        body.new_entities += 1;
         Ok(())
     }
 
@@ -1725,6 +1784,46 @@ impl SkpBuilder {
     pub fn set_named_option(&mut self, section: &str, key: &str, value: OptionValue) {
         self.options.retain(|(s, k, _)| s != section || k != key);
         self.options.push((section.into(), key.into(), value));
+    }
+
+    /// The view the file opens in (default: OpenSKP's parallel Iso view). `up` is made
+    /// perpendicular to the view direction, as in every SketchUp-saved camera;
+    /// `ortho_height` is the parallel view's height, `fov` the perspective one's
+    /// vertical field of view in degrees. Two-point perspective is not stored (where
+    /// the format keeps it is unknown).
+    pub fn set_camera(&mut self, camera: &crate::model::ViewCamera) -> Result<(), WriteError> {
+        check_points(&[
+            camera.eye,
+            camera.target,
+            camera.up,
+            [camera.fov, camera.ortho_height, 0.0],
+        ])?;
+        let d = [0, 1, 2].map(|i| camera.target[i] - camera.eye[i]);
+        let dn = geom::normalize3(d).map_err(|_| invalid("camera eye and target coincide"))?;
+        let up_along = |u: Point3| {
+            let k = u[0] * dn[0] + u[1] * dn[1] + u[2] * dn[2];
+            geom::normalize3([0, 1, 2].map(|i| u[i] - k * dn[i]))
+        };
+        // Looking straight along the given up: fall back to +Y, as top views do.
+        let up = up_along(camera.up)
+            .or_else(|_| up_along([0.0, 1.0, 0.0]))
+            .or_else(|_| up_along([1.0, 0.0, 0.0]))?;
+        self.camera = Some(crate::model::ViewCamera {
+            up,
+            ..camera.clone()
+        });
+        Ok(())
+    }
+
+    fn write_camera(&self, doc: &mut [u8]) {
+        let Some(c) = &self.camera else { return };
+        let b = &mut doc[CAMERA_BODY_POS..];
+        for (i, v) in [c.eye, c.target, c.up].iter().flatten().enumerate() {
+            b[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        b[88] = u8::from(!c.parallel);
+        b[89..97].copy_from_slice(&c.fov.to_le_bytes());
+        b[97..105].copy_from_slice(&c.ortho_height.to_le_bytes());
     }
 
     /// The scaffold with face colors, style items and named options applied.
@@ -1754,7 +1853,9 @@ impl SkpBuilder {
     /// The blank document with this builder's face colors, style items and named
     /// options (for a model with nothing to splice in).
     pub fn to_empty_document(&self) -> Result<Vec<u8>, WriteError> {
-        Ok(self.patched_scaffold()?.into_owned())
+        let mut doc = self.patched_scaffold()?.into_owned();
+        self.write_camera(&mut doc);
+        Ok(doc)
     }
 
     /// Write a file with nothing at the root (after [`begin_root`](Self::begin_root)).
@@ -1816,6 +1917,7 @@ impl SkpBuilder {
         prefix[PID_COUNTER_POS..PID_COUNTER_POS + 4].copy_from_slice(&last_pid.to_le_bytes());
         prefix[ISO_CAMERA_PREFIX_OFFSET..ISO_CAMERA_PREFIX_OFFSET + ISO_CAMERA_PREFIX_PATCH.len()]
             .copy_from_slice(&ISO_CAMERA_PREFIX_PATCH);
+        self.write_camera(&mut prefix);
         out.extend_from_slice(&prefix);
         out.extend_from_slice(&self.material_count.to_le_bytes());
         out.extend_from_slice(&self.material_writer.buf);
@@ -1974,6 +2076,20 @@ impl DefinitionBuilder<'_> {
     pub fn add_construction_point(&mut self, position: Point3) -> Result<(), WriteError> {
         self.skp
             .construction_point_op(Section::Definition, &mut self.body, position)
+    }
+
+    /// A construction (guide) line inside the definition (not part of OpenSKP's
+    /// API; the same record as at the root, which both readers read in definitions).
+    pub fn add_construction_line(&mut self, line: GuideLine) -> Result<(), WriteError> {
+        self.skp
+            .construction_line_op(Section::Definition, &mut self.body, line)
+    }
+
+    /// A section plane inside the definition (see
+    /// [`add_construction_line`](Self::add_construction_line)).
+    pub fn add_section_plane(&mut self, point: Point3, normal: Point3) -> Result<(), WriteError> {
+        self.skp
+            .section_plane_op(Section::Definition, &mut self.body, point, normal)
     }
 
     /// Closes the definition (it must contain something). A group is queued

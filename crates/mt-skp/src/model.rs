@@ -72,6 +72,29 @@ pub struct Edge {
     /// The curve (arc, circle, polyline) this edge is a segment of. Legacy files only
     /// so far.
     pub curve_id: Option<EntityId>,
+    /// The edge's own tag (layer) name, or empty for none / Layer0's id unresolved.
+    /// Legacy files only so far.
+    pub layer: String,
+}
+
+/// The analytic arc behind a curve (a legacy `CArcCurve`): its points are
+/// `center + cos(t) * x_axis + sin(t) * y_axis` for `t` from `start_angle` to
+/// `end_angle` (radians). Layout as OpenSKP's reader decodes it (checked there against
+/// SketchUp's own COLLADA export). For a circular arc `x_axis` and `y_axis` both have
+/// the radius as length and `y_axis = normal x x_axis`; a non-uniformly scaled arc
+/// stores an ellipse. SketchUp-saved arcs start at angle 0; a full circle spans 2 pi
+/// (SDK) or stores equal angles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArcCurve {
+    pub center: Vec3,
+    pub normal: Vec3,
+    pub x_axis: Vec3,
+    pub y_axis: Vec3,
+    pub start_angle: f64,
+    pub end_angle: f64,
+    /// The record's segment count (bytes 1-4 of its 5-byte prefix; equal to the
+    /// number of edges in every corpus file).
+    pub segments: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +331,8 @@ pub struct Definition {
     pub dimensions: Vec<Dimension>,
     pub construction_lines: Vec<ConstructionLine>,
     pub construction_points: Vec<ConstructionPoint>,
+    /// Arc curves by curve id (the `curve_id` of their edges). Legacy files only.
+    pub arc_curves: BTreeMap<EntityId, ArcCurve>,
     pub always_faces_camera: bool,
     pub shadows_face_sun: bool,
     pub is_image: bool,
@@ -355,7 +380,7 @@ pub struct Model {
     pub root: Definition,
     pub layers: Vec<Layer>,
     pub pages: Vec<Page>,
-    /// The view the model was saved with (VFF only).
+    /// The view the model was saved with.
     pub camera: Option<ViewCamera>,
     /// Model-level dimensions with world-space endpoints (VFF), or the root's
     /// dimensions whose endpoints are known (legacy).
@@ -412,6 +437,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
                 smooth: flags & 16 != 0,
                 hidden: flags & 1 != 0,
                 curve_id: b.edge_curves.get(&id).copied(),
+                layer: b.edge_layers.get(&id).cloned().unwrap_or_default(),
             };
             (id, e)
         })
@@ -466,6 +492,7 @@ fn definition(id: EntityId, r: RawDefinition) -> Definition {
         dimensions: b.dimensions,
         construction_lines: b.construction_lines,
         construction_points: b.construction_points,
+        arc_curves: b.arc_curves,
         always_faces_camera: r.always_faces_camera,
         shadows_face_sun: r.shadows_face_sun,
         is_image: r.is_image,
@@ -488,6 +515,9 @@ pub(crate) fn build_model(mut p: RawParsed) -> Model {
         }
         for f in d.builder.faces.values_mut() {
             resolve(&mut f.layer);
+        }
+        for l in d.builder.edge_layers.values_mut() {
+            resolve(l);
         }
     };
     for d in p.definitions.values_mut() {

@@ -15,7 +15,8 @@
 //! - VFF `AA38` boolean attribute values: Python returns `None`.
 //!
 //! Known cases where the Python oracle is ahead of the C++ source, accepted until ported:
-//! - Legacy face layers: Python reads them, C++ leaves them unset.
+//! - Legacy face and edge layers: OpenSKP gives the layer's object id, we resolve it
+//!   to the name.
 //!
 //! Known cases where this reader is ahead of the Python oracle:
 //! - Legacy dimensions in entity lists (`root.dimensions`, `definitions.*.dimensions`):
@@ -132,7 +133,8 @@ fn compare(path: &str, ours: &Value, theirs: &Value, r: &mut Report) {
         // Legacy face layers: OpenSKP leaves the layer's object id; we resolve it to
         // the layer name (or nothing for Layer0).
         (Value::Null | Value::String(_), Value::Number(_))
-            if path.contains(".faces.") && path.ends_with(".layer") =>
+            if (path.contains(".faces.") || path.contains(".edges."))
+                && path.ends_with(".layer") =>
         {
             r.known += 1
         }
