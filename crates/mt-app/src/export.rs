@@ -13,7 +13,7 @@
 //! 3D Model writes OBJ (+ MTL and texture images next to it), binary or ASCII STL or
 //! COLLADA through [`mt_kernel::mesh_export`], glTF / GLB through
 //! [`mt_kernel::gltf_io`], and FBX, PLY (binary or ASCII, texture coordinates), 3MF,
-//! VRML, KMZ, 3DS or USDZ through [`mt_kernel::formats`]; the options dialog picks the
+//! VRML, KMZ, 3DS, USDZ or IFC through [`mt_kernel::formats`]; the options dialog picks the
 //! format and its options before the file dialog. Per-format option defaults
 //! (two-sided faces for COLLADA and KMZ, Y up for OBJ, VRML and USDZ) are from memory,
 //! unverified. "Export only current selection" (every format, as in SketchUp's
@@ -61,12 +61,13 @@ pub(crate) enum Format3d {
 }
 
 impl Format3d {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Other(ExportKind::ThreeDs),
         Self::Dae,
         Self::Other(ExportKind::Fbx),
         Self::Glb,
         Self::Gltf,
+        Self::Other(ExportKind::Ifc),
         Self::Other(ExportKind::Kmz),
         Self::Obj,
         Self::Other(ExportKind::Ply),
@@ -79,6 +80,11 @@ impl Format3d {
     /// glTF keeps groups and components as nodes (meters, Y up).
     fn keeps_hierarchy(self) -> bool {
         matches!(self, Self::Glb | Self::Gltf)
+    }
+
+    /// IFC keeps groups and components as building element proxies.
+    fn keeps_objects(self) -> bool {
+        self == Self::Other(ExportKind::Ifc)
     }
 
     fn label(self) -> &'static str {
@@ -95,6 +101,7 @@ impl Format3d {
             Self::Other(ExportKind::Vrml) => "VRML File (*.wrl)",
             Self::Other(ExportKind::ThreeDs) => "3DS File (*.3ds)",
             Self::Other(ExportKind::Usdz) => "USDZ File (*.usdz)",
+            Self::Other(ExportKind::Ifc) => "IFC File (*.ifc)",
         }
     }
 
@@ -121,7 +128,7 @@ impl Format3d {
     fn has_two_sided(self) -> bool {
         !matches!(
             self,
-            Self::Stl | Self::Other(ExportKind::Ply | ExportKind::ThreeMf)
+            Self::Stl | Self::Other(ExportKind::Ply | ExportKind::ThreeMf | ExportKind::Ifc)
         )
     }
 
@@ -609,6 +616,8 @@ impl App {
                 ui.add_space(8.0);
                 ui.weak(if d.format.keeps_hierarchy() {
                     "Hidden geometry is not exported; groups and components are kept as nodes (meters, Y up)."
+                } else if d.format.keeps_objects() {
+                    "Hidden geometry is not exported; groups and components become IfcBuildingElementProxy objects on one storey."
                 } else {
                     "Hidden geometry is not exported; groups and components are flattened."
                 });
@@ -735,6 +744,11 @@ mod tests {
                 ExportKind::ThreeMf => Some(formats::Kind::ThreeMf),
                 ExportKind::ThreeDs => Some(formats::Kind::ThreeDs),
                 ExportKind::Vrml | ExportKind::Kmz | ExportKind::Usdz => None,
+                ExportKind::Ifc => {
+                    let (back, _) = formats::ifc::import(&bytes, &Default::default()).unwrap();
+                    assert_eq!(crate::import::count_faces(&back, &back.root), 1);
+                    continue;
+                }
             };
             match back {
                 Some(k) => {
