@@ -60,6 +60,8 @@ mod sandbox_tools;
 mod search;
 mod section_export;
 mod selection;
+#[cfg(target_os = "linux")]
+mod self_install;
 mod settings;
 mod shortcut_list;
 mod small_items;
@@ -301,6 +303,7 @@ const IMPLEMENTED: &[&str] = &[
     "help.welcome",
     "help.knowledge_center",
     "help.contact",
+    "help.install_user",
     // More context menu commands (context_extra.rs) and Help > Search.
     "edit.find_center",
     "edit.convert_to_polygon",
@@ -348,6 +351,14 @@ const IMPLEMENTED: &[&str] = &[
 ];
 
 fn main() -> eframe::Result {
+    // `meshtard --version`: before any window or GPU set-up (the Linux self-install
+    // reads it from the installed binary).
+    if let Some(arg) = std::env::args_os().nth(1)
+        && (arg == "--version" || arg == "-V")
+    {
+        println!("meshtard {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     env_logger::init();
     let spec = match std::env::var_os("MESHTARD_SPEC_DIR") {
         Some(dir) => Spec::load_dir(dir.as_ref()),
@@ -360,6 +371,14 @@ fn main() -> eframe::Result {
             spec.mac_layout()
         } else {
             Ok(spec)
+        }
+    })
+    // Help > Install for This User is Linux's only.
+    .map(|spec| {
+        if cfg!(target_os = "linux") {
+            spec
+        } else {
+            spec.without_commands(&["help.install_user"])
         }
     })
     .unwrap_or_else(|e| {
@@ -2693,6 +2712,8 @@ impl eframe::App for App {
         self.preferences_ui(ui.ctx(), frame);
         #[cfg(target_os = "linux")]
         self.alt_drag_tick(ui.ctx());
+        #[cfg(target_os = "linux")]
+        self.self_install_ui(ui.ctx());
         self.shortcut_list_ui(ui.ctx());
         self.presentation_ui(ui.ctx(), frame);
         self.context_extra_ui(ui.ctx(), frame);

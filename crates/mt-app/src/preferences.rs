@@ -49,6 +49,9 @@ pub(crate) struct General {
     pub linux_alt_drag: bool,
     /// Linux: the first-start question about it was answered.
     pub linux_alt_drag_asked: bool,
+    /// Linux: offer at start to install this version in ~/.local/bin
+    /// (`self_install`; off after "Don't ask again").
+    pub linux_install_ask: bool,
 }
 
 impl Default for General {
@@ -64,6 +67,7 @@ impl Default for General {
             dismissed: BTreeSet::new(),
             linux_alt_drag: false,
             linux_alt_drag_asked: false,
+            linux_install_ask: true,
         }
     }
 }
@@ -156,6 +160,9 @@ pub(crate) struct Prefs {
     /// Linux: the first-start Alt + drag question is open.
     #[cfg(target_os = "linux")]
     pub(crate) alt_drag_prompt: bool,
+    /// Linux: Install for This User's check and dialogs.
+    #[cfg(target_os = "linux")]
+    pub(crate) install: crate::self_install::State,
     /// The toolbar icon size given to the shell.
     icons_applied: Option<bool>,
 }
@@ -358,6 +365,7 @@ fn general_from_table(t: &toml::Table) -> General {
         ("show_welcome", &mut g.welcome),
         ("linux_alt_drag", &mut g.linux_alt_drag),
         ("linux_alt_drag_asked", &mut g.linux_alt_drag_asked),
+        ("linux_offer_install", &mut g.linux_install_ask),
     ] {
         if let Some(v) = flag(key) {
             *field = v;
@@ -412,6 +420,7 @@ fn settings_text(g: &General, d: &Drawing, m: &More) -> String {
     t.insert("show_welcome".into(), g.welcome.into());
     t.insert("linux_alt_drag".into(), g.linux_alt_drag.into());
     t.insert("linux_alt_drag_asked".into(), g.linux_alt_drag_asked.into());
+    t.insert("linux_offer_install".into(), g.linux_install_ask.into());
     t.insert(
         "dismissed_warnings".into(),
         toml::Value::Array(g.dismissed.iter().map(|s| s.as_str().into()).collect()),
@@ -781,6 +790,12 @@ impl App {
                                 ui,
                                 &mut general.linux_alt_drag,
                                 self.prefs.alt_drag.support(),
+                            );
+                            #[cfg(target_os = "linux")]
+                            crate::self_install::prefs_section(
+                                ui,
+                                &mut general.linux_install_ask,
+                                &mut self.prefs.install,
                             );
                         }
                         Page::Shortcuts => {
@@ -1380,6 +1395,7 @@ mod tests {
             dismissed: [WARN_FIXED.to_owned()].into(),
             linux_alt_drag: true,
             linux_alt_drag_asked: true,
+            linux_install_ask: false,
         };
         let d = Drawing {
             click_style: ClickStyle::ClickMoveClick,

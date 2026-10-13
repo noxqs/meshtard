@@ -89,6 +89,8 @@ impl App {
                 }
             }
             "help.welcome" => self.open_welcome(),
+            #[cfg(target_os = "linux")]
+            "help.install_user" => self.open_install(ctx),
             "help.knowledge_center" | "help.contact" => {
                 if let Err(e) = open_with_system(PROJECT_URL) {
                     self.message = Some(format!("Could not open {PROJECT_URL}: {e}"));
