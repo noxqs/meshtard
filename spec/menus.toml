@@ -315,6 +315,9 @@ items = [
   { id = "help.welcome", label = "Welcome to Meshtard" },
   { id = "help.knowledge_center", label = "Knowledge Center" },
   { id = "help.contact", label = "Contact Us" },
+  # Meshtard addition, Linux only (removed from the menu elsewhere): copies this
+  # binary to ~/.local/bin with a desktop entry and icons (mt-app `self_install`).
+  { id = "help.install_user", label = "Install for This User..." },
   { separator = true },
   { id = "help.about", label = "About" },
 ]

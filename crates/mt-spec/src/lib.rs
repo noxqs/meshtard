@@ -121,6 +121,17 @@ impl Spec {
         Ok(spec)
     }
 
+    /// The spec without the menu items and shortcuts of `ids` (commands one
+    /// platform does not have, such as Linux's Help > Install for This User).
+    pub fn without_commands(mut self, ids: &[&str]) -> Self {
+        let ids: BTreeSet<String> = ids.iter().map(|&s| s.to_owned()).collect();
+        for menu in &mut self.menus.menu {
+            mac::remove_commands(&mut menu.items, &ids);
+        }
+        self.keymap.bindings.retain(|id, _| !ids.contains(id));
+        self
+    }
+
     /// Every command id in the menu bar, with its label.
     pub fn commands(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();

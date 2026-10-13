@@ -180,7 +180,7 @@ fn visit_items(items: &[MenuItem], f: &mut impl FnMut(&str)) {
     crate::visit_items(items, &mut |id, _| f(id));
 }
 
-fn remove_commands(items: &mut Vec<MenuItem>, ids: &BTreeSet<String>) {
+pub(crate) fn remove_commands(items: &mut Vec<MenuItem>, ids: &BTreeSet<String>) {
     items.retain_mut(|item| match item {
         MenuItem::Command { id, .. } => !ids.contains(id),
         MenuItem::Submenu { items, .. } => {
