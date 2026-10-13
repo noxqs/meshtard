@@ -26,6 +26,28 @@ Sub-items noted as "Left" under finished items, ranked by usefulness. Work down 
 
 17. [x] Mesh import healing: the last invalid imports. M [64, 72] Done (`mt_kernel::mesh_heal`, FORMATS.md "Mesh import healing"): welding, side splitting at vertices and crossings, sliver removal, coplanar overlaps resolved by arrangement cells, repeated faces dropped; every Khronos sample, AC20-FZK-Haus and example.ifc valid with `Checks::ALL`; then polygons routed through a vertex twice cut into their simple parts (spikes and turned-over parts dropped, so removed sides do not come back as diagonals), tangles that splitting does not settle snapped onto the mesh's own vertices (iterated snap rounding), folds and solids thinner than the tolerance resolved like coplanar overlaps (corners just out of the plane moved onto it, cells started at a corner that keeps them planar), and overlaps that merging coplanar faces creates resolved too: `regr01.obj`, `Wuson.stl` and `heartgears.3mf` now valid, every `formats_check` import valid (16 invalid before healing), `formats_check` differences 41 to 29 (33 before healing), import times 1.2x to 1.4x the first healing's. Left: 1 of S_Office's ~3,760 meshes (a window-frame slab whose overlapping faces have corners 0.0007 in. out of each other's plane, where moving them would bend another face of the slab: splitting that face would settle it); glTF round trips of models a few hundred tolerances across (Spider, 3DSMaxExport, the bunny reconstruction, the 3MF gears) differ by 2e-5 to 2e-4 of their area against the 1e-6 limit and `Wuson.stl` (0.13 in.) by 8e-3 in every format, because their faces are planar only within the tolerance (exporting with fewer slivers was tried in `tessellate` and made round trips worse, FORMATS.md); healing still costs about 1.3x to 3x the unhealed import time on large meshes (grid queries; a parallel or incremental pass would help); which material SketchUp gives an overlap is from memory (trial).
 
+## Doable on Linux (no Windows or trial needed), added 2026-10-13
+In progress:
+18. [ ] Linux self-install: offer to install a newer binary into ~/.local/bin with an applications-menu entry, icon and .skp file type; Help > Install for This User; uninstall in Preferences. S
+19. [ ] Picking and inference from the shared (instanced) component meshes instead of flattened copies; faster undo after a big edit. M
+20. [ ] Fuzz the file readers (.skp, IFC, DXF, glTF, OBJ/STL/PLY/3MF/3DS/FBX, .style, .mtx): errors instead of crashes or hangs. M
+21. [ ] SketchUp 2021+ (VFF) writing: document the format, byte-identical round trip of sample files, then new models from a SketchUp-saved template (experimental; final check in SketchUp needs Windows). L
+
+Waiting:
+22. [ ] On the user's Linux machine: try 0.1.2 on Cinnamon (Alt + drag question on first start, Alt tools afterwards; the "off" values for Cinnamon, GNOME and MATE are guesses). S
+23. [ ] On the user's Linux machine with the NVIDIA card: CUDA for intersection, Solid Tools, triangulation and BVH builds (mt-cuda; Remote Control session or test commands). L
+
+Open:
+24. [ ] Texts and dimensions inside groups and components saved in .skp (the writer can already put them in definitions; the kernel export only writes root ones). S
+25. [ ] Faster rebuilds: colours, texture coordinates, pick index, snap geometry and GPU upload are still redone in full after each edit; the selection highlight re-uploads every edge. M
+26. [ ] Instancing leftovers: translucent meshes, Jitter's second stroke on instanced edges. S
+27. [ ] IFC leftovers (item 15): openings in elements made of mapped items or open shells, extrusion/revolution/offset surfaces in advanced breps, export of edges, textures, spaces and openings. M
+28. [ ] Mesh import: the last invalid S_Office mesh, glTF round trips of tiny models (item 17). S
+29. [ ] Panels (item 10): .skm material files, favorites, Components grid view and model-wide Statistics, writing SketchUp's zip .style, watermarks in our .style. M
+30. [ ] Image Igloo: Ctrl / Option + arrows (photos taken from about the same spot) and Shift + arrows (next scene in a series). S
+31. [ ] Extensions (item 69): signed packages and catalogs, update notifications, HTML dialogs, attribute dictionaries, custom tool cursors, revoking one permission. M
+32. [ ] Kernel: ~3-5% slower inserts from the undo dirty flags (slot_store), Move commit on huge single contexts (welding in transform_vertices). M
+
 ## Kept in view (parked by the user, 2026-10-13)
 - Sketchfab: OAuth sign-in and any further Sketchfab integration. The existing token-based source stays as it is.
 
