@@ -48,7 +48,7 @@ Each model is saved to `.skp` and opened again, then:
 | save, open | `Document::to_skp`, `Document::open` (split into parsing the file, `mt_skp::read`, and building the model, `import::from_skp`) | File > Save, File > Open |
 | scene build | `Document::scene`: everything drawn, with owners for picking | every edit, undo, redo, context change (`App::rebuild`) |
 | pick index (BVH), snap geometry, instance bounds | the rest of `App::rebuild` | every rebuild |
-| GPU upload, frame | `Viewport::set_faces` + `set_edges`, then one 1280 x 800 frame (mean of 5) | every rebuild; every repaint |
+| GPU upload, frame | `Viewport::set_faces` + `set_edges` (and, since instancing, the instanced meshes and their instances: `instancing::upload_faces`, `Scene::flat_edges`), then one 1280 x 800 frame (mean of 5) | every rebuild; every repaint |
 | first hover pick / first hover inference | the first mouse move after a rebuild (builds the culling indexes, see below) | first mouse move after an edit |
 | hover pick, hover inference | `selection::pick` and `Engine::infer` at 48 cursor positions over the view (mean) | every mouse move (Select tool / drawing tools) |
 | select all, selection highlight | Edit > Select All and the highlight it draws (`live_view::Highlight`) | selection changes |
@@ -57,7 +57,8 @@ Each model is saved to `.skp` and opened again, then:
 | rebuild after move, undo | `Document::scene` after the move (with the triangles kept from the first build), then Edit > Undo | after an edit |
 
 Each model also prints a checksum of its scene (every vertex, index, edge, owner,
-material, hidden edge and container) and of the pick and inference answers at the 48
+material, hidden edge and container; instanced triangles count as their flattened
+vertices, see "GPU instancing" below) and of the pick and inference answers at the 48
 cursor positions. They are the same before and after every change below, for every
 model, including the million-edge grid.
 
@@ -301,6 +302,96 @@ maps' free lists included, and the scene against a new document's after every st
 `live_view::tests::all_owners_matches_a_hash_set`. The app was checked under Xvfb:
 draw a rectangle, Push/Pull it, Edit > Undo, Edit > Redo.
 
+## GPU instancing
+
+Groups and components placed more than once are drawn from one mesh per definition,
+once per instance with the instance's transform, instead of being copied into the
+vertex and edge buffers once per instance (`mt-app/src/instancing.rs`,
+`mt_render::Viewport::set_instance_meshes`). The scene and hover checksums are the same
+before and after for every model.
+
+### Results
+
+Same machine and setup as above, GPU stages on llvmpipe. "Before" is the commit this
+change started from (with only the memory line added to the benchmark), "after" this
+change, run right after it. Memory is the size of the scene's per-triangle and
+per-edge lists (vertices, indices, world triangles, owners, materials, edges, plus the
+meshes) and of the buffers uploaded to the GPU (face vertices and indices, edges,
+meshes, instance transforms). The machine was shared: a second "after" run measured
+frame times up to 2x slower on every model, the small file included, so frame time
+differences here are noise.
+
+| stage | instances 10k | nested 4^6 | coedge_orientation_regression.skp | gondola_v20.skp | groups 5k | grid 1M edges |
+|---|---:|---:|---:|---:|---:|---:|
+| GPU buffers | 42.7 MB → 4.5 MB (9.5x) | 17.5 MB → 1.8 MB (9.7x) | 55.1 MB → 22.4 MB (2.5x) | 16.2 MB → 6.1 MB (2.7x) | 21.4 MB (same) | 264 MB (same) |
+| scene memory | 59.0 MB → 27.8 MB (2.1x) | 24.2 MB → 11.4 MB (2.1x) | 77.4 MB → 64.3 MB (1.2x) | 22.8 MB → 13.6 MB (1.7x) | 29.5 MB (same) | 360 MB (same) |
+| GPU upload | 41 ms → 2.7 ms (15x) | 8.1 ms → 1.2 ms (6.8x) | 42 ms → 19 ms (2.2x) | 7.5 ms → 3.2 ms (2.3x) | 9.5 ms → 12 ms (~) | 269 ms → 326 ms (slower, see below) |
+| scene build | 33 ms → 22 ms (1.5x) | 15 ms → 13 ms (~) | 117 ms → 95 ms (1.2x) | 17 ms → 11 ms (1.6x) | 41 ms → 49 ms (~) | 697 ms → 663 ms (~) |
+| rebuild after move | 34 ms → 19 ms (1.7x) | 22 ms → 9.1 ms (2.4x) | 140 ms → 78 ms (1.8x) | 16 ms → 9.9 ms (1.6x) | 39 ms → 50 ms (~) | 744 ms → 763 ms (~) |
+| frame (1280 x 800) | 178 ms → 195 ms (~) | 96 ms → 93 ms (~) | 390 ms → 201 ms (noise) | 150 ms → 85 ms (noise) | 119 ms → 122 ms (~) | 1.04 s → 1.00 s (~) |
+| move preview (1/10) | 10 ms → 6.8 ms (1.5x) | 11 ms → 13 ms (~) | 15 ms → 18 ms (~) | 2.4 ms → 2.4 ms (~) | 5.0 ms → 5.5 ms (~) | 1.33 s → 0.69 s (noise) |
+
+The second run's scene builds were within 1.1x of "before" on every model (instances
+10k 32 ms, gondola 17 ms): the gain in build time is small and within this machine's
+noise; memory and uploads are what instancing saves. The benchmark's GPU upload stage
+now also splits the edges into flattened and instanced ones (`Scene::flat_edges`, a
+copy of the edge list), which the app does with the highlight anyway: that copy is
+the grid's and groups 5k's extra upload time. Frames draw the same number of vertices
+either way (one mesh draw per instance list instead of one big draw), so llvmpipe,
+bound by vertex and fragment work, shows no change.
+
+### How it works
+
+1. **Meshes and placements** (`instancing.rs`). While the scene is collected, an
+   instance of a definition placed twice or more (counted once per build,
+   `instancing::Builder`) becomes a *placement* of a mesh: the definition's own faces
+   and edges in its own coordinates (the instances it contains are placements of
+   their own, so nested components instance at every level). A mesh is made per
+   definition *and* per what its contents are drawn with: inherited material, tag
+   (Color by Tag, dashes), fading while another context is open (rest of model or
+   similar instance). Everything else that differs per instance is the transform:
+   face-camera components' per-view transform, mirroring (the shader turns the front
+   side around when the transform's determinant is negative) and Cut Opening (the cut
+   holes are in the faces of the definition the openings are glued in, so they are in
+   its mesh). The first placement of a mesh builds it (triangles kept with their
+   double-precision positions and the texture coordinates per vertex); later
+   placements only add their world triangles and edges to the lists used for picking.
+2. **Flattened instead**: definitions placed once, the instances on the path to the
+   open context (their contents are edited in place and selectable), hidden instances
+   drawn by View > Hidden Objects, "Shadows face sun" components and everything in
+   them (their shadow casters are turned vertices of the flat buffer), and meshes with
+   a translucent triangle (translucent triangles are sorted one by one across the
+   whole model; hidden faces drawn by View > Hidden Geometry are translucent too).
+   Edges stay flattened with Jitter (a second stroke the instanced edge draw does not
+   make) or edges colored by axis (their color depends on the world direction), and
+   for meshes with fewer than 8 edges (an instance of the edges costs 6 transforms).
+3. **Exactness.** `Scene::tri_vertices` (and `flattened_vertices`, used by the
+   checksum) gives any instanced triangle's vertices exactly as flattening made them,
+   from the double-precision positions and the same normal and winding computation,
+   so the scene checksum (and the picking lists, which are unchanged) prove the
+   instanced scene is the flattened one. `instancing::tests` checks it per triangle,
+   with tags, materials, mirrored and scaled instances, nested components, an open
+   context, Hide Rest of Model, hidden geometry, Jitter and a hidden instance.
+4. **Rendering** (`mt-render`). `set_instance_meshes` uploads each mesh's faces and
+   edges; `set_face_instances` / `set_edge_instances` upload transforms (one buffer
+   per kind, a range per mesh). Faces draw with a per-instance transform attribute
+   (normals by the cofactor matrix, which is the inverse transpose up to the
+   determinant's scale); edges draw the mesh's segments as instances with the
+   transform repeated for their 6 quad vertices, so they go through the same line
+   shader (profiles from the transformed normals, depth cue, fog, back edges, section
+   clipping). Shadows, the section plane, ambient occlusion, X-ray (instanced faces
+   between the model's opaque and its sorted translucent ones, as in model order), fog
+   and the face styles apply alike; bounds (shadow fit, depth cue and fog range) come
+   from each mesh's distinct points transformed per instance (box corners for meshes
+   over 256 points). The headless test `instanced_meshes_draw_like_flattened_ones`
+   renders five instances (moved, turned, unevenly scaled, mirrored, tilted) both ways
+   in eight styles: at most 13 of 256,000 pixels differ (rounding along edges).
+5. **The app.** `App::rebuild` uploads the meshes and all placements; Move, Rotate and
+   Scale (and the grips' transparent instance) leave the moving placements out of the
+   instance list and draw them as preview faces (`live_view::kept_indices` returns the
+   kept placements); the highlight draws selected and moving placements' edges
+   flattened (with their selection color) and the rest instanced.
+
 ## Left to do
 
 Measured but not changed here, biggest first:
@@ -326,9 +417,15 @@ Measured but not changed here, biggest first:
   per context, with owners and indices kept stable, and the GPU buffers updated in
   place. The first scene build of a model also fills the kept triangles (first builds
   measured up to ~20% slower, within noise on most models).
-- **No GPU instancing.** Each instance's triangles are copied into the vertex buffer
-  (instances 10k: 120k triangles where 12 would do with per-instance transforms).
+- **What GPU instancing left flattened** (see "GPU instancing"): the world-space lists
+  for picking, snapping and section cuts (`Scene::triangles`, `Scene::edges` and their
+  owners) still hold every instance, and the scene build still transforms every
+  instanced triangle and edge for them (instances 10k: ~30 ms). Picking from the
+  meshes (a BVH per mesh, rays transformed per instance) and snapping from them would
+  remove that. Selected and moving instances draw their edges flattened, rebuilt with
+  the highlight. Translucent meshes are flattened (one-by-one sorting).
 - **The highlight on huge models** (grid: ~0.25 s): it still rebuilds and re-uploads
   the whole edge list on every selection change.
-- **Frame time** on llvmpipe grows with edges (grid ~3 s per frame); not measured on a
+- **Frame time** on llvmpipe grows with edges and triangles drawn, instanced or not
+  (instancing saves memory and uploads, not vertex work); not measured on a
   real GPU here.

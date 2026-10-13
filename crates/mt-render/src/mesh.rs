@@ -61,6 +61,35 @@ impl FaceVertex {
     }
 }
 
+/// Per-instance data of a mesh drawn many times: the instance's transform.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct InstanceData {
+    /// Column-major.
+    pub columns: [[f32; 4]; 4],
+}
+
+impl InstanceData {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        8 => Float32x4, 9 => Float32x4, 10 => Float32x4, 11 => Float32x4
+    ];
+
+    /// Faces: one transform per instance.
+    pub(crate) const FACE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<InstanceData>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &Self::ATTRIBUTES,
+    };
+
+    /// Edges: the segments are the instances and the transform is repeated for each
+    /// of the 6 vertices of a segment's quad.
+    pub(crate) const EDGE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<InstanceData>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &Self::ATTRIBUTES,
+    };
+}
+
 /// GPU buffers of the faces: opaque triangles first, then translucent ones.
 pub(crate) struct FaceBuffers {
     pub vertices: wgpu::Buffer,

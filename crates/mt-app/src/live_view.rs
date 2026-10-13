@@ -31,9 +31,10 @@ pub struct Highlight<'a> {
 
 impl Highlight<'_> {
     /// The edges to draw (model edges with selected ones colored, moved targets,
-    /// selection boxes, the ghost, guides and cut lines) and the selected faces'
-    /// triangles (unindexed).
-    pub fn build(&self) -> (Vec<Segment>, Vec<FaceVertex>) {
+    /// selection boxes, the ghost, guides and cut lines), the selected faces'
+    /// triangles (unindexed) and the placements whose edges are drawn instanced (their
+    /// edges left out of the first list: those neither selected nor moving).
+    pub fn build(&self) -> (Vec<Segment>, Vec<FaceVertex>, Vec<usize>) {
         let scene = self.scene;
         // Live targets: owner set, world-space transform, copy.
         let live = self.live.map(|(t, xf, copy)| {
@@ -74,11 +75,37 @@ impl Highlight<'_> {
         // Compatibility > Bounding box only: selected groups and components show
         // their box, not their edges.
         let box_only = self.box_only;
-        for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
-            let mut seg = *seg;
-            let selected = owner.is_some_and(|o| {
-                self.selection.contains(&o) && !(box_only && matches!(o, Owner::Instance(_)))
+        let selected = |o: Owner| {
+            self.selection.contains(&o) && !(box_only && matches!(o, Owner::Instance(_)))
+        };
+        // Placements drawn instanced: left out here, except selected or moving ones.
+        let mut instanced = Vec::new();
+        let mut skip = Vec::new();
+        for (j, p) in scene.instancing.placements.iter().enumerate() {
+            let touched = p.owner.is_some_and(|o| {
+                selected(o)
+                    || moved(&Some(o)).is_some()
+                    || (stretching && self.stretch.contains(&o))
             });
+            if p.edges_instanced(scene) && !touched {
+                instanced.push(j);
+                skip.push(p.edges.clone());
+            }
+        }
+        let mut from = 0;
+        let runs = (skip.iter())
+            .map(|r| {
+                let run = from..r.start;
+                from = r.end;
+                run
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(std::iter::once(from..scene.edges.len()));
+        for k in runs.flatten() {
+            let (seg, owner) = (&scene.edges[k], &scene.edge_owner[k]);
+            let mut seg = *seg;
+            let selected = owner.is_some_and(selected);
             let color = if selected {
                 highlight(owner)
             } else {
@@ -134,8 +161,7 @@ impl Highlight<'_> {
         for t in selected {
             let owner = scene.tri_owner[t].expect("a selected face");
             let xf = moved(&Some(owner)).map(|(xf, _)| xf);
-            for k in 0..3 {
-                let mut v = scene.vertices[scene.indices[3 * t + k] as usize];
+            for mut v in scene.tri_vertices(t) {
                 if let Some(xf) = xf {
                     v.position = tp(xf, v.position);
                 }
@@ -176,21 +202,21 @@ impl Highlight<'_> {
         }
         edges.extend(scene.guides.iter().copied());
         edges.extend(self.cut_lines.iter().copied());
-        (edges, vertices)
+        (edges, vertices, instanced)
     }
 }
 
-/// Indices of the scene's triangles that stay in place while `targets` (and the
-/// stretched faces) are drawn moved.
-pub fn kept_indices(scene: &Scene, targets: &[Owner], stretch: &Stretch) -> Vec<u32> {
+/// Indices of the scene's flattened triangles that stay in place while `targets` (and
+/// the stretched faces) are drawn moved, and the placements that do.
+pub fn kept_indices(scene: &Scene, targets: &[Owner], stretch: &Stretch) -> (Vec<u32>, Vec<usize>) {
     let set: FxSet<Owner> = targets.iter().copied().collect();
-    scene
-        .indices
-        .chunks(3)
-        .zip(&scene.tri_owner)
-        .filter(|(_, o)| !o.is_some_and(|o| set.contains(&o) || stretch.contains(&o)))
-        .flat_map(|(t, _)| t.iter().copied())
-        .collect()
+    let kept = |o: Option<Owner>| !o.is_some_and(|o| set.contains(&o) || stretch.contains(&o));
+    let indices = scene
+        .flat_tris()
+        .filter(|&(t, _)| kept(scene.tri_owner[t]))
+        .flat_map(|(_, i)| scene.indices[3 * i..3 * i + 3].iter().copied())
+        .collect();
+    (indices, scene.placements_where(kept))
 }
 
 /// The moved targets' and stretched faces' triangles (unindexed); `w` is the world
@@ -207,15 +233,13 @@ pub fn preview_faces(
     let mut vertices = Vec::new();
     for (t, owner) in scene.tri_owner.iter().enumerate() {
         if let Some(o) = owner.filter(|o| stretch.contains(o)) {
-            let tri = [0, 1, 2].map(|k| scene.vertices[scene.indices[3 * t + k] as usize]);
-            vertices.extend(stretch.triangle(&o, tri));
+            vertices.extend(stretch.triangle(&o, scene.tri_vertices(t)));
             continue;
         }
         if !owner.is_some_and(|o| set.contains(&o)) {
             continue;
         }
-        for k in 0..3 {
-            let mut v = scene.vertices[scene.indices[3 * t + k] as usize];
+        for mut v in scene.tri_vertices(t) {
             v.position = w.transform_point3(f(v.position)).as_vec3().into();
             v.normal = (n * f(v.normal)).normalize_or_zero().as_vec3().into();
             vertices.push(v);

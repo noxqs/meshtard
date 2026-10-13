@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::{Camera, look_at_rh, orthographic_rh};
 use crate::effects::{AmbientOcclusion, AoPass, Watermark, Watermarks};
 use crate::environment::{EnvImage, EnvPass, EnvView};
-use crate::mesh::{FaceBuffers, FaceVertex};
+use crate::mesh::{FaceBuffers, FaceVertex, InstanceData};
 use crate::section::SectionCut;
 use crate::texture::{TextureSource, Textures};
 
@@ -381,6 +381,125 @@ fn axis_segments(axes: &AxesStyle) -> Vec<Segment> {
     out
 }
 
+/// A mesh drawn once per instance (a component placed many times), in its own
+/// coordinates: see [`Viewport::set_instance_meshes`].
+#[derive(Clone, Copy, Default)]
+pub struct InstanceMesh<'a> {
+    /// Faces as for [`Viewport::set_faces`], wound counter-clockwise around
+    /// `normal` in the mesh's coordinates (an instance whose transform mirrors keeps
+    /// its front side in front).
+    pub vertices: &'a [FaceVertex],
+    pub indices: &'a [u32],
+    /// Edges as for [`Viewport::set_edges`]; normals in the mesh's coordinates.
+    pub edges: &'a [Segment],
+}
+
+/// Above this many distinct points a mesh's instances are bounded by its box's
+/// corners, not its points.
+const BOUND_POINTS: usize = 256;
+
+/// The points bounding a mesh: its distinct points, or its box's corners.
+fn bound_points(points: impl Iterator<Item = [f32; 3]>) -> Vec<Vec3> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Vec3> = Vec::new();
+    for p in points {
+        if seen.insert(p.map(f32::to_bits)) {
+            out.push(Vec3::from(p));
+        }
+    }
+    if out.len() > BOUND_POINTS {
+        let (lo, hi) = out.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(lo, hi), &p| (lo.min(p), hi.max(p)),
+        );
+        out = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
+                )
+            })
+            .collect();
+    }
+    out
+}
+
+fn union(a: Option<(Vec3, Vec3)>, b: Option<(Vec3, Vec3)>) -> Option<(Vec3, Vec3)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
+        (a, b) => a.or(b),
+    }
+}
+
+/// An uploaded [`InstanceMesh`].
+struct InstMesh {
+    faces: Option<FaceBuffers>,
+    edges: Option<wgpu::Buffer>,
+    edge_count: u32,
+    face_points: Vec<Vec3>,
+    /// Endpoints of the [`Segment::MODEL_EDGE`] segments.
+    edge_points: Vec<Vec3>,
+}
+
+/// Instances of the meshes: one buffer, a range of it per mesh.
+struct Instances {
+    buffer: wgpu::Buffer,
+    /// Mesh and range in instances (edges: in vertices, 6 per instance).
+    ranges: Vec<(usize, std::ops::Range<u32>)>,
+    bounds: Option<(Vec3, Vec3)>,
+}
+
+impl Instances {
+    /// `instances` of `meshes` (mesh index, transform), each repeated `repeat` times.
+    /// `points` gives a mesh's bounding points.
+    fn new(
+        device: &wgpu::Device,
+        meshes: &[InstMesh],
+        instances: &[(u32, Mat4)],
+        repeat: u32,
+        usable: impl Fn(&InstMesh) -> bool,
+        points: impl Fn(&InstMesh) -> &[Vec3],
+    ) -> Option<Self> {
+        let mut sorted: Vec<&(u32, Mat4)> = instances
+            .iter()
+            .filter(|(m, _)| meshes.get(*m as usize).is_some_and(&usable))
+            .collect();
+        if sorted.is_empty() {
+            return None;
+        }
+        sorted.sort_by_key(|(m, _)| *m);
+        let mut data = Vec::with_capacity(sorted.len() * repeat as usize);
+        let mut ranges: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
+        let mut bounds = None;
+        for &&(m, xf) in &sorted {
+            let at = data.len() as u32;
+            match ranges.last_mut() {
+                Some((last, r)) if *last == m as usize => r.end = at + repeat,
+                _ => ranges.push((m as usize, at..at + repeat)),
+            }
+            let columns = xf.to_cols_array_2d();
+            data.extend(std::iter::repeat_n(
+                InstanceData { columns },
+                repeat as usize,
+            ));
+            let placed = points(&meshes[m as usize])
+                .iter()
+                .map(|&p| xf.transform_point3(p));
+            bounds = union(bounds, placed.fold(None, |b, p| union(b, Some((p, p)))));
+        }
+        Some(Self {
+            buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("instances"),
+                contents: bytemuck::cast_slice(&data),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            ranges,
+            bounds,
+        })
+    }
+}
+
 /// The sun's depth map and the bind group the color passes sample it through.
 struct ShadowMap {
     size: u32,
@@ -567,6 +686,15 @@ pub struct Viewport {
     faces_opaque: wgpu::RenderPipeline,
     faces_translucent: wgpu::RenderPipeline,
     faces: Option<FaceBuffers>,
+    /// Meshes drawn per instance (see `set_instance_meshes`) and their pipelines.
+    inst_meshes: Vec<InstMesh>,
+    face_instances: Option<Instances>,
+    edge_instances: Option<Instances>,
+    inst_opaque: wgpu::RenderPipeline,
+    inst_translucent: wgpu::RenderPipeline,
+    inst_shadow: wgpu::RenderPipeline,
+    inst_lines: wgpu::RenderPipeline,
+    inst_back_lines: wgpu::RenderPipeline,
     textures: Textures,
     /// Environments panel: skydome and reflections (bind group 3).
     env: EnvPass,
@@ -772,7 +900,25 @@ impl Viewport {
             "back edges",
             "back_line_vs",
             "back_line_fs",
-            &[Some(segment_layout)],
+            &[Some(segment_layout.clone())],
+            false,
+            alpha,
+            wgpu::CompareFunction::Less,
+        );
+        let inst_segments = [Some(segment_layout), Some(InstanceData::EDGE_LAYOUT)];
+        let inst_lines = pipeline(
+            "instanced lines",
+            "inst_line_vs",
+            "line_fs",
+            &inst_segments,
+            true,
+            alpha,
+        );
+        let inst_back_lines = pipeline_cmp(
+            "instanced back edges",
+            "inst_back_line_vs",
+            "back_line_fs",
+            &inst_segments,
             false,
             alpha,
             wgpu::CompareFunction::Less,
@@ -793,6 +939,24 @@ impl Viewport {
             "face_vs",
             "face_fs",
             &faces,
+            false,
+            alpha,
+        );
+
+        let inst_faces = [Some(FaceVertex::LAYOUT), Some(InstanceData::FACE_LAYOUT)];
+        let inst_opaque = pipeline(
+            "instanced opaque faces",
+            "inst_face_vs",
+            "face_fs",
+            &inst_faces,
+            true,
+            Some(wgpu::BlendState::REPLACE),
+        );
+        let inst_translucent = pipeline(
+            "instanced translucent faces",
+            "inst_face_vs",
+            "face_fs",
+            &inst_faces,
             false,
             alpha,
         );
@@ -825,37 +989,41 @@ impl Viewport {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("shadow map"),
-            layout: Some(&shadow_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("shadow_vs"),
-                compilation_options: Default::default(),
-                buffers: &faces,
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: SHADOW_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
+        let shadow = |vs, buffers: &[Option<wgpu::VertexBufferLayout>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("shadow map"),
+                layout: Some(&shadow_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers,
                 },
-            }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("shadow_fs"),
-                compilation_options: Default::default(),
-                targets: &[],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: SHADOW_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("shadow_fs"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let shadow_pipeline = shadow("shadow_vs", &faces);
+        let inst_shadow = shadow("inst_shadow_vs", &inst_faces);
 
         let mut viewport = Self {
             globals,
@@ -881,6 +1049,14 @@ impl Viewport {
             faces_opaque,
             faces_translucent,
             faces: None,
+            inst_meshes: Vec::new(),
+            face_instances: None,
+            edge_instances: None,
+            inst_opaque,
+            inst_translucent,
+            inst_shadow,
+            inst_lines,
+            inst_back_lines,
             textures,
             env,
             selection,
@@ -926,6 +1102,129 @@ impl Viewport {
     /// Triangles with any alpha below 1 are drawn translucent, after everything else.
     pub fn set_faces(&mut self, device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) {
         self.faces = FaceBuffers::new(device, vertices, indices);
+    }
+
+    /// Replaces the meshes drawn per instance (components placed many times) and
+    /// clears their instances. Each instance draws its mesh's faces like those of
+    /// [`Viewport::set_faces`] (translucent triangles unsorted, after the sorted
+    /// ones) and its edges like those of [`Viewport::set_edges`] (one stroke: no
+    /// Jitter), at the instance's transform. Shadows, the section plane, X-ray, fog,
+    /// profiles and the other styles apply as to the other faces and edges.
+    pub fn set_instance_meshes(&mut self, device: &wgpu::Device, meshes: &[InstanceMesh]) {
+        self.inst_meshes = meshes
+            .iter()
+            .map(|m| InstMesh {
+                faces: FaceBuffers::new(device, m.vertices, m.indices),
+                edges: (!m.edges.is_empty()).then(|| {
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("instanced edges"),
+                        contents: bytemuck::cast_slice(m.edges),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+                }),
+                edge_count: m.edges.len() as u32,
+                face_points: bound_points(
+                    m.indices.iter().map(|&i| m.vertices[i as usize].position),
+                ),
+                edge_points: bound_points(
+                    m.edges
+                        .iter()
+                        .filter(|s| s.flags & Segment::MODEL_EDGE != 0)
+                        .flat_map(|s| [s.a, s.b]),
+                ),
+            })
+            .collect();
+        self.face_instances = None;
+        self.edge_instances = None;
+    }
+
+    /// The instances whose faces are drawn: mesh (index into the last
+    /// [`Viewport::set_instance_meshes`]) and transform. Replaces the previous ones.
+    pub fn set_face_instances(&mut self, device: &wgpu::Device, instances: &[(u32, Mat4)]) {
+        self.face_instances = Instances::new(
+            device,
+            &self.inst_meshes,
+            instances,
+            1,
+            |m| m.faces.is_some(),
+            |m| &m.face_points,
+        );
+    }
+
+    /// The instances whose edges are drawn, as [`Viewport::set_face_instances`].
+    pub fn set_edge_instances(&mut self, device: &wgpu::Device, instances: &[(u32, Mat4)]) {
+        self.edge_instances = Instances::new(
+            device,
+            &self.inst_meshes,
+            instances,
+            6,
+            |m| m.edges.is_some(),
+            |m| &m.edge_points,
+        );
+    }
+
+    /// Bounds of all drawn faces.
+    fn face_bounds(&self) -> Option<(Vec3, Vec3)> {
+        union(
+            self.faces.as_ref().map(|f| f.bounds),
+            self.face_instances.as_ref().and_then(|i| i.bounds),
+        )
+    }
+
+    /// The face instances with their mesh's faces.
+    fn face_draws(&self) -> impl Iterator<Item = (&FaceBuffers, std::ops::Range<u32>)> {
+        self.face_instances.iter().flat_map(move |inst| {
+            inst.ranges
+                .iter()
+                .filter_map(move |(m, r)| Some((self.inst_meshes[*m].faces.as_ref()?, r.clone())))
+        })
+    }
+
+    /// Draws the face instances' triangles in `range(mesh)` with `pipeline`.
+    fn draw_instanced_faces(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        range: impl Fn(&FaceBuffers) -> std::ops::Range<u32>,
+    ) {
+        let Some(inst) = &self.face_instances else {
+            return;
+        };
+        let mut set = false;
+        for (faces, instances) in self.face_draws() {
+            let r = range(faces);
+            if r.is_empty() {
+                continue;
+            }
+            if !set {
+                pass.set_pipeline(pipeline);
+                pass.set_vertex_buffer(1, inst.buffer.slice(..));
+                set = true;
+            }
+            pass.set_vertex_buffer(0, faces.vertices.slice(..));
+            pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(r, 0, instances);
+        }
+    }
+
+    /// Draws the edge instances with `pipeline`.
+    fn draw_instanced_edges(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+    ) {
+        let Some(inst) = &self.edge_instances else {
+            return;
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(1, inst.buffer.slice(..));
+        for (m, r) in &inst.ranges {
+            let mesh = &self.inst_meshes[*m];
+            if let Some(edges) = &mesh.edges {
+                pass.set_vertex_buffer(0, edges.slice(..));
+                pass.draw(r.clone(), 0..mesh.edge_count);
+            }
+        }
     }
 
     /// Faces that cast shadows in place of the drawn ones (components whose "Shadows
@@ -1080,9 +1379,9 @@ impl Viewport {
         let sun = shadows
             .map(|s| Vec3::from(s.sun_dir).normalize_or_zero())
             .filter(|d| d.z > 0.0);
-        let shadow_fit = match (shadows, sun, &self.faces) {
-            (Some(s), Some(sun), Some(faces)) if s.on_faces || s.on_ground => {
-                Some(fit_sun(sun, faces.bounds))
+        let shadow_fit = match (shadows, sun, self.face_bounds()) {
+            (Some(s), Some(sun), Some(bounds)) if s.on_faces || s.on_ground => {
+                Some(fit_sun(sun, bounds))
             }
             _ => None,
         };
@@ -1113,10 +1412,10 @@ impl Viewport {
         // View depth range of the model (faces and model edges), for depth cue and fog.
         let forward = camera.forward().as_vec3();
         let eye = camera.eye.as_vec3();
-        let bounds = [self.faces.as_ref().map(|f| f.bounds), self.edge_bounds]
-            .into_iter()
-            .flatten()
-            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let bounds = union(
+            union(self.face_bounds(), self.edge_bounds),
+            self.edge_instances.as_ref().and_then(|i| i.bounds),
+        );
         let (near, far) = bounds.map_or((0.0, 1.0), |(lo, hi)| {
             let center = forward.dot((lo + hi) * 0.5 - eye);
             let radius = (hi - lo).length() * 0.5;
@@ -1260,10 +1559,7 @@ impl Viewport {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
         let mut encoder = device.create_command_encoder(&Default::default());
-        if let (Some(_), Some(faces)) = (
-            shadow_fit,
-            self.shadow_casters.as_ref().or(self.faces.as_ref()),
-        ) {
+        if shadow_fit.is_some() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow map"),
                 color_attachments: &[],
@@ -1280,16 +1576,19 @@ impl Viewport {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_pipeline(&self.shadow_pipeline);
-            pass.set_vertex_buffer(0, faces.vertices.slice(..));
-            pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..faces.translucent.end, 0, 0..1);
+            if let Some(faces) = self.shadow_casters.as_ref().or(self.faces.as_ref()) {
+                pass.set_pipeline(&self.shadow_pipeline);
+                pass.set_vertex_buffer(0, faces.vertices.slice(..));
+                pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..faces.translucent.end, 0, 0..1);
+            }
+            self.draw_instanced_faces(&mut pass, &self.inst_shadow, |f| 0..f.translucent.end);
         }
         // Ambient occlusion splits the frame: the opaque faces first (keeping color
         // and depth), the occlusion pass reading their depth, then the rest.
         let ao = style
             .ambient_occlusion
-            .filter(|_| !wireframe && !xray && self.faces.is_some());
+            .filter(|_| !wireframe && !xray && self.face_bounds().is_some());
         self.watermarks
             .prepare(device, queue, size, pixels_per_point);
         let split = ao.is_some();
@@ -1430,6 +1729,9 @@ impl Viewport {
                 pass.draw_indexed(range, 0, 0..1);
             }
         }
+        if !wireframe && !xray {
+            self.draw_instanced_faces(pass, &self.inst_opaque, opaque_range);
+        }
         if let Some(fill) = self.fill.as_ref().filter(|_| !wireframe) {
             pass.set_pipeline(&self.fill_pipeline);
             pass.set_vertex_buffer(0, fill.vertices.slice(..));
@@ -1477,6 +1779,7 @@ impl Viewport {
             let vertices = if style.jitter { 12 } else { 6 };
             pass.draw(0..vertices, 0..self.edges_count);
         }
+        self.draw_instanced_edges(pass, &self.inst_lines);
         if let Some(edges) = self
             .edges
             .as_ref()
@@ -1485,6 +1788,9 @@ impl Viewport {
             pass.set_pipeline(&self.back_lines);
             pass.set_vertex_buffer(0, edges.slice(..));
             pass.draw(0..6, 0..self.edges_count);
+        }
+        if style.back_edges && !wireframe && !xray {
+            self.draw_instanced_edges(pass, &self.inst_back_lines);
         }
         if let Some(axes) = &self.axes {
             pass.set_pipeline(&self.overlay_lines);
@@ -1503,13 +1809,28 @@ impl Viewport {
                 f.translucent.clone()
             }
         };
+        // The model's faces in two parts with the instances' between: in X-ray the
+        // opaque ones in model order (the instanced ones after the others), then the
+        // sorted translucent ones over all of them.
         let faces = self.faces.as_ref().filter(|_| !wireframe);
-        if let Some(faces) = faces.filter(|f| !range(f).is_empty()) {
-            pass.set_pipeline(&self.faces_translucent);
-            pass.set_vertex_buffer(0, faces.vertices.slice(..));
-            pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(range(faces), 0, 0..1);
+        let draw_faces = |pass: &mut wgpu::RenderPass<'_>, r: std::ops::Range<u32>| {
+            if let Some(faces) = faces.filter(|_| !r.is_empty()) {
+                pass.set_pipeline(&self.faces_translucent);
+                pass.set_vertex_buffer(0, faces.vertices.slice(..));
+                pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(r, 0, 0..1);
+            }
+        };
+        let (first, then) = faces.map_or((0..0, 0..0), |f| {
+            let r = range(f);
+            let split = if xray { f.opaque.end } else { r.start };
+            (r.start..split, split..r.end)
+        });
+        draw_faces(pass, first);
+        if !wireframe {
+            self.draw_instanced_faces(pass, &self.inst_translucent, range);
         }
+        draw_faces(pass, then);
         let preview = self.preview.as_ref().filter(|_| !wireframe);
         if let Some(p) = preview.filter(|p| !range(p).is_empty()) {
             pass.set_pipeline(&self.faces_translucent);

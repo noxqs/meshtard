@@ -149,6 +149,9 @@ pub struct Scene {
     /// Vertex ranges of face-camera components with "Shadows face sun", and the
     /// rotation turning each from the camera to the sun (see [`Scene::shadow_casters`]).
     pub sun_facing: Vec<(std::ops::Range<usize>, DMat4)>,
+    /// Groups and components drawn per instance (see `instancing`): their triangles
+    /// are in `triangles` but not in `vertices` / `indices`.
+    pub instancing: crate::instancing::Instancing,
     /// Culling index over `edges` for picking, built on first use (see
     /// [`Scene::edges_near`]).
     edge_index: std::sync::OnceLock<mt_infer::cull::BoxIndex>,
@@ -216,6 +219,10 @@ struct Walk<'a> {
     /// Triangles of the faces of collections reached more than once (component
     /// definitions placed many times), in their own coordinates: tessellated once.
     triangles: FxMap<(usize, FaceId), Vec<[DVec3; 3]>>,
+    /// Instancing (`None`: everything flattened).
+    instancing: Option<crate::instancing::Builder>,
+    /// The mesh the next collection walked is a placement of, if instanced.
+    next: Option<crate::instancing::Key>,
 }
 
 /// What an instance passes to its contents.
@@ -234,6 +241,8 @@ struct Inherited {
     /// Inside another instance of the open component (Model Info > Components fades
     /// it by its "similar" amount).
     similar: bool,
+    /// Drawn flattened, not instanced (inside a "Shadows face sun" component).
+    flat: bool,
 }
 
 /// Lightens a color towards white by `amount` (0 to 1) for geometry outside the open
@@ -778,8 +787,15 @@ impl Document {
     }
 
     /// Visible faces and edges in world space. Hidden entities, entities on hidden tags,
-    /// and soft edges are left out.
+    /// and soft edges are left out. Groups and components placed more than once are
+    /// drawn per instance (see `instancing`).
     pub fn scene(&self) -> Scene {
+        self.scene_with(true)
+    }
+
+    /// [`Document::scene`], with or without instancing (without: every instance
+    /// flattened into the scene's vertices).
+    pub(crate) fn scene_with(&self, instancing: bool) -> Scene {
         let mut scene = Scene::default();
         for m in &self.model.materials {
             let layer = match &m.texture {
@@ -805,6 +821,7 @@ impl Document {
             Level::Context(&self.context),
             &mut Walk {
                 tess: Some(&mut tess),
+                instancing: instancing.then(|| crate::instancing::Builder::new(&self.model)),
                 ..Default::default()
             },
             &mut scene,
@@ -996,6 +1013,8 @@ impl Document {
         walk: &mut Walk,
         out: &mut Scene,
     ) {
+        // This collection's own faces and edges as a placement of an instanced mesh.
+        let place = walk.next.take();
         let show_hidden = self.model.style.hidden_geometry;
         let hidden_color = rgba(self.model.style.modeling_extras.hidden_geometry);
         // View > Hidden Objects: hidden groups and components (drawn as hidden).
@@ -1018,6 +1037,7 @@ impl Document {
         let container = inherited.container;
         let outer_layer = inherited.layer;
         let similar = inherited.similar;
+        let flat = inherited.flat;
         let inherited = inherited.material;
         // Outside the open context: faded, not selectable.
         let faded = matches!(level, Level::Outside | Level::Context([_, ..]));
@@ -1055,6 +1075,23 @@ impl Document {
         let world_normal = |f: FaceId| (normal_xf * ents.faces[f].normal).normalize_or_zero();
         let f32x3 = |n: DVec3| [n.x as f32, n.y as f32, n.z as f32];
 
+        // The mesh this placement draws (`placed`), or the one it makes (`build`).
+        use crate::instancing::{Build, Made};
+        let (mut build, placed) = match (place, &walk.instancing) {
+            (Some(key), Some(b)) => match b.made.get(&key) {
+                None => (Some(Build::default()), None),
+                Some(Made::Mesh(m)) => (None, Some(*m)),
+                Some(Made::Flat) => (None, None),
+            },
+            _ => (None, None),
+        };
+        let placement_owner = match level {
+            Level::Inside(o) => Some(o),
+            _ => None,
+        };
+        let local = |p: DVec3| [p.x as f32, p.y as f32, p.z as f32];
+        let local_normal = |f: FaceId| f32x3(ents.faces[f].normal.normalize_or_zero());
+        let edges_start = out.edges.len();
         for (id, e) in &ents.edges {
             // Edges off: the renderer draws only the profiles among model edges, so
             // edges are left out only when profiles are off too. View > Hidden
@@ -1095,6 +1132,26 @@ impl Document {
             if let Some(c) = container {
                 set_container(&mut out.edge_container, out.edges.len(), c);
             }
+            if let Some(b) = &mut build {
+                let mut l = seg;
+                (l.a, l.b) = (local(ents.pos(e.start)), local(ents.pos(e.end)));
+                if !hidden {
+                    l.flags = Segment::MODEL_EDGE;
+                    match e.faces[..] {
+                        [] => {}
+                        [f] => {
+                            l.n1 = local_normal(f);
+                            l.profile = Segment::BORDER;
+                        }
+                        [f, g, ..] => {
+                            l.n1 = local_normal(f);
+                            l.n2 = local_normal(g);
+                            l.profile = Segment::SILHOUETTE;
+                        }
+                    }
+                }
+                b.edges.push(l);
+            }
             if hidden {
                 out.hidden_edges.insert(out.edges.len());
                 out.edges.push(seg);
@@ -1118,6 +1175,33 @@ impl Document {
             out.edge_owner.push(owner_of(Owner::Edge(id)));
         }
 
+        let edges = edges_start..out.edges.len();
+        let tris_start = out.triangles.len();
+        if let Some(m) = placed {
+            // Another placement of a mesh: only the world triangles, for picking.
+            let tris = std::mem::take(&mut out.instancing.meshes[m as usize].tris);
+            let mut n = (DVec3::NAN, DVec3::ZERO);
+            for t in &tris {
+                if t.normal != n.0 {
+                    n = (
+                        t.normal,
+                        crate::instancing::world_normal(&normal_xf, t.normal),
+                    );
+                }
+                let world = t.local.map(|p| xf.transform_point3(p));
+                let tri = crate::instancing::ccw(&world, n.1).map(|k| world[k]);
+                if let Some(c) = container {
+                    set_container(&mut out.tri_container, out.triangles.len(), c);
+                }
+                out.triangles.push(tri);
+                out.tri_owner.push(placement_owner);
+                out.tri_material.push(t.materials);
+            }
+            out.instancing.meshes[m as usize].tris = tris;
+            let tris = tris_start..out.triangles.len();
+            out.instancing
+                .place(m, xf, placement_owner, tris, edges.clone());
+        }
         // "Cut opening" components glued here cut holes into the faces they sit on.
         let openings = self.cut_openings(ents);
         // A collection reached again (another instance of its definition) reuses the
@@ -1137,6 +1221,9 @@ impl Document {
             _ => None,
         };
         for (f, face) in &ents.faces {
+            if placed.is_some() {
+                break;
+            }
             let hidden = ghost || face.attrs.hidden;
             if rest_here
                 || (face.attrs.hidden && !show_hidden)
@@ -1205,26 +1292,32 @@ impl Document {
                 }
             };
             for &local in tris {
-                let [a, b, c] = local.map(|p| xf.transform_point3(p));
-                // A mirroring transform flips the winding; keep it counter-clockwise
-                // around the front normal.
-                let order = if (b - a).cross(c - a).dot(n) < 0.0 {
-                    [0, 2, 1]
-                } else {
-                    [0, 1, 2]
+                let lt = crate::instancing::LocalTri {
+                    local,
+                    normal: face.normal,
+                    materials: [front_material, back_material],
+                    verts: local.map(|p| {
+                        let ([fu, fv], fq) = uv(&front_tex, p);
+                        let ([bu, bv], bq) = uv(&back_tex, p);
+                        FaceVertex {
+                            uv: [fu, fv, bu, bv],
+                            q: [fq, bq],
+                            texture,
+                            ..FaceVertex::new([0.0; 3], [0.0; 3], front, back)
+                        }
+                    }),
                 };
-                let world = [a, b, c];
-                let tri = order.map(|k| world[k]);
-                for k in order {
-                    let ([fu, fv], fq) = uv(&front_tex, local[k]);
-                    let ([bu, bv], bq) = uv(&back_tex, local[k]);
-                    out.indices.push(out.vertices.len() as u32);
-                    out.vertices.push(FaceVertex {
-                        uv: [fu, fv, bu, bv],
-                        q: [fq, bq],
-                        texture,
-                        ..FaceVertex::new(f32x3(world[k]), f32x3(n), front, back)
-                    });
+                // A mirroring transform flips the winding; `place` keeps it
+                // counter-clockwise around the front normal.
+                let (verts, tri) = lt.place(&xf, n);
+                match &mut build {
+                    Some(b) => b.tris.push(lt),
+                    None => {
+                        for v in verts {
+                            out.indices.push(out.vertices.len() as u32);
+                            out.vertices.push(v);
+                        }
+                    }
                 }
                 if hidden {
                     // A hidden face shows as a mesh of its triangles.
@@ -1250,6 +1343,10 @@ impl Document {
         }
         if let (Some(visit), Some(cache)) = (kept, &mut walk.tess) {
             cache.finish(visit);
+        }
+        if let (Some(b), Some(key), Some(builder)) = (build, place, &mut walk.instancing) {
+            let tris = tris_start..out.triangles.len();
+            b.finish(builder, key, xf, placement_owner, tris, edges, out);
         }
 
         for (index, i) in ents.instances.iter().enumerate() {
@@ -1284,9 +1381,16 @@ impl Document {
                 container: container.or((!matches!(child, Level::Context(_))).then_some(kind)),
                 layer: i.layer.filter(|&l| l > 0).or(outer_layer),
                 similar: similar || (edit_def == Some(i.definition) && !on_path),
+                flat,
             };
             let (ix, sun_turn) =
                 crate::component_behavior::placed(self.view.as_ref(), def, xf * i.transform);
+            // "Shadows face sun" components are turned for their shadows from the
+            // flattened vertices.
+            let parent = Inherited {
+                flat: flat || sun_turn.is_some(),
+                ..parent
+            };
             // Model Info > Components > Show component axes.
             if self.model.edit_fade.show_axes && !def.is_group && !def.is_image {
                 let size = def
@@ -1309,6 +1413,22 @@ impl Document {
             }
             let start = out.vertices.len();
             let ctx = Some(crate::undo::Ctx::Def(i.definition));
+            // Placed more than once: drawn per instance (see `instancing`), except on
+            // the open context's path and when hidden.
+            let reach = (walk.instancing.as_ref())
+                .and_then(|b| b.reach.get(&i.definition).copied())
+                .unwrap_or(0);
+            walk.next = (reach >= 2
+                && !parent.flat
+                && !parent.hidden
+                && matches!(child, Level::Inside(_) | Level::Outside))
+            .then_some(crate::instancing::Key {
+                definition: i.definition,
+                material: parent.material,
+                layer: parent.layer,
+                similar: parent.similar,
+                faded: matches!(child, Level::Outside),
+            });
             self.collect(&def.entities, ctx, ix, parent, child, walk, out);
             if let Some(turn) = sun_turn {
                 out.sun_facing.push((start..out.vertices.len(), turn));

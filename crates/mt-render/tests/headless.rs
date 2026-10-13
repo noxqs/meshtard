@@ -1866,3 +1866,272 @@ fn environment_skydome_replaces_the_sky() {
     );
     assert_eq!(back.get_pixel(5, 5), before.get_pixel(5, 5));
 }
+
+// ---------------------------------------------------------------- instancing
+
+/// An open box (no top) of size 40 standing on z = 0, red outside and blue inside,
+/// with its edges: the mesh of the instancing tests, in its own coordinates.
+fn open_box() -> (Vec<FaceVertex>, Vec<u32>, Vec<Segment>) {
+    let quads: Vec<(DVec3, [DVec3; 4])> = cube_quads()
+        .into_iter()
+        .filter(|(n, _)| n.z < 0.5)
+        .map(|(n, c)| (n, c.map(|p| (p + DVec3::Z * HALF) * 0.4)))
+        .collect();
+    let (vertices, indices) = quads_mesh(&quads, RED, BLUE);
+    let f = |p: DVec3| p.as_vec3().to_array();
+    let edges = cube_edges()
+        .into_iter()
+        .map(|(a, b, [n1, n2])| {
+            let (a, b) = ((a + DVec3::Z * HALF) * 0.4, (b + DVec3::Z * HALF) * 0.4);
+            // The top rim borders one face.
+            let top = a.z > 39.0 && b.z > 39.0;
+            let (n1, n2) = if top {
+                (if n1.z.abs() > 0.5 { n2 } else { n1 }, DVec3::ZERO)
+            } else {
+                (n1, n2)
+            };
+            let mut s = Segment::line(f(a), f(b), [0.0, 0.0, 0.0, 1.0], [1.0, 0.0]);
+            s.flags = Segment::MODEL_EDGE;
+            s.n1 = f(n1);
+            s.n2 = f(n2);
+            s.profile = if top {
+                Segment::BORDER
+            } else {
+                Segment::SILHOUETTE
+            };
+            s
+        })
+        .collect();
+    (vertices, indices, edges)
+}
+
+/// Transforms of the instances: moved, turned, scaled unevenly, mirrored.
+fn instance_transforms() -> Vec<glam::Mat4> {
+    use glam::{Mat4, Quat, Vec3};
+    vec![
+        Mat4::from_translation(Vec3::new(-90.0, -60.0, 0.0)),
+        Mat4::from_rotation_translation(Quat::from_rotation_z(0.6), Vec3::new(0.0, -50.0, 0.0)),
+        Mat4::from_scale_rotation_translation(
+            Vec3::new(1.5, 0.7, 1.2),
+            Quat::from_rotation_z(-0.3),
+            Vec3::new(80.0, -40.0, 0.0),
+        ),
+        // Mirrored: the inside stays blue.
+        Mat4::from_scale_rotation_translation(
+            Vec3::new(-1.0, 1.0, 1.0),
+            Quat::from_rotation_z(0.2),
+            Vec3::new(-60.0, 60.0, 0.0),
+        ),
+        Mat4::from_rotation_translation(Quat::from_rotation_x(0.4), Vec3::new(50.0, 60.0, 10.0)),
+    ]
+}
+
+/// The mesh copied once per transform into world space, as the app flattens
+/// instances: normals by the inverse transpose, mirrored triangles rewound.
+fn flattened(
+    mesh: &(Vec<FaceVertex>, Vec<u32>, Vec<Segment>),
+    transforms: &[glam::Mat4],
+) -> (Vec<FaceVertex>, Vec<u32>, Vec<Segment>) {
+    use glam::{Mat3, Vec3};
+    let (mut v, mut i, mut e) = (Vec::new(), Vec::new(), Vec::new());
+    for m in transforms {
+        let n = Mat3::from_mat4(*m).inverse().transpose();
+        let normal = |x: [f32; 3]| (n * Vec3::from(x)).normalize_or_zero().to_array();
+        let point = |x: [f32; 3]| m.transform_point3(Vec3::from(x)).to_array();
+        let base = v.len() as u32;
+        v.extend(mesh.0.iter().map(|x| FaceVertex {
+            position: point(x.position),
+            normal: normal(x.normal),
+            ..*x
+        }));
+        let mirrored = m.determinant() < 0.0;
+        for t in mesh.1.chunks(3) {
+            let t = if mirrored {
+                [t[0], t[2], t[1]]
+            } else {
+                [t[0], t[1], t[2]]
+            };
+            i.extend(t.map(|k| base + k));
+        }
+        e.extend(mesh.2.iter().map(|s| Segment {
+            a: point(s.a),
+            b: point(s.b),
+            n1: normal(s.n1),
+            n2: normal(s.n2),
+            ..*s
+        }));
+    }
+    (v, i, e)
+}
+
+/// Pixels differing by more than `by` in some channel.
+fn differing(a: &image::RgbaImage, b: &image::RgbaImage, by: u8) -> usize {
+    a.pixels()
+        .zip(b.pixels())
+        .filter(|(p, q)| (0..3).any(|k| p[k].abs_diff(q[k]) > by))
+        .count()
+}
+
+/// Instanced meshes draw what the same meshes copied into the model's buffers draw,
+/// in every face style, with shadows, the section plane, X-ray, ambient occlusion,
+/// profiles, back edges and fog.
+#[test]
+fn instanced_meshes_draw_like_flattened_ones() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mesh = open_box();
+    let transforms = instance_transforms();
+    let flat = flattened(&mesh, &transforms);
+    // A floor of plain faces under the instances (drawn first either way).
+    let gray = [0.8, 0.8, 0.8, 1.0];
+    let (floor_v, floor_i) =
+        quads_mesh(&[flat_quad(-200.0, -150.0, 200.0, 150.0, -1.0)], gray, gray);
+    let floor_index = |base: u32| floor_i.iter().map(move |i| i + base);
+    let mut all_v = floor_v.clone();
+    all_v.extend(&flat.0);
+    let mut all_i: Vec<u32> = floor_index(0).collect();
+    all_i.extend(flat.1.iter().map(|i| i + floor_v.len() as u32));
+
+    let camera = Camera {
+        eye: DVec3::new(-260.0, -380.0, 300.0),
+        target: DVec3::new(0.0, 0.0, 20.0),
+        fov_deg: 35.0,
+        perspective: true,
+        two_point: false,
+    };
+    let instances: Vec<(u32, glam::Mat4)> = transforms.iter().map(|m| (0, *m)).collect();
+    type Setup = fn(&mut Style, &mut Viewport);
+    let cases: [(&str, Setup); 8] = [
+        ("shaded", |_, _| {}),
+        ("shadows_section", |_, vp| {
+            vp.set_shadows(Some(sun_30()));
+            vp.set_section(Some(SectionCut {
+                point: [0.0, 0.0, 25.0],
+                normal: [0.3, 0.0, 1.0],
+            }));
+        }),
+        ("xray", |_, vp| vp.set_face_style(FaceStyle::Shaded, true)),
+        ("ambient_occlusion", |s, _| {
+            s.ambient_occlusion = Some(mt_render::AmbientOcclusion {
+                intensity: 1.0,
+                distance: 20.0,
+                color: [0.0; 3],
+            });
+        }),
+        ("back_edges_profiles", |s, _| {
+            s.back_edges = true;
+            s.profiles = Some(3.0);
+        }),
+        ("hidden_line", |_, vp| {
+            vp.set_face_style(FaceStyle::HiddenLine, false)
+        }),
+        ("monochrome_fog", |s, vp| {
+            vp.set_face_style(FaceStyle::Monochrome, false);
+            s.fog = Some(mt_render::Fog {
+                start: 0.2,
+                end: 0.9,
+                color: None,
+            });
+        }),
+        ("wireframe_depth_cue", |s, vp| {
+            vp.set_face_style(FaceStyle::Wireframe, false);
+            s.depth_cue = Some(4.0);
+        }),
+    ];
+    for (name, setup) in cases {
+        let mut images = Vec::new();
+        for instanced in [false, true] {
+            let mut style = plain_style();
+            let mut viewport = Viewport::new(&device, style.clone());
+            setup(&mut style, &mut viewport);
+            viewport.set_style(&device, style);
+            if instanced {
+                viewport.set_faces(&device, &floor_v, &floor_i);
+                viewport.set_instance_meshes(
+                    &device,
+                    &[mt_render::InstanceMesh {
+                        vertices: &mesh.0,
+                        indices: &mesh.1,
+                        edges: &mesh.2,
+                    }],
+                );
+                viewport.set_face_instances(&device, &instances);
+                viewport.set_edge_instances(&device, &instances);
+            } else {
+                viewport.set_faces(&device, &all_v, &all_i);
+                viewport.set_edges(&device, &flat.2);
+            }
+            let tag = if instanced { "instanced" } else { "flattened" };
+            images.push(render(
+                &device,
+                &queue,
+                &mut viewport,
+                &camera,
+                &format!("instancing_{name}_{tag}"),
+            ));
+        }
+        // Rounding differs (single precision transforms on the GPU): a few pixels
+        // along edges at most.
+        let (n, total) = (differing(&images[0], &images[1], 24), images[0].len() / 4);
+        eprintln!("{name}: {n} of {total} pixels differ");
+        assert!(n * 1000 <= total, "{name}: {n} pixels differ");
+        // And the boxes are there: the instanced image is not just the floor.
+        let p = pixel_at(&images[1], &camera, DVec3::new(-90.0, -80.0, 10.0));
+        assert!(
+            name.starts_with("wire") || name == "hidden_line" || luma(&p) < 200 || p[0] > p[2],
+            "{name}: box drawn, got {p:?}"
+        );
+    }
+}
+
+/// Edges of an instance are drawn only while instanced edges are set, and the
+/// mirrored instance shows its inside in the back color.
+#[test]
+fn instance_lists_choose_what_is_drawn() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mesh = open_box();
+    let mut viewport = Viewport::new(&device, plain_style());
+    viewport.set_instance_meshes(
+        &device,
+        &[mt_render::InstanceMesh {
+            vertices: &mesh.0,
+            indices: &mesh.1,
+            edges: &mesh.2,
+        }],
+    );
+    // Looking straight down into a mirrored box: its floor's inside (blue).
+    let camera = Camera {
+        eye: DVec3::new(0.0, 0.0, 400.0),
+        target: DVec3::ZERO,
+        fov_deg: 35.0,
+        perspective: true,
+        two_point: false,
+    };
+    let mirror = glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0));
+    viewport.set_face_instances(&device, &[(0, mirror)]);
+    let img = render(&device, &queue, &mut viewport, &camera, "instance_mirrored");
+    let inside = pixel_at(&img, &camera, DVec3::new(5.0, 5.0, 0.0));
+    assert!(inside[2] > inside[0], "blue inside, got {inside:?}");
+    let rim = DVec3::new(20.0, 0.0, 40.0);
+    let without = pixel_at(&img, &camera, rim);
+    viewport.set_edge_instances(&device, &[(0, mirror)]);
+    let img = render(&device, &queue, &mut viewport, &camera, "instance_edges");
+    let with = pixel_at(&img, &camera, rim);
+    assert!(
+        luma(&with) + 60 < luma(&without),
+        "edge drawn: {without:?} -> {with:?}"
+    );
+    // No instances: nothing but the background.
+    viewport.set_face_instances(&device, &[]);
+    viewport.set_edge_instances(&device, &[]);
+    let img = render(&device, &queue, &mut viewport, &camera, "instance_none");
+    assert_eq!(
+        pixel_at(&img, &camera, DVec3::new(5.0, 5.0, 0.0)),
+        pixel_at(&img, &camera, DVec3::new(150.0, 100.0, 0.0))
+    );
+}

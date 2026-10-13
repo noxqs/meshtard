@@ -284,6 +284,9 @@ struct FaceOut {
     @location(4) uv: vec4<f32>,
     @location(5) @interpolate(flat) texture: vec2<u32>,
     @location(6) q: vec2<f32>,
+    // 1 when the triangle is drawn mirrored (an instance's transform mirrors it):
+    // its front is the side facing away.
+    @location(7) @interpolate(flat) mirror: u32,
 };
 
 @vertex
@@ -297,11 +300,13 @@ fn face_vs(v: FaceVertex) -> FaceOut {
     out.uv = v.uv;
     out.texture = v.texture;
     out.q = v.q;
+    out.mirror = 0u;
     return out;
 }
 
 @fragment
-fn face_fs(in: FaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn face_fs(in: FaceOut, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    let front = facing != (in.mirror != 0u);
     // Sampled before any branching (implicit derivatives need uniform control flow).
     // Image rows run top down, SketchUp's v up.
     let layer = select(in.texture.y, in.texture.x, front);
@@ -395,6 +400,7 @@ fn shadow_vs(v: FaceVertex) -> FaceOut {
     out.uv = v.uv;
     out.texture = v.texture;
     out.q = v.q;
+    out.mirror = 0u;
     return out;
 }
 
@@ -645,4 +651,90 @@ fn line_color(in: LineOut, dash: f32) -> vec4<f32> {
         discard;
     }
     return vec4<f32>(in.color.rgb, in.color.a * coverage);
+}
+
+// ---------------------------------------------------------------- instances
+
+// A mesh drawn once per instance (components placed many times): the instance's
+// transform, column by column.
+struct Inst {
+    @location(8) c0: vec4<f32>,
+    @location(9) c1: vec4<f32>,
+    @location(10) c2: vec4<f32>,
+    @location(11) c3: vec4<f32>,
+};
+
+fn inst_matrix(i: Inst) -> mat4x4<f32> {
+    return mat4x4<f32>(i.c0, i.c1, i.c2, i.c3);
+}
+
+fn inst_point(m: mat4x4<f32>, p: vec3<f32>) -> vec3<f32> {
+    return (m * vec4<f32>(p, 1.0)).xyz;
+}
+
+fn inst_det(m: mat4x4<f32>) -> f32 {
+    return dot(m[0].xyz, cross(m[1].xyz, m[2].xyz));
+}
+
+// A normal placed by `m`: the inverse transpose's direction, which is the cofactor
+// matrix's times the sign of the determinant. Zero stays zero.
+fn inst_normal(m: mat4x4<f32>, n: vec3<f32>) -> vec3<f32> {
+    let a = m[0].xyz;
+    let b = m[1].xyz;
+    let c = m[2].xyz;
+    let cof = mat3x3<f32>(cross(b, c), cross(c, a), cross(a, b));
+    let w = cof * n * select(1.0, -1.0, inst_det(m) < 0.0);
+    let l = length(w);
+    return select(vec3<f32>(0.0), w / l, l > 1e-30);
+}
+
+fn inst_face(v: FaceVertex, i: Inst) -> FaceOut {
+    let m = inst_matrix(i);
+    let p = inst_point(m, v.position);
+    var out: FaceOut;
+    out.pos = g.view_proj * vec4<f32>(p, 1.0);
+    out.normal = inst_normal(m, v.normal);
+    out.front = v.front;
+    out.back = v.back;
+    out.world = p;
+    out.uv = v.uv;
+    out.texture = v.texture;
+    out.q = v.q;
+    // A mirroring transform turns the triangles' winding around.
+    out.mirror = select(0u, 1u, inst_det(m) < 0.0);
+    return out;
+}
+
+@vertex
+fn inst_face_vs(v: FaceVertex, i: Inst) -> FaceOut {
+    return inst_face(v, i);
+}
+
+@vertex
+fn inst_shadow_vs(v: FaceVertex, i: Inst) -> FaceOut {
+    var out = inst_face(v, i);
+    out.pos = g.light_view_proj * vec4<f32>(out.world, 1.0);
+    return out;
+}
+
+fn inst_segment(s: Segment, i: Inst) -> Segment {
+    let m = inst_matrix(i);
+    var o = s;
+    o.a = inst_point(m, s.a);
+    o.b = inst_point(m, s.b);
+    o.n1 = inst_normal(m, s.n1);
+    o.n2 = inst_normal(m, s.n2);
+    return o;
+}
+
+// Instanced edges: the transform repeats for the 6 vertices of each segment's quad
+// (one stroke: no Jitter).
+@vertex
+fn inst_line_vs(@builtin(vertex_index) vi: u32, s: Segment, i: Inst) -> LineOut {
+    return line_vertex(vi % 6u, inst_segment(s, i), false);
+}
+
+@vertex
+fn inst_back_line_vs(@builtin(vertex_index) vi: u32, s: Segment, i: Inst) -> LineOut {
+    return line_vertex(vi % 6u, inst_segment(s, i), true);
 }

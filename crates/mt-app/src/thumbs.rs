@@ -277,9 +277,11 @@ fn render_scene(
         None => vp.set_face_style(mt_render::FaceStyle::ShadedWithTextures, false),
     }
     vp.set_style(device, style);
-    vp.set_faces(device, &scene.vertices, &scene.indices);
+    crate::instancing::upload_faces(vp, device, scene);
     vp.set_textures(&scene.textures);
-    vp.set_edges(device, &scene.edges);
+    let (edges, instanced) = scene.flat_edges();
+    vp.set_edges(device, &edges);
+    vp.set_edge_instances(device, &scene.gpu_instances(instanced));
     let pts = scene
         .triangles
         .iter()
