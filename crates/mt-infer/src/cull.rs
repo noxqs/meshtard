@@ -6,7 +6,7 @@
 //! within the radius, so callers run their exact pixel test over it and pick the same
 //! item a scan of everything would.
 
-use glam::{DVec2, DVec3};
+use glam::{DMat4, DVec2, DVec3};
 use mt_render::Camera;
 
 /// Items per leaf.
@@ -43,6 +43,11 @@ impl BoxIndex {
     /// An index over points.
     pub fn points(points: impl ExactSizeIterator<Item = DVec3>) -> Self {
         Self::build(points.map(|p| (p, p)).collect())
+    }
+
+    /// An index over boxes `(min, max)`.
+    pub fn boxes(boxes: impl ExactSizeIterator<Item = (DVec3, DVec3)>) -> Self {
+        Self::build(boxes.collect())
     }
 
     fn build(boxes: Vec<(DVec3, DVec3)>) -> Self {
@@ -144,17 +149,23 @@ impl BoxIndex {
         cursor: DVec2,
         radius_px: f64,
     ) -> Option<Vec<usize>> {
-        let pyramid = Pyramid::new(camera, viewport, cursor, radius_px + SLACK_PX)?;
+        let pyramid = Pyramid::new(camera, viewport, cursor, radius_px)?;
+        Some(self.near_in(&pyramid, 0.0))
+    }
+
+    /// Indices (ascending) of the items whose box is not wholly outside `pyramid` by
+    /// more than `margin` (in the pyramid's distance units).
+    pub fn near_in(&self, pyramid: &Pyramid, margin: f64) -> Vec<usize> {
         let mut out = Vec::new();
         if self.nodes.is_empty() {
-            return Some(out);
+            return out;
         }
         let mut stack = vec![0usize];
         while let Some(n) = stack.pop() {
             let node = &self.nodes[n];
             // Boxes with NaN or infinite corners are never culled.
             let finite = node.min.is_finite() && node.max.is_finite();
-            if finite && pyramid.outside(node.min, node.max) {
+            if finite && pyramid.outside_by(node.min, node.max, margin) {
                 continue;
             }
             if node.count > 0 {
@@ -166,18 +177,78 @@ impl BoxIndex {
             }
         }
         out.sort_unstable();
-        Some(out)
+        out
+    }
+
+    /// Calls `f` with every item of the leaves whose box the ray `origin + t dir`
+    /// meets for some `0 <= t <= t_max` (a superset of the items whose own box it
+    /// meets); `f` returns the new `t_max`. Boxes with NaN or infinite corners are
+    /// always entered.
+    pub fn ray_visit(
+        &self,
+        origin: DVec3,
+        dir: DVec3,
+        mut t_max: f64,
+        mut f: impl FnMut(usize) -> f64,
+    ) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let inv = DVec3::ONE / dir;
+        let mut stack = vec![0usize];
+        while let Some(n) = stack.pop() {
+            let node = &self.nodes[n];
+            let finite = node.min.is_finite() && node.max.is_finite();
+            if finite && !ray_meets_box(origin, inv, t_max, node.min, node.max) {
+                continue;
+            }
+            if node.count > 0 {
+                let (first, c) = (node.first as usize, node.count as usize);
+                for &i in &self.order[first..first + c] {
+                    t_max = f(i as usize);
+                }
+            } else {
+                stack.push(node.first as usize);
+                stack.push(node.first as usize + 1);
+            }
+        }
     }
 }
 
+/// Whether the ray `origin + t dir` (`inv_dir` = 1 / `dir`) meets the box for some
+/// `0 <= t <= t_max` (slab test; a NaN slab, from a zero direction component on the
+/// box's face, constrains nothing).
+pub fn ray_meets_box(origin: DVec3, inv_dir: DVec3, t_max: f64, min: DVec3, max: DVec3) -> bool {
+    let t0 = (min - origin) * inv_dir;
+    let t1 = (max - origin) * inv_dir;
+    let near = t0.min(t1).max_element().max(0.0);
+    let far = t0.max(t1).min_element().min(t_max);
+    near <= far
+}
+
 /// The four side planes of the view rays through a square of pixels.
-struct Pyramid {
+#[derive(Debug, Clone, Copy)]
+pub struct Pyramid {
     /// A point on the plane and the normal pointing inside.
     planes: [(DVec3, DVec3); 4],
 }
 
 impl Pyramid {
-    fn new(camera: &Camera, viewport: DVec2, cursor: DVec2, half: f64) -> Option<Self> {
+    /// The same pyramid in the coordinates `xf` maps to world (`inv` its inverse).
+    /// Distances to its planes stay world distances (the normals are not unit), so
+    /// margins mean the same in both.
+    pub fn local(&self, xf: &DMat4, inv: &DMat4) -> Self {
+        let a_t = glam::DMat3::from_mat4(*xf).transpose();
+        Self {
+            planes: self.planes.map(|(o, n)| (inv.transform_point3(o), a_t * n)),
+        }
+    }
+
+    /// The rays through the pixels within `radius_px` of `cursor` (and a little more,
+    /// so rounding never drops an item an exact pixel test keeps). `None` when the
+    /// view gives no usable pyramid.
+    pub fn new(camera: &Camera, viewport: DVec2, cursor: DVec2, radius_px: f64) -> Option<Self> {
+        let half = radius_px + SLACK_PX;
         let corners = [
             DVec2::new(-half, -half),
             DVec2::new(half, -half),
@@ -221,8 +292,16 @@ impl Pyramid {
         Some(Self { planes })
     }
 
-    /// The box lies wholly outside one of the planes.
-    fn outside(&self, min: DVec3, max: DVec3) -> bool {
+    /// The largest coordinate of the points its planes are given by (for rounding
+    /// margins).
+    pub fn scale(&self) -> f64 {
+        (self.planes.iter())
+            .map(|(o, _)| o.abs().max_element())
+            .fold(0.0, f64::max)
+    }
+
+    /// The box lies wholly outside one of the planes, by more than `margin`.
+    pub fn outside_by(&self, min: DVec3, max: DVec3, margin: f64) -> bool {
         self.planes.iter().any(|&(o, n)| {
             // The corner furthest along the normal.
             let c = DVec3::new(
@@ -230,7 +309,7 @@ impl Pyramid {
                 if n.y >= 0.0 { max.y } else { min.y },
                 if n.z >= 0.0 { max.z } else { min.z },
             );
-            n.dot(c - o) < 0.0
+            n.dot(c - o) < -margin
         })
     }
 }

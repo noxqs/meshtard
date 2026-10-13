@@ -115,13 +115,19 @@ impl Owner {
 /// Everything the viewport draws for the model, with the owner of each piece.
 #[derive(Default)]
 pub struct Scene {
-    pub edges: Vec<Segment>,
+    /// The edges in world space, in drawing order ([`Scene::edge`]), except those of
+    /// placements that give them from their mesh (`instancing`, `Placement::lazy_edges`).
+    pub(crate) edge_list: Vec<Segment>,
+    /// The owner of every edge (also the number of edges, [`Scene::edge_count`]).
     /// `None` for geometry outside the open group or component (not selectable).
     pub edge_owner: Vec<Option<Owner>>,
     pub vertices: Vec<FaceVertex>,
     pub indices: Vec<u32>,
-    /// World-space triangles for picking; triangle `i` is `indices[3 * i..3 * i + 3]`.
-    pub triangles: Vec<[DVec3; 3]>,
+    /// World-space triangles for picking ([`Scene::tri`]) that are not instanced:
+    /// entry `i` is `indices[3 * i..3 * i + 3]`. Instanced triangles are given by their
+    /// placement and mesh.
+    pub(crate) tri_list: Vec<[DVec3; 3]>,
+    /// The owner of every triangle (also the number of triangles, [`Scene::tri_count`]).
     pub tri_owner: Vec<Option<Owner>>,
     /// Front and back material shown on each triangle (inherited from instances
     /// included), for the Paint Bucket's Alt sampling.
@@ -150,11 +156,16 @@ pub struct Scene {
     /// rotation turning each from the camera to the sun (see [`Scene::shadow_casters`]).
     pub sun_facing: Vec<(std::ops::Range<usize>, DMat4)>,
     /// Groups and components drawn per instance (see `instancing`): their triangles
-    /// are in `triangles` but not in `vertices` / `indices`.
+    /// and edges are numbered with the others ([`Scene::tri`], [`Scene::edge`]) but
+    /// not stored, and not in `vertices` / `indices`.
     pub instancing: crate::instancing::Instancing,
-    /// Culling index over `edges` for picking, built on first use (see
+    /// Culling index over the edges for picking, built on first use (see
     /// [`Scene::edges_near`]).
-    edge_index: std::sync::OnceLock<mt_infer::cull::BoxIndex>,
+    edge_index: std::sync::OnceLock<crate::pick_index::EdgeIndex>,
+    /// Every edge and triangle in world space, made on first use
+    /// ([`Scene::edges`], [`Scene::triangles`]).
+    pub(crate) all_edges: std::sync::OnceLock<Vec<Segment>>,
+    pub(crate) all_tris: std::sync::OnceLock<Vec<[DVec3; 3]>>,
 }
 
 /// Records that entry `i` of `edges` or `triangles` lies in container `c`.
@@ -163,6 +174,18 @@ fn set_container(list: &mut Vec<Option<mt_infer::Container>>, i: usize, c: mt_in
         list.resize(i + 1, None);
     }
     list[i] = Some(c);
+}
+
+/// Records that entries `range` of `edges` or `triangles` lie in container `c`.
+fn set_containers(
+    list: &mut Vec<Option<mt_infer::Container>>,
+    range: std::ops::Range<usize>,
+    c: mt_infer::Container,
+) {
+    if list.len() < range.end {
+        list.resize(range.end, None);
+    }
+    list[range].fill(Some(c));
 }
 
 /// Below this many edges picking tests every one (no index).
@@ -178,21 +201,29 @@ impl Scene {
         cursor: glam::DVec2,
         radius: f64,
     ) -> Option<Vec<usize>> {
-        if self.edges.len() < EDGE_INDEX_MIN {
+        if self.edge_count() < EDGE_INDEX_MIN {
             return None;
         }
-        let index = self.edge_index.get_or_init(|| {
-            mt_infer::cull::BoxIndex::segments(
-                self.edges
-                    .iter()
-                    .map(|s| [s.a, s.b].map(|p| glam::Vec3::from(p).as_dvec3())),
-            )
-        });
+        let index = self
+            .edge_index
+            .get_or_init(|| crate::pick_index::EdgeIndex::build(self));
         // Edges added after the index was built: test them all.
-        if index.len() != self.edges.len() {
+        if index.len() != self.edge_count() {
             return None;
         }
-        index.near(camera, viewport, cursor, radius)
+        index.near(self, camera, viewport, cursor, radius)
+    }
+
+    /// Adds an edge (world space) and its owner.
+    pub fn push_edge(&mut self, seg: Segment, owner: Option<Owner>) {
+        self.edge_list.push(seg);
+        self.edge_owner.push(owner);
+    }
+
+    /// Adds a triangle (world space) and its owner.
+    pub fn push_tri(&mut self, tri: [DVec3; 3], owner: Option<Owner>) {
+        self.tri_list.push(tri);
+        self.tri_owner.push(owner);
     }
 }
 
@@ -907,18 +938,18 @@ impl Document {
                 (normal_xf * sp.normal).normalize_or_zero(),
             ));
         }
-        if !self.model.style.section_planes {
+        if !self.model.style.section_planes || ents.section_planes.is_empty() {
             return;
         }
         // Plane size from the model's extent (SketchUp sizes it to the model; exact
         // rule unverified).
         let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
-        for t in &scene.triangles {
+        scene.for_each_tri(|_, t| {
             for p in t {
-                lo = lo.min(*p);
-                hi = hi.max(*p);
+                lo = lo.min(p);
+                hi = hi.max(p);
             }
-        }
+        });
         let half = if lo.is_finite() {
             ((hi - lo).length() * 0.35).max(12.0)
         } else {
@@ -959,10 +990,10 @@ impl Document {
                 lines.push((tip, tip + n * half * 0.08 - u * half * 0.05));
             }
             for (a, b) in lines {
-                scene
-                    .edges
-                    .push(Segment::line(f(a), f(b), color, [EDGE_WIDTH, 0.0]));
-                scene.edge_owner.push(Some(Owner::Section(i)));
+                scene.push_edge(
+                    Segment::line(f(a), f(b), color, [EDGE_WIDTH, 0.0]),
+                    Some(Owner::Section(i)),
+                );
             }
         }
     }
@@ -1091,8 +1122,28 @@ impl Document {
         };
         let local = |p: DVec3| [p.x as f32, p.y as f32, p.z as f32];
         let local_normal = |f: FaceId| f32x3(ents.faces[f].normal.normalize_or_zero());
-        let edges_start = out.edges.len();
+        let edges_start = out.edge_owner.len();
+        // Another placement of a mesh that gives its edges for any placement: only
+        // their owners, containers and hidden marks (see `instancing`).
+        let lazy_edges =
+            placed.filter(|&m| out.instancing.meshes[m as usize].local_edges.is_some());
+        if let Some(m) = lazy_edges {
+            let mesh = &out.instancing.meshes[m as usize];
+            let n = mesh.local_edges.as_ref().map_or(0, Vec::len);
+            if let Some(c) = container {
+                set_containers(&mut out.edge_container, edges_start..edges_start + n, c);
+            }
+            for &k in &mesh.hidden_edges {
+                out.hidden_edges.insert(edges_start + k as usize);
+            }
+            out.edge_owner
+                .extend(std::iter::repeat_n(placement_owner, n));
+        }
         for (id, e) in &ents.edges {
+            if lazy_edges.is_some() {
+                // Given by the mesh (above).
+                break;
+            }
             // Edges off: the renderer draws only the profiles among model edges, so
             // edges are left out only when profiles are off too. View > Hidden
             // Geometry shows hidden edges (and soft ones) dashed.
@@ -1130,7 +1181,7 @@ impl Document {
                 ],
             );
             if let Some(c) = container {
-                set_container(&mut out.edge_container, out.edges.len(), c);
+                set_container(&mut out.edge_container, out.edge_owner.len(), c);
             }
             if let Some(b) = &mut build {
                 let mut l = seg;
@@ -1152,55 +1203,70 @@ impl Document {
                 }
                 b.edges.push(l);
             }
+            // The faces whose normals the world segment takes (none when hidden).
+            let normals: &[FaceId] = if hidden {
+                &[]
+            } else {
+                &e.faces[..e.faces.len().min(2)]
+            };
             if hidden {
-                out.hidden_edges.insert(out.edges.len());
-                out.edges.push(seg);
-                out.edge_owner.push(owner_of(Owner::Edge(id)));
-                continue;
-            }
-            seg.flags = Segment::MODEL_EDGE;
-            match e.faces[..] {
-                [] => {}
-                [f] => {
-                    seg.n1 = f32x3(world_normal(f));
-                    seg.profile = Segment::BORDER;
-                }
-                [f, g, ..] => {
-                    seg.n1 = f32x3(world_normal(f));
-                    seg.n2 = f32x3(world_normal(g));
-                    seg.profile = Segment::SILHOUETTE;
+                out.hidden_edges.insert(out.edge_owner.len());
+            } else {
+                seg.flags = Segment::MODEL_EDGE;
+                match *normals {
+                    [] => {}
+                    [f] => {
+                        seg.n1 = f32x3(world_normal(f));
+                        seg.profile = Segment::BORDER;
+                    }
+                    [f, g, ..] => {
+                        seg.n1 = f32x3(world_normal(f));
+                        seg.n2 = f32x3(world_normal(g));
+                        seg.profile = Segment::SILHOUETTE;
+                    }
                 }
             }
-            out.edges.push(seg);
-            out.edge_owner.push(owner_of(Owner::Edge(id)));
+            if let Some(b) = &mut build {
+                let n = |k: usize| {
+                    normals
+                        .get(k)
+                        .map_or(DVec3::ZERO, |&f| ents.faces[f].normal)
+                };
+                b.local_edges.push(crate::instancing::LocalEdge {
+                    a: ents.pos(e.start),
+                    b: ents.pos(e.end),
+                    seg,
+                    normals: [n(0), n(1)],
+                    count: normals.len() as u8,
+                    hidden,
+                });
+            }
+            out.push_edge(seg, owner_of(Owner::Edge(id)));
         }
 
-        let edges = edges_start..out.edges.len();
-        let tris_start = out.triangles.len();
+        let edges = edges_start..out.edge_owner.len();
+        let tris_start = out.tri_owner.len();
         if let Some(m) = placed {
-            // Another placement of a mesh: only the world triangles, for picking.
-            let tris = std::mem::take(&mut out.instancing.meshes[m as usize].tris);
-            let mut n = (DVec3::NAN, DVec3::ZERO);
-            for t in &tris {
-                if t.normal != n.0 {
-                    n = (
-                        t.normal,
-                        crate::instancing::world_normal(&normal_xf, t.normal),
-                    );
-                }
-                let world = t.local.map(|p| xf.transform_point3(p));
-                let tri = crate::instancing::ccw(&world, n.1).map(|k| world[k]);
-                if let Some(c) = container {
-                    set_container(&mut out.tri_container, out.triangles.len(), c);
-                }
-                out.triangles.push(tri);
-                out.tri_owner.push(placement_owner);
-                out.tri_material.push(t.materials);
+            // Another placement of a mesh: its triangles come from the mesh; only
+            // their owners, materials and containers are kept.
+            let mesh = &out.instancing.meshes[m as usize];
+            let n = mesh.tris.len();
+            if let Some(c) = container {
+                set_containers(&mut out.tri_container, tris_start..tris_start + n, c);
             }
-            out.instancing.meshes[m as usize].tris = tris;
-            let tris = tris_start..out.triangles.len();
-            out.instancing
-                .place(m, xf, placement_owner, tris, edges.clone());
+            out.tri_material
+                .extend(mesh.tris.iter().map(|t| t.materials));
+            out.tri_owner
+                .extend(std::iter::repeat_n(placement_owner, n));
+            let lazy = mesh.local_edges.is_some();
+            out.instancing.place(
+                m,
+                xf,
+                placement_owner,
+                tris_start..out.tri_owner.len(),
+                edges.clone(),
+                lazy,
+            );
         }
         // "Cut opening" components glued here cut holes into the faces they sit on.
         let openings = self.cut_openings(ents);
@@ -1328,16 +1394,14 @@ impl Document {
                             hidden_color,
                             [EDGE_WIDTH, HIDDEN_MESH_DASH],
                         );
-                        out.hidden_edges.insert(out.edges.len());
-                        out.edges.push(seg);
-                        out.edge_owner.push(owner_of(Owner::Face(f)));
+                        out.hidden_edges.insert(out.edge_owner.len());
+                        out.push_edge(seg, owner_of(Owner::Face(f)));
                     }
                 }
                 if let Some(c) = container {
-                    set_container(&mut out.tri_container, out.triangles.len(), c);
+                    set_container(&mut out.tri_container, out.tri_owner.len(), c);
                 }
-                out.triangles.push(tri);
-                out.tri_owner.push(owner_of(Owner::Face(f)));
+                out.push_tri(tri, owner_of(Owner::Face(f)));
                 out.tri_material.push([front_material, back_material]);
             }
         }
@@ -1345,7 +1409,7 @@ impl Document {
             cache.finish(visit);
         }
         if let (Some(b), Some(key), Some(builder)) = (build, place, &mut walk.instancing) {
-            let tris = tris_start..out.triangles.len();
+            let tris = tris_start..out.tri_owner.len();
             b.finish(builder, key, xf, placement_owner, tris, edges, out);
         }
 
@@ -2096,9 +2160,9 @@ mod tests {
     fn hide_unhide_with_undo() {
         let mut doc = square_and_group();
         let face = doc.model.root.faces.keys().next().unwrap();
-        let visible_tris = doc.scene().triangles.len();
+        let visible_tris = doc.scene().triangles().len();
         assert!(doc.hide(&[Owner::Face(face), Owner::Instance(0)]));
-        assert!(doc.scene().triangles.is_empty());
+        assert!(doc.scene().triangles().is_empty());
         assert!(
             !doc.hide(&[Owner::Face(face)]),
             "already hidden: no undo step"
@@ -2117,7 +2181,7 @@ mod tests {
         doc.model.style.hidden_geometry = true;
         let scene = doc.scene();
         doc.model.style.hidden_objects = false;
-        assert_eq!(scene.triangles.len(), visible_tris);
+        assert_eq!(scene.triangles().len(), visible_tris);
         assert!(scene.tri_owner.contains(&Some(Owner::Instance(0))));
         assert!(scene.tri_owner.contains(&Some(Owner::Face(face))));
         assert!(!scene.hidden_edges.is_empty());
@@ -2125,7 +2189,7 @@ mod tests {
             scene
                 .hidden_edges
                 .iter()
-                .all(|&i| scene.edges[i].style[1] > 0.0),
+                .all(|&i| scene.edges()[i].style[1] > 0.0),
             "hidden edges are dashed"
         );
         doc.model.style.hidden_geometry = false;
@@ -2166,7 +2230,7 @@ mod tests {
         let mut other = doc.model.root.instances[0].clone();
         other.transform = DMat4::from_translation(DVec3::X * 50.0);
         doc.model.root.instances.push(other);
-        let tris = |doc: &Document| doc.scene().triangles.len();
+        let tris = |doc: &Document| doc.scene().triangles().len();
         let all = tris(&doc);
         doc.model.style.hide_rest_of_model = true;
         doc.model.style.hide_similar_components = true;
@@ -2220,7 +2284,7 @@ mod tests {
         let cam = doc.saved_camera().unwrap();
         assert!((cam.eye.x - 452.09).abs() < 0.01);
         let scene = doc.scene();
-        assert!(!scene.edges.is_empty());
+        assert!(!scene.edges().is_empty());
         assert!(!scene.indices.is_empty());
         assert_eq!(scene.indices.len() % 3, 0);
     }
@@ -2255,7 +2319,7 @@ mod tests {
     fn instances_are_placed_in_world_space() {
         let doc = Document::open(&corpus("Untitled.skp")).unwrap();
         let root_only = doc.model.root.edges.len();
-        assert!(doc.scene().edges.len() > root_only);
+        assert!(doc.scene().edges().len() > root_only);
     }
 
     /// Model Info > Units survive save and reopen through the file's UnitsOptions.

@@ -498,13 +498,13 @@ pub(crate) fn all_items() -> Vec<(String, String, String)> {
 pub(crate) fn selection_bounds(scene: &Scene, items: &[Owner]) -> Option<(DVec3, DVec3)> {
     let set: HashSet<Owner> = items.iter().copied().collect();
     let tris = scene
-        .triangles
+        .triangles()
         .iter()
         .zip(&scene.tri_owner)
         .filter(|(_, o)| o.is_some_and(|o| set.contains(&o)))
         .flat_map(|(t, _)| *t);
     let segs = scene
-        .edges
+        .edges()
         .iter()
         .zip(&scene.edge_owner)
         .filter(|(_, o)| o.is_some_and(|o| set.contains(&o)))

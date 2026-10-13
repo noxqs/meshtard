@@ -17,26 +17,24 @@ use crate::document::{Document, Owner, Scene};
 pub fn geometry(scene: &Scene, doc: Option<&Document>, ctx_xf: DMat4) -> Geometry {
     let v3 = |p: [f32; 3]| DVec3::new(p[0].into(), p[1].into(), p[2].into());
     // Dimension and text lines and hidden geometry are not snapped to.
-    let kept: Vec<usize> = scene
-        .edge_owner
-        .iter()
-        .enumerate()
-        .filter(|(i, o)| {
-            !matches!(o, Some(Owner::Dimension(_) | Owner::Text(_)))
-                && !scene.hidden_edges.contains(i)
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let mut geometry = Geometry::from_edges(
-        kept.iter()
-            .map(|&i| [v3(scene.edges[i].a), v3(scene.edges[i].b)])
-            .collect(),
-    );
+    let mut kept: Vec<usize> = Vec::new();
+    let mut ends = Vec::new();
+    scene.for_each_edge(|i, s| {
+        if !matches!(
+            scene.edge_owner[i],
+            Some(Owner::Dimension(_) | Owner::Text(_))
+        ) && !scene.hidden_edges.contains(&i)
+        {
+            kept.push(i);
+            ends.push([v3(s.a), v3(s.b)]);
+        }
+    });
+    let mut geometry = Geometry::from_edges(ends);
     geometry.edge_container = kept
         .iter()
         .map(|&i| scene.edge_container.get(i).copied().flatten())
         .collect();
-    geometry.tri_container = (0..scene.triangles.len())
+    geometry.tri_container = (0..scene.tri_count())
         .map(|i| scene.tri_container.get(i).copied().flatten())
         .collect();
     let Some(doc) = doc else {
@@ -143,7 +141,7 @@ mod tests {
     fn infer(doc: &Document, p: DVec3) -> mt_infer::Inference {
         let scene = doc.scene();
         let g = geometry(&scene, Some(doc), doc.context_transform());
-        let bvh = Bvh::build(scene.triangles.clone());
+        let bvh = Bvh::build(scene.triangles().to_vec());
         let camera = Camera {
             eye: DVec3::new(150.0, -400.0, 500.0),
             target: DVec3::new(150.0, 150.0, 0.0),

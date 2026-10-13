@@ -311,15 +311,44 @@ pub fn instance_bounds(
         b.0 = b.0.min(q);
         b.1 = b.1.max(q);
     };
-    for (tri, owner) in scene.triangles.iter().zip(&scene.tri_owner) {
-        if let Some(Owner::Instance(i)) = owner {
-            tri.iter().for_each(|p| add(*i, *p));
+    // Stored triangles and edges, then placements from their meshes' distinct points
+    // (the same world points, each once).
+    let tris = scene.stored_tris();
+    for (t, i) in scene.flat_tris() {
+        if let Some(Owner::Instance(k)) = scene.tri_owner[t] {
+            tris[i].iter().for_each(|p| add(k, *p));
         }
     }
-    for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
-        if let Some(Owner::Instance(i)) = owner {
-            add(*i, v3(seg.a));
-            add(*i, v3(seg.b));
+    let mut stored_edges = |range: std::ops::Range<usize>| {
+        scene.for_each_edge_in(range, |e, seg| {
+            if let Some(Owner::Instance(k)) = scene.edge_owner[e] {
+                add(k, v3(seg.a));
+                add(k, v3(seg.b));
+            }
+        });
+    };
+    let mut e = 0;
+    for p in &scene.instancing.placements {
+        if p.lazy_edges {
+            stored_edges(e..p.edges.start);
+            e = p.edges.end;
+        }
+    }
+    stored_edges(e..scene.edge_count());
+    for p in &scene.instancing.placements {
+        let Some(Owner::Instance(k)) = p.owner else {
+            continue;
+        };
+        let mesh = &scene.instancing.meshes[p.mesh as usize];
+        if !p.tris.is_empty() {
+            for q in &mesh.tri_points {
+                add(k, p.transform.transform_point3(*q));
+            }
+        }
+        if p.lazy_edges && !p.edges.is_empty() {
+            for q in &mesh.edge_points {
+                add(k, p.transform.transform_point3(*q).as_vec3().as_dvec3());
+            }
         }
     }
     out.into_iter().collect()
@@ -438,7 +467,7 @@ pub fn pick(
     // Only edges near the cursor on screen can be picked; their index order keeps the
     // tie-breaking of a scan of every edge.
     let near = scene.edges_near(camera, viewport, cursor, APERTURE_PX);
-    let all = 0..scene.edges.len();
+    let all = 0..scene.edge_count();
     let candidates: Box<dyn Iterator<Item = usize>> = match &near {
         Some(near) => Box::new(near.iter().copied()),
         None => Box::new(all),
@@ -446,10 +475,10 @@ pub fn pick(
     let view_proj = camera.view_proj(viewport.x / viewport.y);
     let project = |p: DVec3| Camera::project_with(&view_proj, p, viewport);
     for i in candidates {
-        let (seg, Some(owner)) = (&scene.edges[i], scene.edge_owner.get(i).copied().flatten())
-        else {
+        let Some(owner) = scene.edge_owner.get(i).copied().flatten() else {
             continue;
         };
+        let seg = scene.edge(i);
         let owner = &owner;
         let (a, b) = (v3(seg.a), v3(seg.b));
         let (Some(pa), Some(pb)) = (project(a), project(b)) else {
@@ -696,32 +725,36 @@ pub fn region_select(
         }
     };
     let proj = |p: DVec3| camera.project(p, viewport);
-    for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
-        let Some(owner) = owner else { continue };
+    scene.for_each_edge(|i, seg| {
+        let Some(owner) = scene.edge_owner[i] else {
+            return;
+        };
         match (proj(v3(seg.a)), proj(v3(seg.b))) {
             (Some(a), Some(b)) => note(
-                *owner,
+                owner,
                 rect.contains(a) && rect.contains(b),
                 rect.touches_segment(a, b),
             ),
-            _ => note(*owner, false, false),
+            _ => note(owner, false, false),
         }
-    }
+    });
     for (owner, p) in crate::annot::label_points(scene, proj, viewport) {
         let inside = p.is_some_and(|p| rect.contains(p));
         note(owner, inside, inside);
     }
-    for (tri, owner) in scene.triangles.iter().zip(&scene.tri_owner) {
-        let Some(owner) = owner else { continue };
+    scene.for_each_tri(|i, tri| {
+        let Some(owner) = scene.tri_owner[i] else {
+            return;
+        };
         match (proj(tri[0]), proj(tri[1]), proj(tri[2])) {
             (Some(a), Some(b), Some(c)) => note(
-                *owner,
+                owner,
                 rect.contains(a) && rect.contains(b) && rect.contains(c),
                 rect.touches_triangle([a, b, c]),
             ),
-            _ => note(*owner, false, false),
+            _ => note(owner, false, false),
         }
-    }
+    });
     if window {
         inside
             .into_iter()
@@ -761,7 +794,7 @@ mod tests {
         let face_hit = bvh.ray(ray.origin, ray.dir);
         let face_t = face_hit.map_or(f64::INFINITY, |h| h.t);
         let mut best: Option<(f64, Owner)> = None;
-        for (seg, owner) in scene.edges.iter().zip(&scene.edge_owner) {
+        for (seg, owner) in scene.edges().iter().zip(&scene.edge_owner) {
             let Some(owner) = owner else { continue };
             let (a, b) = (v3(seg.a), v3(seg.b));
             let (Some(pa), Some(pb)) = (camera.project(a, viewport), camera.project(b, viewport))
@@ -818,34 +851,32 @@ mod tests {
                 (DVec3::new(t, 0.0, z), DVec3::new(t, 120.0, z)),
                 (DVec3::new(0.0, t, -z), DVec3::new(120.0, t, z)),
             ] {
-                scene
-                    .edges
-                    .push(mt_render::Segment::line(f(a), f(b), [0.0; 4], [1.0, 0.0]));
-                scene
-                    .edge_owner
-                    .push(Some(Owner::Section(scene.edge_owner.len())));
+                let owner = Some(Owner::Section(scene.edge_count()));
+                scene.push_edge(
+                    mt_render::Segment::line(f(a), f(b), [0.0; 4], [1.0, 0.0]),
+                    owner,
+                );
             }
             for j in 0..10 {
                 let a = DVec3::new(t, j as f64 * 12.0, z);
                 let b = a + DVec3::new(0.9, 1.7, 2.0);
-                scene
-                    .edges
-                    .push(mt_render::Segment::line(f(a), f(b), [0.0; 4], [1.0, 0.0]));
-                scene
-                    .edge_owner
-                    .push((j % 3 != 0).then_some(Owner::Instance(scene.edge_owner.len())));
+                let owner = (j % 3 != 0).then_some(Owner::Instance(scene.edge_count()));
+                scene.push_edge(
+                    mt_render::Segment::line(f(a), f(b), [0.0; 4], [1.0, 0.0]),
+                    owner,
+                );
             }
         }
-        assert!(scene.edges.len() >= 1024);
+        assert!(scene.edge_count() >= 1024);
         let c = [
             DVec3::new(0.0, 0.0, 1.0),
             DVec3::new(120.0, 0.0, 1.0),
             DVec3::new(120.0, 120.0, 1.0),
             DVec3::new(0.0, 120.0, 1.0),
         ];
-        scene.triangles = vec![[c[0], c[1], c[2]], [c[0], c[2], c[3]]];
-        scene.tri_owner = vec![Some(Owner::Text(0)), Some(Owner::Text(1))];
-        let bvh = mt_kernel::bvh::Bvh::build(scene.triangles.clone());
+        scene.push_tri([c[0], c[1], c[2]], Some(Owner::Text(0)));
+        scene.push_tri([c[0], c[2], c[3]], Some(Owner::Text(1)));
+        let bvh = mt_kernel::bvh::Bvh::build(scene.triangles().to_vec());
         let viewport = DVec2::new(900.0, 700.0);
         for perspective in [true, false] {
             let camera = Camera {
@@ -942,18 +973,19 @@ mod tests {
         let mut scene = Scene::default();
         let f = |p: DVec3| p.as_vec3().to_array();
         for (id, edge) in &e.edges {
-            scene.edges.push(mt_render::Segment::line(
-                f(e.pos(edge.start)),
-                f(e.pos(edge.end)),
-                [0.0, 0.0, 0.0, 1.0],
-                [1.0, 0.0],
-            ));
-            scene.edge_owner.push(Some(Owner::Edge(id)));
+            scene.push_edge(
+                mt_render::Segment::line(
+                    f(e.pos(edge.start)),
+                    f(e.pos(edge.end)),
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 0.0],
+                ),
+                Some(Owner::Edge(id)),
+            );
         }
         for fid in e.faces.keys() {
             for tri in mt_kernel::tessellate::triangulate(e, fid) {
-                scene.triangles.push(tri);
-                scene.tri_owner.push(Some(Owner::Face(fid)));
+                scene.push_tri(tri, Some(Owner::Face(fid)));
             }
         }
         scene
@@ -1088,7 +1120,7 @@ mod pick_tests {
             .join("../../tests/corpus/openskp/capilla_quiroz_v17.skp");
         let doc = Document::open(&path).unwrap();
         let scene = doc.scene();
-        let bvh = mt_kernel::bvh::Bvh::build(scene.triangles.clone());
+        let bvh = mt_kernel::bvh::Bvh::build(scene.triangles().to_vec());
         let camera = doc
             .saved_camera()
             .or_else(|| crate::document::extents_camera_of(&doc.scene(), 35.0))
@@ -1096,7 +1128,7 @@ mod pick_tests {
         let viewport = DVec2::new(1280.0, 760.0);
         let mut hits = 0;
         let mut tried = 0;
-        for (t, tri) in scene.triangles.iter().enumerate().step_by(7) {
+        for (t, tri) in scene.triangles().iter().enumerate().step_by(7) {
             let c = (tri[0] + tri[1] + tri[2]) / 3.0;
             let Some(px) = camera.project(c, viewport) else {
                 continue;

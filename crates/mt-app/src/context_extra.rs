@@ -560,7 +560,7 @@ impl App {
                         (glam::DMat3::from_mat4(xf).inverse().transpose() * sp.normal)
                             .normalize_or(DVec3::Z),
                     );
-                    let segs = mt_render::section_lines(&self.scene.triangles, p, n);
+                    let segs = mt_render::section_lines(self.scene.triangles(), p, n);
                     let ends = open_ends(&segs, 1e-4);
                     self.message = Some(if ends.is_empty() {
                         "Troubleshoot Section Fill: every loop of the cut is closed.".into()
@@ -603,7 +603,7 @@ impl App {
                 let p = xf.transform_point3(sp.point);
                 let n = (glam::DMat3::from_mat4(xf).inverse().transpose() * sp.normal)
                     .normalize_or(DVec3::Z);
-                Some(mt_render::section_lines(&self.scene.triangles, p, n))
+                Some(mt_render::section_lines(self.scene.triangles(), p, n))
             }
             _ => None,
         };

@@ -59,7 +59,7 @@ impl Highlight<'_> {
                 crate::style_view::rgba(mc.locked),
             )
         });
-        let mut edges = Vec::with_capacity(scene.edges.len());
+        let mut edges = Vec::with_capacity(scene.edge_count());
         let mut copies = Vec::new();
         // Locked groups and components are highlighted red instead of blue (only
         // instances lock; the active context is looked up once).
@@ -103,10 +103,9 @@ impl Highlight<'_> {
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .chain(std::iter::once(from..scene.edges.len()));
-        for k in runs.flatten() {
-            let (seg, owner) = (&scene.edges[k], &scene.edge_owner[k]);
-            let mut seg = *seg;
+            .chain(std::iter::once(from..scene.edge_count()));
+        let mut visit = |k: usize, mut seg: Segment| {
+            let owner = &scene.edge_owner[k];
             let selected = owner.is_some_and(selected);
             let color = if selected {
                 highlight(owner)
@@ -139,6 +138,9 @@ impl Highlight<'_> {
                 None => {}
             }
             edges.push(seg);
+        };
+        for run in runs {
+            scene.for_each_edge_in(run, &mut visit);
         }
         edges.extend(copies);
         // Selected faces' triangles. A face's triangles are consecutive: its owner is
@@ -196,11 +198,10 @@ impl Highlight<'_> {
             }
         }
         if let Some((ghost, xf)) = self.ghost {
-            edges.extend(ghost.edges.iter().map(|s| {
-                let mut s = *s;
+            ghost.for_each_edge(|_, mut s| {
                 (s.a, s.b) = (tp(xf, s.a), tp(xf, s.b));
-                s
-            }));
+                edges.push(s);
+            });
         }
         edges.extend(scene.guides.iter().copied());
         edges.extend(self.cut_lines.iter().copied());

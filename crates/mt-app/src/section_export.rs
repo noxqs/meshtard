@@ -289,7 +289,7 @@ impl App {
                 let Some((p, n)) = self.scene.section else {
                     return;
                 };
-                let segments = mt_render::section_lines(&self.scene.triangles, p, n);
+                let segments = mt_render::section_lines(self.scene.triangles(), p, n);
                 let text = section_dxf(&segments, n, &d, model_units);
                 let name = self.export_file_name("dxf");
                 let Some(path) =

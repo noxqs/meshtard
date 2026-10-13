@@ -56,25 +56,19 @@ impl History {
 
 /// The box around everything drawn, or `None` for an empty model.
 pub(crate) fn scene_bounds(scene: &crate::document::Scene) -> Option<(DVec3, DVec3)> {
-    let points = scene
-        .edges
-        .iter()
-        .flat_map(|s| [s.a, s.b])
-        // Every face vertex, as drawn (single precision).
-        .chain(
-            scene
-                .triangles
-                .iter()
-                .flatten()
-                .map(|p| p.as_vec3().to_array()),
-        );
     let mut min = DVec3::splat(f64::INFINITY);
     let mut max = DVec3::splat(f64::NEG_INFINITY);
-    for p in points {
+    let mut add = |p: [f32; 3]| {
         let p = DVec3::new(p[0].into(), p[1].into(), p[2].into());
         min = min.min(p);
         max = max.max(p);
-    }
+    };
+    scene.for_each_edge(|_, s| {
+        add(s.a);
+        add(s.b);
+    });
+    // Every face vertex, as drawn (single precision).
+    scene.for_each_tri(|_, t| t.iter().for_each(|p| add(p.as_vec3().to_array())));
     (min.x <= max.x).then_some((min, max))
 }
 

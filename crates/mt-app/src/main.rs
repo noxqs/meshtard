@@ -49,6 +49,7 @@ mod move_extra;
 mod nav;
 mod overlay;
 mod paint;
+mod pick_index;
 mod pick_tool;
 mod preferences;
 mod prefs_pages;
@@ -668,17 +669,20 @@ impl App {
             .as_ref()
             .map(Document::scene)
             .unwrap_or_default();
-        let triangles = self.scene.triangles.clone();
         let start = std::time::Instant::now();
-        let gpu = self.accel.is_gpu() && triangles.len() >= GPU_MIN_TRIANGLES;
-        self.bvh = if gpu {
-            Box::new(self.accel.build_bvh(triangles))
-        } else {
-            Box::new(Bvh::build(triangles))
-        };
+        // Instanced triangles are picked from their meshes (`pick_index`).
+        let gpu = self.accel.is_gpu() && self.scene.stored_tris().len() >= GPU_MIN_TRIANGLES;
+        let accel = &self.accel;
+        self.bvh = pick_index::PickIndex::build(&self.scene, |triangles| {
+            if gpu {
+                Box::new(accel.build_bvh(triangles))
+            } else {
+                Box::new(Bvh::build(triangles))
+            }
+        });
         log::debug!(
             "pick index: {} triangles on the {} in {:?}",
-            self.scene.triangles.len(),
+            self.scene.tri_count(),
             if gpu { "GPU" } else { "CPU" },
             start.elapsed()
         );
@@ -698,7 +702,7 @@ impl App {
             });
             let width = doc.model.style.section_cut_width;
             let f = |q: DVec3| q.as_vec3().to_array();
-            self.geometry.section_lines = mt_render::section_lines(&self.scene.triangles, p, n);
+            self.geometry.section_lines = mt_render::section_lines(self.scene.triangles(), p, n);
             let cut_color = style_view::rgba(doc.model.style.modeling_colors.section_cut);
             self.cut_lines = (self.geometry.section_lines.iter().copied())
                 .map(|[a, b]| Segment::line(f(a), f(b), cut_color, [width, 0.0]))
@@ -716,7 +720,7 @@ impl App {
                 .style
                 .section_fill_color
                 .map(|x| f32::from(x) / 255.0);
-            fill = mt_render::section_fill(&self.scene.triangles, p, n)
+            fill = mt_render::section_fill(self.scene.triangles(), p, n)
                 .iter()
                 .map(|t| t.map(|q| q.as_vec3().to_array()))
                 .collect();
@@ -1002,8 +1006,8 @@ impl App {
                 log::info!(
                     "opened {}: {} triangles, {} edges",
                     path.display(),
-                    self.scene.triangles.len(),
-                    self.scene.edges.len()
+                    self.scene.tri_count(),
+                    self.scene.edge_count()
                 );
                 self.message = None;
             }
@@ -2055,8 +2059,9 @@ impl App {
             material: cursor.and_then(|c| {
                 let r = self.camera.ray(c, viewport_px);
                 let hit = self.bvh.ray(r.origin, r.dir)?;
-                let [a, b, c] = self.scene.triangles.get(hit.triangle)?;
-                let back = (*b - *a).cross(*c - *a).dot(r.dir) > 0.0;
+                let [a, b, c] = (hit.triangle < self.scene.tri_count())
+                    .then(|| self.scene.tri(hit.triangle))?;
+                let back = (b - a).cross(c - a).dot(r.dir) > 0.0;
                 let m = self.scene.tri_material.get(hit.triangle)?;
                 Some(m[usize::from(back)])
             }),

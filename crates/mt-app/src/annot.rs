@@ -223,8 +223,7 @@ fn add(ents: &Entities, xf: DMat4, owned: bool, o: &Options, scene: &mut Scene) 
     let f = |p: DVec3| w(p).as_vec3().to_array();
     let mut line = |a: DVec3, b: DVec3, owner: Option<Owner>, color: Option<[u8; 3]>| {
         let c = color.map_or(LINE_COLOR, rgba);
-        scene.edges.push(Segment::line(f(a), f(b), c, [1.0, 0.0]));
-        scene.edge_owner.push(owner);
+        scene.push_edge(Segment::line(f(a), f(b), c, [1.0, 0.0]), owner);
     };
     let mut labels = Vec::new();
     for (i, d) in ents.dimensions.iter().enumerate() {
