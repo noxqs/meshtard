@@ -26,6 +26,8 @@ mod extensions;
 mod filedialog;
 mod fix_problems;
 mod flip;
+#[cfg(test)]
+mod fuzz_tests;
 mod geo_map;
 mod graphics;
 mod grips;
@@ -977,7 +979,8 @@ impl App {
     }
 
     fn open(&mut self, ctx: &egui::Context, device: &wgpu::Device, path: &std::path::Path) {
-        match Document::open(path) {
+        // A panic while reading is an error too (errors::guard).
+        match crate::errors::guard(|| Document::open(path)) {
             Ok(doc) => self.install(ctx, device, path, doc),
             Err(e) => self.file_error("open", path, e),
         }

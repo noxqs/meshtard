@@ -135,6 +135,20 @@ pub fn segment_segment(p0: DVec3, p1: DVec3, q0: DVec3, q1: DVec3) -> Option<(f6
     Some((dist, s, t))
 }
 
+/// Largest coordinate magnitude given to [`earcut`]: beyond it the area sums the
+/// triangulation compares overflow.
+const EARCUT_MAX: f64 = 1e150;
+
+/// [`earcutr::earcut`] over 2D points (`flat` x, y pairs, `holes` the first point of
+/// each hole) that refuses coordinates it cannot handle: `earcutr` panics when a
+/// contour has a NaN, infinite or `f64::MAX` coordinate (no leftmost point found).
+pub fn earcut(flat: &[f64], holes: &[usize]) -> Result<Vec<usize>, earcutr::Error> {
+    if flat.iter().any(|v| !v.is_finite() || v.abs() > EARCUT_MAX) {
+        return Err(earcutr::Error::Unknown);
+    }
+    earcutr::earcut(flat, holes, 2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

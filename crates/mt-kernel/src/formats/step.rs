@@ -157,7 +157,7 @@ impl<'a> Lexer<'a> {
             while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
                 self.i += 1;
             }
-            if self.b[self.i..].starts_with(b"/*") {
+            if self.b.get(self.i..).is_some_and(|r| r.starts_with(b"/*")) {
                 match find(&self.b[self.i + 2..], b"*/") {
                     Some(k) => self.i += k + 4,
                     None => self.i = self.b.len(),
@@ -231,6 +231,9 @@ impl<'a> Lexer<'a> {
                 let start = self.i;
                 while self.i < self.b.len() && self.b[self.i] != b'"' {
                     self.i += 1;
+                }
+                if self.i >= self.b.len() {
+                    return self.err("unterminated binary value");
                 }
                 let s = String::from_utf8_lossy(&self.b[start..self.i]).into_owned();
                 self.i += 1;

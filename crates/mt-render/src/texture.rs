@@ -36,10 +36,32 @@ pub struct TextureImage {
     pub rgba: Vec<u8>,
 }
 
+/// Decodes image bytes with limits, so a damaged or hostile texture (a header
+/// claiming a huge picture) is refused instead of allocated: at most 16384 pixels a
+/// side, 8192 × 8192 pixels and 256 MiB of decoder memory. The same limits as
+/// `mt_kernel::images`, which the app uses (mt-render does not depend on the kernel).
+fn decode_limited(bytes: &[u8]) -> Option<image::DynamicImage> {
+    use image::ImageDecoder;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(256 << 20);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(limits);
+    let decoder = reader.into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
+    if u64::from(w) * u64::from(h) > 8192 * 8192 {
+        return None;
+    }
+    image::DynamicImage::from_decoder(decoder).ok()
+}
+
 impl TextureImage {
     /// Decodes PNG, JPEG or BMP bytes; `None` for anything else or broken data.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+        let img = decode_limited(bytes)?.into_rgba8();
         let (width, height) = img.dimensions();
         (width > 0 && height > 0).then(|| Self {
             width,

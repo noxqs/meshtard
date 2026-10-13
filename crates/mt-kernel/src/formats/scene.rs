@@ -98,6 +98,9 @@ fn sub_mesh(mesh: &Mesh, ids: &[usize], xf: DMat4) -> Mesh {
         let Some(p) = mesh.polygons.get(i) else {
             continue;
         };
+        if p.vertices.iter().any(|&v| v >= mesh.positions.len()) {
+            continue;
+        }
         let vertices: Vec<usize> = p
             .vertices
             .iter()

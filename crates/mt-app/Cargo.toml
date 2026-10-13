@@ -44,6 +44,8 @@ sha2 = "0.10"
 slotmap = "1"
 
 [dev-dependencies]
+# Mutation fuzzing of the .style and .mtx readers (src/fuzz_tests.rs).
+mt-fuzz = { path = "../mt-fuzz" }
 # The large-model benchmark (`src/bench.rs`): a headless wgpu device and scene checksums.
 pollster.workspace = true
 bytemuck.workspace = true

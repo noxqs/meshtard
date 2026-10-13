@@ -329,7 +329,7 @@ impl App {
                 return;
             }
         };
-        let img = match image::load_from_memory(&data) {
+        let img = match mt_kernel::images::decode(&data) {
             Ok(i) => i.to_rgb8(),
             Err(e) => {
                 self.file_error("import", path, e);

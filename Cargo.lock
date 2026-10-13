@@ -1691,6 +1691,7 @@ dependencies = [
  "image",
  "log",
  "mt-cuda",
+ "mt-fuzz",
  "mt-infer",
  "mt-kernel",
  "mt-render",
@@ -1724,6 +1725,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mt-fuzz"
+version = "0.1.2"
+dependencies = [
+ "image",
+ "mt-kernel",
+ "mt-skp",
+ "zip",
+]
+
+[[package]]
 name = "mt-infer"
 version = "0.1.2"
 dependencies = [
@@ -1740,6 +1751,7 @@ dependencies = [
  "flate2",
  "glam",
  "gltf",
+ "image",
  "mt-skp",
  "proptest",
  "slotmap",

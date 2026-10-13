@@ -572,7 +572,7 @@ fn thumb_job(asset: &Asset) -> Reply {
     let key = asset.key();
     let file = cache_dir().map(|d| d.join("thumbs").join(format!("{key}.png")));
     if let Some(f) = &file
-        && let Ok(img) = image::open(f)
+        && let Ok(img) = mt_kernel::images::open(f)
     {
         return Reply::Thumb {
             key,
@@ -599,7 +599,7 @@ fn thumb_job(asset: &Asset) -> Reply {
         .as_deref()
         .ok_or_else(|| "no thumbnail".to_owned())
         .and_then(|u| net::get_bytes(u, None))
-        .and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string()))
+        .and_then(|b| mt_kernel::images::decode(&b).map_err(|e| e.to_string()))
         .map(|img| {
             img.resize(THUMB_PX, THUMB_PX, image::imageops::FilterType::Triangle)
                 .to_rgba8()

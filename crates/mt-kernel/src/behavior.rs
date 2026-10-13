@@ -159,7 +159,7 @@ pub fn cut_face(ents: &Entities, f: FaceId, openings: &[Vec<DVec3>]) -> Option<V
                 points.push(p);
             }
         }
-        let Ok(idx) = earcutr::earcut(&flat, &starts, 2) else {
+        let Ok(idx) = crate::geom::earcut(&flat, &starts) else {
             continue;
         };
         for t in idx.as_chunks::<3>().0 {

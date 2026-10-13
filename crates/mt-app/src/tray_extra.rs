@@ -337,7 +337,8 @@ fn parse_rgb(v: &str) -> Option<[u8; 3]> {
 /// image when it has one.
 pub(crate) fn read_style_bytes(data: &[u8]) -> Result<(NamedStyle, Option<Vec<u8>>), String> {
     if crate::style_zip::is_zip(data) {
-        return crate::style_zip::read(data).map(|z| (z.style, z.thumbnail));
+        return crate::errors::guard(|| crate::style_zip::read(data))
+            .map(|z| (z.style, z.thumbnail));
     }
     let text = std::str::from_utf8(data).map_err(|_| "Not a style file.".to_owned())?;
     parse_style_file(text).map(|s| (s, None))
@@ -844,7 +845,7 @@ impl App {
             if self.tray_lib.thumbs.contains_key(&path) {
                 continue;
             }
-            let thumb = image::open(&path).ok().map(|img| {
+            let thumb = mt_kernel::images::open(&path).ok().map(|img| {
                 let color = crate::image_entity::average_color(&img.to_rgb8());
                 let small = img.thumbnail(64, 64).to_rgba8();
                 let size = [small.width() as usize, small.height() as usize];
@@ -1245,8 +1246,8 @@ impl App {
                 else {
                     return Ok(false);
                 };
-                let src = match mt_skp::read(&path) {
-                    Ok(s) => s,
+                let model = match crate::errors::read_skp_model(&path) {
+                    Ok(m) => m,
                     Err(e) => {
                         self.file_error("open", &path, e);
                         return Ok(false);
@@ -1255,7 +1256,6 @@ impl App {
                 let Some(doc) = self.document.as_mut() else {
                     return Ok(false);
                 };
-                let model = mt_kernel::import::from_skp(&src);
                 let mut def = None;
                 doc.edit_model(|m, _| {
                     def = Some(mt_kernel::import::merge_as_definition(m, model, &name));

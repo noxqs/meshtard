@@ -156,13 +156,13 @@ fn tile(
             .ok()
             .and_then(|m| SystemTime::now().duration_since(m).ok())
             .is_some_and(|age| age < CACHE_AGE)
-        && let Ok(img) = image::open(p)
+        && let Ok(img) = mt_kernel::images::open(p)
     {
         return Ok(img.to_rgb8());
     }
     crate::library::net::API_THROTTLE.wait();
     let bytes = crate::library::net::get_bytes(&window.tile_url(tx, ty), None)?;
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("map tile: {e}"))?;
+    let img = mt_kernel::images::decode(&bytes).map_err(|e| format!("map tile: {e}"))?;
     if let Some(p) = &path {
         // A cache that cannot be written only costs a download next time.
         let _ = p.parent().map(std::fs::create_dir_all);

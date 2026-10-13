@@ -44,6 +44,7 @@ use std::sync::Arc;
 use glam::{DAffine2, DMat4, DVec2, DVec3, DVec4};
 
 use crate::entities::{DefinitionId, Entities, Instance, MaterialId};
+use crate::gltf_read;
 use crate::mesh_export::{self, Materials, Side};
 use crate::mesh_import::{self, Mesh, MeshMaterial, MeshOptions, MeshTexture, Polygon};
 use crate::model::{Definition, Material, Model};
@@ -202,12 +203,19 @@ pub fn import(
     resolve: &dyn Fn(&str) -> Option<Vec<u8>>,
     merge_coplanar: bool,
 ) -> Result<Model, String> {
-    let g = gltf::Gltf::from_slice(bytes).map_err(|e| format!("not a glTF file: {e}"))?;
-    let doc = &g.document;
+    let g = gltf::Gltf::from_slice_without_validation(bytes)
+        .map_err(|e| format!("not a glTF file: {e}"))?;
+    // The crate's validation indexes some accessors before checking them.
+    gltf_read::check(g.document.as_json())?;
+    let blob = g.blob;
+    let document = gltf::Document::from_json(g.document.into_json())
+        .map_err(|e| format!("not a glTF file: {e}"))?;
+    let doc = &document;
+    let root = doc.as_json();
     let mut buffers: Vec<Vec<u8>> = Vec::new();
     for b in doc.buffers() {
         let data = match b.source() {
-            gltf::buffer::Source::Bin => g.blob.clone(),
+            gltf::buffer::Source::Bin => blob.clone(),
             gltf::buffer::Source::Uri(u) => uri_bytes(u, resolve),
         }
         .ok_or_else(|| format!("buffer {} could not be read", b.index()))?;
@@ -216,6 +224,10 @@ pub fn import(
         }
         buffers.push(data);
     }
+    // Values the accessors may give over the whole import: one per buffer byte (a
+    // value takes one byte at least), at least `MIN_VALUES`; a small file can name
+    // one large accessor many times.
+    let mut budget = gltf_read::MIN_VALUES.max(buffers.iter().map(Vec::len).sum());
 
     let mut model = Model::default();
     // Materials, one model material per glTF material (indices match).
@@ -273,7 +285,7 @@ pub fn import(
             let (data, file) = match image.source() {
                 gltf::image::Source::View { view, mime_type } => {
                     let buf = buffers.get(view.buffer().index())?;
-                    let data = buf.get(view.offset()..view.offset() + view.length())?;
+                    let data = buf.get(view.offset()..view.offset().checked_add(view.length())?)?;
                     let ext = if mime_type.contains("jpeg") {
                         "jpg"
                     } else {
@@ -341,49 +353,85 @@ pub fn import(
             ) {
                 continue;
             }
-            let reader = prim.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
-            let Some(positions) = reader.read_positions() else {
+            let Some(pos) = prim.get(&gltf::Semantic::Positions) else {
                 continue;
             };
+            let positions = gltf_read::read(
+                root,
+                &buffers,
+                pos.index(),
+                3,
+                gltf_read::FLOATS,
+                &mut budget,
+            )
+            .map_err(|e| format!("mesh {}: {e}", gm.index()))?;
             let first = mesh.positions.len();
-            mesh.positions
-                .extend(positions.map(|p| DVec3::from_array(p.map(f64::from))));
+            mesh.positions.extend(
+                positions
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|p| DVec3::from_array(*p)),
+            );
             let count = mesh.positions.len() - first;
             // Our own exports carry the f32 rounding of each position.
             let lo = prim
                 .get(&gltf::Semantic::Extras(POSITION_LO[1..].to_owned()))
-                .filter(|a| {
-                    a.count() == count
-                        && a.data_type() == gltf::accessor::DataType::F32
-                        && a.dimensions() == gltf::accessor::Dimensions::Vec3
-                })
+                .filter(|a| a.count() == count)
                 .and_then(|a| {
-                    gltf::accessor::Iter::<[f32; 3]>::new(a, |b: gltf::Buffer| {
-                        buffers.get(b.index()).map(Vec::as_slice)
-                    })
+                    gltf_read::read(
+                        root,
+                        &buffers,
+                        a.index(),
+                        3,
+                        &[gltf::json::accessor::ComponentType::F32],
+                        &mut budget,
+                    )
+                    .ok()
                 });
             if let Some(lo) = lo {
-                for (p, d) in mesh.positions[first..].iter_mut().zip(lo) {
-                    *p += DVec3::from_array(d.map(f64::from));
+                for (p, d) in mesh.positions[first..]
+                    .iter_mut()
+                    .zip(lo.as_chunks::<3>().0)
+                {
+                    *p += DVec3::from_array(*d);
                 }
             }
             let material = prim.material().index();
             let (set, uv_xf) = material
                 .and_then(|m| tex_maps.get(m).copied())
                 .unwrap_or((0, DAffine2::IDENTITY));
-            let uvs: Vec<DVec2> = reader
-                .read_tex_coords(set)
+            let uvs: Vec<DVec2> = prim
+                .get(&gltf::Semantic::TexCoords(set))
+                .filter(|a| gltf_read::float_or_normalized(root, a.index()))
+                .and_then(|a| {
+                    gltf_read::read(root, &buffers, a.index(), 2, gltf_read::FLOATS, &mut budget)
+                        .ok()
+                })
                 .map(|t| {
-                    t.into_f32()
-                        .map(|[u, v]| {
-                            let t = uv_xf.transform_point2(DVec2::new(f64::from(u), f64::from(v)));
+                    t.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&[u, v]| {
+                            let t = uv_xf.transform_point2(DVec2::new(u, v));
                             DVec2::new(t.x, 1.0 - t.y)
                         })
                         .collect()
                 })
                 .unwrap_or_default();
-            let indices: Vec<usize> = match reader.read_indices() {
-                Some(ix) => ix.into_u32().map(|i| i as usize).collect(),
+            let indices: Vec<usize> = match prim.indices() {
+                Some(a) => gltf_read::read(
+                    root,
+                    &buffers,
+                    a.index(),
+                    1,
+                    gltf_read::INDICES,
+                    &mut budget,
+                )
+                .map_err(|e| format!("mesh {}: {e}", gm.index()))?
+                .into_iter()
+                .map(|i| i as usize)
+                .collect(),
                 None => (0..count).collect(),
             };
             if indices.iter().any(|&i| i >= count) {
@@ -452,6 +500,11 @@ pub fn import(
         c,
         c_inv,
         wrappers: Vec::new(),
+        // A single top node's contents come in at the top (below).
+        built: match roots.as_slice() {
+            [root] => [root.index()].into(),
+            _ => Default::default(),
+        },
     };
     let place = |model: &mut Model, def: DefinitionId, xf: DMat4, name: &str| {
         model
@@ -563,6 +616,10 @@ struct Nodes<'a> {
     c_inv: DMat4,
     /// Node groups with an instance of their own mesh: (group, mesh definition).
     wrappers: Vec<(DefinitionId, DefinitionId)>,
+    /// Nodes built (or being built): glTF nodes have one parent at most, so a node
+    /// reached twice (a cycle, or many paths through a damaged file's nodes) is
+    /// skipped.
+    built: std::collections::HashSet<usize>,
 }
 
 impl Nodes<'_> {
@@ -579,6 +636,9 @@ impl Nodes<'_> {
         node: &gltf::Node,
         depth: usize,
     ) -> Option<(DefinitionId, String)> {
+        if !self.built.insert(node.index()) {
+            return None;
+        }
         let name = node.name().unwrap_or_default().to_owned();
         let mesh = self.mesh(node);
         let mut kids = Vec::new();

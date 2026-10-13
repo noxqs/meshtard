@@ -61,7 +61,7 @@ fn triangulate_with(ents: &Entities, f: FaceId, fast: bool) -> Vec<[DVec3; 3]> {
             if !signed_area2(&poly).is_nan() {
                 let flat: Vec<f64> = poly.iter().flat_map(|q| [q.x, q.y]).collect();
                 let mut out = Vec::new();
-                if let Ok(idx) = earcutr::earcut(&flat, &[], 2) {
+                if let Ok(idx) = crate::geom::earcut(&flat, &[]) {
                     emit(&outer, &idx, &mut out);
                 }
                 return out;
@@ -116,7 +116,7 @@ fn triangulate_with(ents: &Entities, f: FaceId, fast: bool) -> Vec<[DVec3; 3]> {
                 [q.x, q.y]
             })
             .collect();
-        let Ok(idx) = earcutr::earcut(&flat, &starts, 2) else {
+        let Ok(idx) = crate::geom::earcut(&flat, &starts) else {
             continue;
         };
         emit(&ids, &idx, &mut out);

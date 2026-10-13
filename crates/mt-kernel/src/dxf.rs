@@ -388,7 +388,24 @@ fn ocs_matrix(n: DVec3) -> DMat4 {
 }
 
 fn arc_segments(sweep: f64) -> usize {
-    ((24.0 * sweep.abs() / TAU).ceil() as usize).max(2)
+    // Damaged files: no more than a turn's worth (NaN gives the minimum).
+    ((24.0 * sweep.abs().min(TAU) / TAU).ceil() as usize).max(2)
+}
+
+/// `t` plus the whole turns that put it above `floor` (unchanged when it is above
+/// already), as repeated `t += TAU` gives it; `None` when no number of turns does
+/// (NaN, infinite or huge angles from a damaged file).
+fn turns_above(mut t: f64, floor: f64) -> Option<f64> {
+    for _ in 0..64 {
+        if t > floor {
+            return Some(t);
+        }
+        t += TAU;
+    }
+    if t <= floor {
+        t += (((floor - t) / TAU).floor() + 1.0) * TAU;
+    }
+    (t > floor && t.is_finite() && (t - floor) <= 2.0 * TAU).then_some(t)
 }
 
 /// The shapes of a 2D polyline (OCS points with bulges) in world space.
@@ -670,18 +687,14 @@ fn hatch_arc(
     }
     let minor = major.perp() * ratio;
     let sweep = if ccw {
-        let mut t = e - s;
-        while t <= 1e-12 {
-            t += TAU;
-        }
-        t
+        turns_above(e - s, 1e-12)
     } else {
-        let mut t = e - s;
-        while t >= -1e-12 {
-            t -= TAU;
-        }
-        t
+        turns_above(s - e, 1e-12).map(|t| -t)
     };
+    let Some(sweep) = sweep else {
+        return Vec::new();
+    };
+    let sweep = sweep.clamp(-TAU, TAU);
     let n = arc_segments(sweep);
     (0..=n)
         .map(|i| {
@@ -886,6 +899,8 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
     let mut section = String::new();
     let mut i = 0;
     let mut ents: Vec<(String, Ent)> = Vec::new();
+    // Array cells (INSERT rows × columns) left for the whole file.
+    let mut cells = MAX_ARRAY_CELLS;
     while i < groups.len() {
         let g = &groups[i];
         if g.code != 0 {
@@ -935,7 +950,7 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                 while end < ents.len() && ents[end].0 == "BLOCKS" && ents[end].1.kind != "ENDBLK" {
                     end += 1;
                 }
-                let shapes = read_entities(&ents[k + 1..end], &mut layers, false);
+                let shapes = read_entities(&ents[k + 1..end], &mut layers, false, &mut cells);
                 // External references (4) and overlays (8) are not in the file.
                 if e.int(70) & 12 == 0 {
                     d.blocks.insert(
@@ -953,7 +968,7 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
                 while end < ents.len() && ents[end].0 == "ENTITIES" {
                     end += 1;
                 }
-                let shapes = read_entities(&ents[k..end], &mut layers, true);
+                let shapes = read_entities(&ents[k..end], &mut layers, true, &mut cells);
                 d.shapes.extend(shapes);
                 k = end;
             }
@@ -964,9 +979,24 @@ pub fn parse(bytes: &[u8]) -> Result<Drawing, String> {
     Ok(d)
 }
 
+/// Most INSERT array cells in a file: a few bytes can ask for 1000 × 1000 copies, any
+/// number of times.
+const MAX_ARRAY_CELLS: usize = 100_000;
+
+/// Shapes [`to_model`] may add over all block expansions besides twice the
+/// drawing's own: exploded blocks (dimension blocks) naming each other many times
+/// over grow exponentially with nesting.
+const EXTRA_BUILT_SHAPES: usize = 200_000;
+
 /// The shapes of a run of entities (a block's or the ENTITIES section's); `model`
-/// skips paper space entities.
-fn read_entities(ents: &[(String, Ent)], layers: &mut Layers, model: bool) -> Vec<(usize, Shape)> {
+/// skips paper space entities. `cells` counts down the INSERT array cells the file
+/// may still have; past it, arrays keep their first cell.
+fn read_entities(
+    ents: &[(String, Ent)],
+    layers: &mut Layers,
+    model: bool,
+    cells: &mut usize,
+) -> Vec<(usize, Shape)> {
     let mut out: Vec<(usize, Shape)> = Vec::new();
     let mut k = 0;
     while k < ents.len() {
@@ -1022,11 +1052,11 @@ fn read_entities(ents: &[(String, Ent)], layers: &mut Layers, model: bool) -> Ve
                     (0.0, TAU)
                 } else {
                     let s = e.f(50).to_radians();
-                    let mut t = e.f(51).to_radians();
-                    while t <= s {
-                        t += TAU;
-                    }
-                    (s, t)
+                    let Some(t) = turns_above(e.f(51).to_radians(), s) else {
+                        continue;
+                    };
+                    // More than a turn (a damaged file) is a circle.
+                    (s, t.min(s + TAU))
                 };
                 let radius = e.f(40);
                 if radius > 0.0 {
@@ -1046,10 +1076,10 @@ fn read_entities(ents: &[(String, Ent)], layers: &mut Layers, model: bool) -> Ve
                 let major = e.point(11);
                 let minor = n.cross(major) * e.f(40);
                 let t0 = e.f(41);
-                let mut t1 = e.num(42).unwrap_or(TAU);
-                while t1 <= t0 + 1e-12 {
-                    t1 += TAU;
-                }
+                let Some(t1) = turns_above(e.num(42).unwrap_or(TAU), t0 + 1e-12) else {
+                    continue;
+                };
+                let t1 = t1.min(t0 + TAU);
                 if major.length() > 1e-12 && minor.length() > 1e-12 {
                     let mut pts = ellipse_points(e.point(10), major, minor, t0, t1);
                     if t1 - t0 >= TAU - 1e-9 {
@@ -1116,10 +1146,16 @@ fn read_entities(ents: &[(String, Ent)], layers: &mut Layers, model: bool) -> Ve
                 let place = ocs
                     * DMat4::from_translation(e.point(10))
                     * DMat4::from_rotation_z(e.f(50).to_radians());
-                let (cols, rows) = (e.int(70).max(1), e.int(71).max(1));
+                let (mut cols, mut rows) = (e.int(70).clamp(1, 1000), e.int(71).clamp(1, 1000));
+                let n = (cols * rows) as usize;
+                if n > *cells {
+                    (cols, rows) = (1, 1);
+                } else {
+                    *cells -= n;
+                }
                 let (dx, dy) = (e.f(44), e.f(45));
-                for r in 0..rows.min(1000) {
-                    for c in 0..cols.min(1000) {
+                for r in 0..rows {
+                    for c in 0..cols {
                         let cell =
                             DMat4::from_translation(DVec3::new(c as f64 * dx, r as f64 * dy, 0.0));
                         push(Shape::Insert {
@@ -1465,6 +1501,8 @@ struct Builder<'a> {
     /// Definitions made for blocks; `None` while being built (a block containing
     /// itself) or when empty.
     defs: HashMap<String, Option<DefinitionId>>,
+    /// Shapes that may still be added ([`EXTRA_BUILT_SHAPES`]).
+    budget: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -1485,6 +1523,10 @@ impl<'a> Builder<'a> {
             .chain(shapes.iter().copied().filter(|x| !region(x)))
             .collect();
         for (l, s) in ordered {
+            if self.budget == 0 {
+                return;
+            }
+            self.budget -= 1;
             let l = *l;
             let tag = self.tag(l);
             let scale = self.scale;
@@ -1589,6 +1631,8 @@ pub fn to_model(d: &Drawing, opts: &DxfOptions) -> Model {
         tags: None,
         model: Model::default(),
         defs: HashMap::new(),
+        budget: EXTRA_BUILT_SHAPES
+            + 2 * (d.shapes.len() + d.blocks.values().map(|b| b.shapes.len()).sum::<usize>()),
     };
     match opts.layers {
         LayerMode::Groups => {

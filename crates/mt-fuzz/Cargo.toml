@@ -1,0 +1,24 @@
+[package]
+name = "mt-fuzz"
+description = "Stable-Rust mutation fuzzer for meshtard's file readers (see spec/FUZZING.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "fuzz_readers"
+path = "src/main.rs"
+
+[dependencies]
+mt-kernel.workspace = true
+mt-skp.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+# Not the workspace lints: the counting allocator (`src/alloc.rs`) needs `unsafe`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

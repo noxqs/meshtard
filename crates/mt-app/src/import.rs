@@ -127,6 +127,14 @@ fn read_file(
     kind: formats::Kind,
     colors: bool,
 ) -> Result<(formats::scene::Scene, formats::Hints), String> {
+    crate::errors::guard(|| read_file_unguarded(path, kind, colors))
+}
+
+fn read_file_unguarded(
+    path: &Path,
+    kind: formats::Kind,
+    colors: bool,
+) -> Result<(formats::scene::Scene, formats::Hints), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let read = move |name: &str| {
@@ -159,7 +167,7 @@ pub(crate) fn read_mesh(
             if let Some(img) = mat
                 .texture
                 .as_ref()
-                .and_then(|t| image::load_from_memory(&t.data).ok())
+                .and_then(|t| mt_kernel::images::decode(&t.data).ok())
             {
                 mat.color = crate::image_entity::average_color(&img.to_rgb8());
             }
@@ -172,6 +180,10 @@ pub(crate) fn read_mesh(
 /// Reads a `.gltf` / `.glb` file (buffers and images next to it) into a model, with
 /// textured materials given their image's average color and aspect ratio.
 pub(crate) fn read_gltf(path: &Path, merge: bool) -> Result<mt_kernel::Model, String> {
+    crate::errors::guard(|| read_gltf_unguarded(path, merge))
+}
+
+fn read_gltf_unguarded(path: &Path, merge: bool) -> Result<mt_kernel::Model, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let resolve = move |name: &str| -> Option<Vec<u8>> {
@@ -191,7 +203,7 @@ pub(crate) fn read_gltf(path: &Path, merge: bool) -> Result<mt_kernel::Model, St
         let Some(t) = m.texture.as_mut() else {
             continue;
         };
-        if let Ok(img) = image::load_from_memory(&t.data) {
+        if let Ok(img) = mt_kernel::images::decode(&t.data) {
             let img = img.to_rgb8();
             let avg = crate::image_entity::average_color(&img);
             // The base color factor tints the texture.
@@ -210,14 +222,16 @@ pub(crate) fn read_dxf(
     layers: LayerMode,
 ) -> Result<mt_kernel::Model, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let drawing = mt_kernel::dxf::parse(&bytes)?;
-    Ok(mt_kernel::dxf::to_model(
-        &drawing,
-        &mt_kernel::dxf::DxfOptions {
-            inches_per_unit: units.map(|u| 1.0 / u.per_inch()),
-            layers,
-        },
-    ))
+    crate::errors::guard(|| {
+        let drawing = mt_kernel::dxf::parse(&bytes)?;
+        Ok::<_, String>(mt_kernel::dxf::to_model(
+            &drawing,
+            &mt_kernel::dxf::DxfOptions {
+                inches_per_unit: units.map(|u| 1.0 / u.per_inch()),
+                layers,
+            },
+        ))
+    })
 }
 
 fn file_stem(path: &Path) -> String {
@@ -273,14 +287,13 @@ impl App {
     }
 
     fn import_skp(&mut self, path: &Path, device: &egui_wgpu::wgpu::Device) {
-        let src = match mt_skp::read(path) {
-            Ok(s) => s,
+        let model = match crate::errors::read_skp_model(path) {
+            Ok(m) => m,
             Err(e) => {
                 self.file_error("import", path, e);
                 return;
             }
         };
-        let model = mt_kernel::import::from_skp(&src);
         self.place_imported(model, &file_stem(path), device);
     }
 
@@ -445,7 +458,8 @@ impl App {
         // Texture images named by the file, relative to its folder.
         let dir = d.path.parent().map(Path::to_path_buf).unwrap_or_default();
         let images = move |name: &str| std::fs::read(dir.join(name)).ok();
-        let (model, report) = match read.and_then(|b| formats::ifc::import_with(&b, &opts, &images))
+        let (model, report) = match read
+            .and_then(|b| crate::errors::guard(|| formats::ifc::import_with(&b, &opts, &images)))
         {
             Ok(x) => x,
             Err(e) => {
@@ -537,12 +551,25 @@ impl App {
         };
         let mut faces = 0;
         let mut placed = None;
+        let mut failed = None;
         doc.edit_model(|m, active| {
             let first = m.materials.len();
             let ids: Vec<usize> = (first..first + materials.len()).collect();
             m.materials.extend(materials);
-            // FBX models become groups inside the import's group.
-            let ents = formats::scene::to_entities(m, &scene, &opts, &ids);
+            // FBX models become groups inside the import's group. A panic building
+            // the faces leaves the model as it was (errors::guard).
+            let defs: std::collections::HashSet<_> = m.definitions.keys().collect();
+            let ents = match crate::errors::guard(|| {
+                Ok::<_, String>(formats::scene::to_entities(m, &scene, &opts, &ids))
+            }) {
+                Ok(ents) => ents,
+                Err(e) => {
+                    m.definitions.retain(|k, _| defs.contains(&k));
+                    m.materials.truncate(first);
+                    failed = Some(e);
+                    return false;
+                }
+            };
             faces = count_faces(m, &ents);
             if faces == 0 {
                 m.materials.truncate(first);
@@ -568,6 +595,10 @@ impl App {
             placed = Some(active.instances.len() - 1);
             true
         });
+        if let Some(e) = failed {
+            self.file_error("import", &d.path, e);
+            return;
+        }
         if faces == 0 {
             self.message = Some(format!("No faces in {}.", d.path.display()));
             return;

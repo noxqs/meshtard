@@ -307,6 +307,9 @@ pub fn parse(bytes: &[u8], colors: bool, read: ReadFile) -> Result<(Mesh, Hints)
                     face_tex.push(tn.map(|i| rec[i]).filter(|&n| n >= 0.0).map(|n| n as usize));
                 }
             }
+            // An element without properties has no data, whatever its count (which
+            // could be billions).
+            _ if el.props.is_empty() => {}
             _ => {
                 for _ in 0..el.count {
                     read_record(&mut body, el)?;

@@ -313,7 +313,7 @@ impl App {
             else {
                 continue;
             };
-            match image::open(s.dir.join(icon)) {
+            match mt_kernel::images::open(s.dir.join(icon)) {
                 Ok(img) => {
                     let img = img.into_rgba8();
                     let size = [img.width() as usize, img.height() as usize];
