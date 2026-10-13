@@ -52,7 +52,7 @@ fn tile(s: f64) -> f64 {
 /// texture; the height follows the image's aspect. The color becomes the image's
 /// average and Colorize goes off.
 pub(crate) fn set_image(m: &mut Material, name: String, data: Vec<u8>) -> Result<(), String> {
-    let img = image::load_from_memory(&data)
+    let img = mt_kernel::images::decode(&data)
         .map_err(|e| format!("Could not load {name}: {e}"))?
         .to_rgb8();
     let (w, h) = img.dimensions();
@@ -94,7 +94,7 @@ pub(crate) fn reset_color(m: &mut Material) -> bool {
     let Some(t) = &mut m.texture else {
         return false;
     };
-    let Ok(img) = image::load_from_memory(&t.data) else {
+    let Ok(img) = mt_kernel::images::decode(&t.data) else {
         return false;
     };
     let color = crate::image_entity::average_color(&img.to_rgb8());

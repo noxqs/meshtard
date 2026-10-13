@@ -74,6 +74,8 @@ impl<'a> Zip<'a> {
     const MAX_ENTRY: u64 = 16 * 1024 * 1024 * 1024;
     const MAX_RATIO: u64 = 1000;
     const RATIO_CHECK_FROM: u64 = 1024 * 1024;
+    /// Most bytes reserved up front for an entry.
+    const MAX_PREALLOC: u64 = 64 << 20;
 
     fn new(data: &'a [u8]) -> Result<Self, Error> {
         let mut archive = zip::ZipArchive::new(Cursor::new(data))
@@ -106,7 +108,9 @@ impl<'a> Zip<'a> {
                 )));
             }
         }
-        let mut out = Vec::with_capacity(declared.min(1 << 30) as usize);
+        // The declared size is a hint only (a damaged file can claim a gigabyte in
+        // a few bytes): the vector grows with what really comes out.
+        let mut out = Vec::with_capacity(declared.min(Self::MAX_PREALLOC) as usize);
         match f.read_to_end(&mut out) {
             Ok(_) => Ok(Some(out)),
             Err(_) => Ok(None),

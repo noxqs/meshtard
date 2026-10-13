@@ -60,14 +60,12 @@ impl Worker {
                     let out = match job {
                         Job::Image(key, data) => Done::Image(
                             key,
-                            image::load_from_memory(&data)
+                            mt_kernel::images::decode(&data)
                                 .ok()
                                 .map(|i| i.thumbnail(128, 128).to_rgba8()),
                         ),
                         Job::Skp(path) => {
-                            let model = mt_skp::read(&path)
-                                .ok()
-                                .map(|s| Box::new(mt_kernel::import::from_skp(&s)));
+                            let model = crate::errors::read_skp_model(&path).ok().map(Box::new);
                             Done::Skp(path, model)
                         }
                     };

@@ -397,7 +397,7 @@ fn fold(rec: &FaceRecord, fit: &Plane, out: &mut Vec<Desired>, folds: &mut Vec<(
         }
         at += l.len();
     }
-    let idx = earcutr::earcut(&flat, &starts, 2).unwrap_or_default();
+    let idx = crate::geom::earcut(&flat, &starts).unwrap_or_default();
     // Triangles with their oriented plane.
     let tris: Vec<([usize; 3], Plane)> = idx
         .as_chunks::<3>()

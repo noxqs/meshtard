@@ -242,6 +242,9 @@ pub struct MeshOptions {
     pub merge_coplanar: bool,
 }
 
+/// Largest coordinate (inches) an imported vertex may have: about 25 000 km.
+pub const MAX_COORD: f64 = 1e12;
+
 /// Builds faces from `mesh` in a new collection. `materials` maps the mesh's materials
 /// to model materials. The mesh is healed into valid geometry first
 /// ([`crate::mesh_heal`]): welded, split where sides cross or touch, and with coplanar
@@ -259,7 +262,18 @@ pub fn to_entities(mesh: &Mesh, opts: &MeshOptions, materials: &[MaterialId]) ->
     let mut welder = Welder::default();
     let mut welded: Vec<Option<usize>> = vec![None; mesh.positions.len()];
     let mut pieces = Vec::new();
+    // Damaged files: polygons naming a missing vertex, or one at an infinite, NaN or
+    // absurd position (which the healing's grids cannot hold), are left out.
+    let usable = |i: usize| {
+        i < mesh.positions.len() && {
+            let p = place(i);
+            p.is_finite() && p.abs().max_element() <= MAX_COORD
+        }
+    };
     for (src, poly) in mesh.polygons.iter().enumerate() {
+        if !poly.vertices.iter().all(|&i| usable(i)) {
+            continue;
+        }
         let vs: Vec<usize> = poly
             .vertices
             .iter()
@@ -325,7 +339,7 @@ pub(crate) fn polygon_triangles(points: &[DVec3], plane: &Plane) -> Vec<[usize; 
         .flat_map(|&p| plane.project(p).to_array())
         .collect();
     let fan = || (1..points.len() - 1).map(|k| [0, k, k + 1]).collect();
-    let Ok(idx) = earcutr::earcut(&flat, &[], 2) else {
+    let Ok(idx) = crate::geom::earcut(&flat, &[]) else {
         return fan();
     };
     if idx.is_empty() {

@@ -98,6 +98,16 @@ const FAR: f64 = 1000.0;
 /// Segments around a swept disk tube.
 const TUBE_SEGMENTS: usize = 12;
 const MAX_DEPTH: usize = 32;
+/// Representation items and curves read at least, however few entities the file
+/// has (see `Reader::work`); files get eight per entity.
+const MIN_WORK: usize = 200_000;
+/// Vertices made at least (see `Reader::points`).
+const MIN_POINTS: usize = 10_000_000;
+/// Boolean operations run at least (see `Reader::booleans`).
+const MIN_BOOLEANS: usize = 1000;
+/// Most bytes an IFCZIP's `.ifc` may unpack to: 100 per compressed byte, at least
+/// 16 MiB (text compresses about 10:1).
+const UNZIP_RATIO: u64 = 100;
 
 /// IFC import choices.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -184,11 +194,18 @@ fn unzip(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
         .filter(|n| n.to_ascii_lowercase().ends_with(".ifc"))
         .min()
         .ok_or("no .ifc file in the archive")?;
+    let limit = (bytes.len() as u64)
+        .saturating_mul(UNZIP_RATIO)
+        .max(16 << 20);
     let mut out = Vec::new();
     zip.by_name(&name)
         .map_err(|e| e.to_string())?
+        .take(limit + 1)
         .read_to_end(&mut out)
         .map_err(|e| e.to_string())?;
+    if out.len() as u64 > limit {
+        return Err("the IFCZIP archive unpacks to an implausible size".into());
+    }
     Ok(out.into())
 }
 
@@ -541,7 +558,7 @@ impl Geo {
             all.extend(h.iter().copied());
         }
         let flat: Vec<f64> = all.iter().flat_map(|p| [p.dot(u), p.dot(v)]).collect();
-        let Ok(idx) = earcutr::earcut(&flat, &starts, 2) else {
+        let Ok(idx) = crate::geom::earcut(&flat, &starts) else {
             self.polygon(&outer, material);
             return;
         };
@@ -861,6 +878,17 @@ struct Reader<'a> {
     texture_maps: HashMap<u64, u64>,
     /// (style material, surface texture) -> textured material.
     textured: HashMap<(Option<usize>, u64), Option<usize>>,
+    /// Representation items and curves that may still be read ([`MIN_WORK`]): items
+    /// that name the same item twice (Boolean operands, composite curve segments)
+    /// grow exponentially with nesting.
+    work: usize,
+    /// Boolean operations that may still be run: twice the file's Boolean results
+    /// and [`MIN_BOOLEANS`] more (operands naming the same result again are run
+    /// again, which nesting makes exponential).
+    booleans: usize,
+    /// Vertices the geometry items may still make: [`MIN_POINTS`], or 64 per entity
+    /// (a few bytes can make an item's geometry be made over and over).
+    points: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -894,6 +922,14 @@ impl<'a> Reader<'a> {
             edges: HashMap::new(),
             texture_maps: HashMap::new(),
             textured: HashMap::new(),
+            work: MIN_WORK.max(8 * f.entities.len()),
+            points: MIN_POINTS.max(64 * f.entities.len()),
+            booleans: MIN_BOOLEANS
+                + 2 * f
+                    .entities
+                    .values()
+                    .filter(|e| e.class.starts_with("IFCBOOLEAN"))
+                    .count(),
         };
         r.units();
         r.index();
@@ -1295,9 +1331,15 @@ impl<'a> Reader<'a> {
     // ---- curves and profiles ----
 
     /// A curve as points (2D curves at z = 0).
+    /// Counts one step of [`Self::work`]: `false` when none is left.
+    fn work(&mut self) -> bool {
+        self.work = self.work.saturating_sub(1);
+        self.work > 0
+    }
+
     fn curve(&mut self, v: &Value, depth: usize) -> Option<Vec<DVec3>> {
         let (_, e) = self.get(v)?;
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || !self.work() {
             return None;
         }
         let out = match e.class.as_str() {
@@ -1672,11 +1714,12 @@ impl<'a> Reader<'a> {
     /// Adds item `id` (in the coordinates `xf` maps to the group's) to `geo`.
     fn item(&mut self, id: u64, xf: DMat4, inherited: Option<usize>, geo: &mut Geo, depth: usize) {
         let Some(e) = self.f.get(id) else { return };
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || !self.work() {
             return;
         }
         let style = self.item_style.get(&id).copied().or(inherited);
         let class = e.class.as_str();
+        let before = geo.mesh.positions.len();
         let done = match class {
             "IFCFACETEDBREP" | "IFCFACETEDBREPWITHVOIDS" => {
                 let mut shells = e.arg(0).refs();
@@ -1737,6 +1780,18 @@ impl<'a> Reader<'a> {
             }
             _ => false,
         };
+        // Geometry made by this item itself (operands of Booleans and CSG solids,
+        // and mapped items, count where they are made).
+        if !matches!(
+            class,
+            "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" | "IFCCSGSOLID" | "IFCMAPPEDITEM"
+        ) {
+            let made = geo.mesh.positions.len().saturating_sub(before);
+            self.points = self.points.saturating_sub(made);
+            if self.points == 0 {
+                self.work = 0;
+            }
+        }
         if done {
             self.read(class);
         } else {
@@ -1847,6 +1902,11 @@ impl<'a> Reader<'a> {
         geo: &mut Geo,
         depth: usize,
     ) {
+        if self.booleans == 0 {
+            self.skip(&e.class);
+            return;
+        }
+        self.booleans -= 1;
         let op = match e.arg(0).as_enum() {
             Some("UNION") => Op::Union,
             Some("INTERSECTION") => Op::Intersection,

@@ -279,7 +279,7 @@ impl App {
                         return false;
                     }
                 };
-                if let Err(e) = image::load_from_memory(&data) {
+                if let Err(e) = mt_kernel::images::decode(&data) {
                     self.file_error("open", &path, e);
                     return false;
                 }

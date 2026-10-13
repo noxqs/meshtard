@@ -58,6 +58,34 @@ impl App {
     }
 }
 
+/// Runs a file reader (or the conversion after it) as a last line of defense against
+/// damaged files: readers return errors for what they cannot read, but should one
+/// panic, the panic becomes an error for [`App::file_error`] instead of closing the
+/// app with the open document. The panic is logged.
+pub(crate) fn guard<T, E: Display>(f: impl FnOnce() -> Result<T, E>) -> Result<T, String> {
+    // Readers only build new values from bytes, so nothing half-changed outlives a
+    // panic (callers that change a model in `f` undo it themselves).
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r.map_err(|e| e.to_string()),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_owned());
+            log::error!("a file reader panicked: {msg}");
+            Err(format!(
+                "the file is damaged or not supported (internal error: {msg})"
+            ))
+        }
+    }
+}
+
+/// A `.skp` file read and converted to a model, under [`guard`].
+pub(crate) fn read_skp_model(path: &Path) -> Result<mt_kernel::Model, String> {
+    guard(|| mt_skp::read(path).map(|src| mt_kernel::import::from_skp(&src)))
+}
+
 /// "not a valid file" -> "Not a valid file" (error texts from libraries start in
 /// lower case).
 fn capitalize(s: &str) -> String {
@@ -81,6 +109,14 @@ fn error_icon(ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guard_turns_panics_into_errors() {
+        let r: Result<(), String> = super::guard(|| -> Result<(), String> { panic!("boom") });
+        assert!(r.unwrap_err().contains("boom"));
+        assert_eq!(super::guard(|| Ok::<_, String>(3)), Ok(3));
+        assert_eq!(super::guard(|| Err::<(), _>("bad")), Err("bad".to_owned()));
+    }
+
     #[test]
     fn capitalizes_reasons() {
         assert_eq!(super::capitalize("not valid."), "Not valid");

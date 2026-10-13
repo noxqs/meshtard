@@ -44,6 +44,10 @@ impl Package {
 
     /// A `.mtx` (zip) in memory.
     pub(crate) fn from_zip(bytes: &[u8]) -> Result<Self, String> {
+        crate::errors::guard(|| Self::from_zip_unguarded(bytes))
+    }
+
+    pub(crate) fn from_zip_unguarded(bytes: &[u8]) -> Result<Self, String> {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|e| format!("not a valid .mtx package: {e}"))?;
         if zip.len() > MAX_FILES {
@@ -51,6 +55,7 @@ impl Package {
         }
         let mut files = BTreeMap::new();
         let mut total = 0u64;
+        let mut read = 0u64;
         for i in 0..zip.len() {
             let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
             if f.is_dir() {
@@ -61,7 +66,7 @@ impl Package {
             if f.enclosed_name().is_none() || !crate::library::safe_relative(&name) {
                 return Err(format!("the package has an unsafe path `{name}`"));
             }
-            total += f.size();
+            total = total.saturating_add(f.size());
             if total > MAX_TOTAL {
                 return Err("the package is too large (over 20 MB)".into());
             }
@@ -69,11 +74,16 @@ impl Package {
                 log::info!("extension package: skipping {name}");
                 continue;
             }
+            // Declared sizes can lie: the bytes read count too.
             let mut data = Vec::new();
             (&mut f)
-                .take(MAX_TOTAL)
+                .take(MAX_TOTAL - read + 1)
                 .read_to_end(&mut data)
                 .map_err(|e| e.to_string())?;
+            read += data.len() as u64;
+            if read > MAX_TOTAL {
+                return Err("the package is too large (over 20 MB)".into());
+            }
             files.insert(name, data);
         }
         Self::from_files(files)

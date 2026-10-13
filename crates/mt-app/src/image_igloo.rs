@@ -329,7 +329,7 @@ impl App {
         // One texture decoded per frame keeps the frame time down.
         if let Some(p) = igloo.photos.iter_mut().find(|p| !p.decoded) {
             p.decoded = true;
-            p.texture = image::load_from_memory(&p.data).ok().map(|img| {
+            p.texture = mt_kernel::images::decode(&p.data).ok().map(|img| {
                 let img = img.thumbnail(THUMB, THUMB).to_rgba8();
                 let size = [img.width() as usize, img.height() as usize];
                 let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());

@@ -491,7 +491,7 @@ impl App {
                 .get(tp.material)
                 .and_then(|m| m.texture.as_ref())
                 .map(|t| t.data.clone());
-            if let Some(img) = data.and_then(|d| image::load_from_memory(&d).ok()) {
+            if let Some(img) = data.and_then(|d| mt_kernel::images::decode(&d).ok()) {
                 let rgba = img.to_rgba8();
                 let size = [rgba.width() as usize, rgba.height() as usize];
                 let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());

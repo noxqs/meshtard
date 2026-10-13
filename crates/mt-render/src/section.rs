@@ -222,6 +222,10 @@ pub fn section_fill(triangles: &[[DVec3; 3]], point: DVec3, normal: DVec3) -> Ve
                 ids.push(p);
             }
         }
+        // earcutr panics on NaN or infinite coordinates (damaged files).
+        if flat.iter().any(|c| !c.is_finite() || c.abs() > 1e150) {
+            continue;
+        }
         let Ok(tris) = earcutr::earcut(&flat, &starts, 2) else {
             continue;
         };

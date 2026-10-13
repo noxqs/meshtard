@@ -221,8 +221,21 @@ enum MatKey {
     Texture(String, String),
 }
 
+/// Most bytes the parts read may unpack to: 200 per archive byte, at least 64 MiB
+/// (a zip bomb unpacks a few bytes into gigabytes; XML compresses about 10:1).
+const UNZIP_RATIO: u64 = 200;
+const MIN_UNZIP: u64 = 64 << 20;
+/// Vertices and triangles placed at least (see `Reader::geometry_left`).
+const MIN_GEOMETRY: usize = 1 << 22;
+
 struct Reader<'a> {
     zip: zip::ZipArchive<Cursor<&'a [u8]>>,
+    /// Bytes the parts may still unpack to.
+    unzip_left: u64,
+    /// Vertices and triangles that may still be placed: components copy their
+    /// object's mesh, and nested ones multiply (`MIN_GEOMETRY`, or eight per file
+    /// byte).
+    geometry_left: usize,
     parts: HashMap<String, Part>,
     mesh: Mesh,
     materials: BTreeMap<MatKey, usize>,
@@ -234,9 +247,11 @@ fn norm_path(p: &str) -> String {
 
 impl Reader<'_> {
     fn file(&mut self, path: &str) -> Option<Vec<u8>> {
-        let mut f = self.zip.by_name(&norm_path(path)).ok()?;
+        let f = self.zip.by_name(&norm_path(path)).ok()?;
         let mut out = Vec::new();
-        f.read_to_end(&mut out).ok()?;
+        f.take(self.unzip_left + 1).read_to_end(&mut out).ok()?;
+        // Past the limit the part counts as missing.
+        self.unzip_left = self.unzip_left.checked_sub(out.len() as u64)?;
         Some(out)
     }
 
@@ -304,6 +319,10 @@ impl Reader<'_> {
         let Some(obj) = self.parts[path].objects.get(id).cloned() else {
             return Err(format!("3MF: missing object {id}"));
         };
+        self.geometry_left = self
+            .geometry_left
+            .checked_sub(1 + obj.vertices.len() + obj.triangles.len())
+            .ok_or("3MF: too much geometry (components placed too many times)")?;
         let base = self.mesh.positions.len();
         self.mesh
             .positions
@@ -364,6 +383,10 @@ pub fn parse(bytes: &[u8]) -> Result<(Mesh, Hints), String> {
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a 3MF file: {e}"))?;
     let mut r = Reader {
         zip,
+        unzip_left: (bytes.len() as u64)
+            .saturating_mul(UNZIP_RATIO)
+            .max(MIN_UNZIP),
+        geometry_left: MIN_GEOMETRY.max(bytes.len().saturating_mul(8)),
         parts: HashMap::new(),
         mesh: Mesh::default(),
         materials: BTreeMap::new(),
@@ -634,5 +657,15 @@ mod tests {
         assert_eq!(mesh.materials[1].color, [0, 0, 255]);
         assert!((mesh.materials[1].opacity - 128.0 / 255.0).abs() < 1e-9);
         assert!(parse(b"not a zip").is_err());
+    }
+
+    /// A zip bomb (a few hundred kilobytes unpacking to 80 MB) is refused instead of
+    /// read.
+    #[test]
+    fn zip_bombs_are_refused() {
+        let model = vec![b' '; 80 << 20];
+        let bytes = write_zip(&[("3D/3dmodel.model".into(), model)]).unwrap();
+        assert!(bytes.len() < 1 << 20);
+        assert!(parse(&bytes).unwrap_err().contains("missing part"));
     }
 }

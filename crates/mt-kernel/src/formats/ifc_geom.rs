@@ -548,7 +548,7 @@ pub(crate) fn surface_triangles(
     if tris.is_none() {
         extra.clear();
         let flat: Vec<f64> = boundary.iter().flat_map(|p| [p.x, p.y]).collect();
-        let idx = earcutr::earcut(&flat, &starts[1..], 2).ok()?;
+        let idx = crate::geom::earcut(&flat, &starts[1..]).ok()?;
         tris = Some(
             idx.as_chunks::<3>()
                 .0

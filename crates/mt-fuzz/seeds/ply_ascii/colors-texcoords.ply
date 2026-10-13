@@ -1,0 +1,21 @@
+ply
+format ascii 1.0
+comment TextureFile tex.png
+element vertex 4
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+element face 2
+property list uchar int vertex_indices
+property list uchar float texcoord
+property int texnumber
+end_header
+0 0 0 255 0 0
+1 0 0 0 255 0
+1 1 0 0 0 255
+0 1 0 9 9 9
+3 0 1 2 6 0 0 1 0 1 1 0
+4 0 2 3 1 8 0 0 1 1 0 1 1 1 0

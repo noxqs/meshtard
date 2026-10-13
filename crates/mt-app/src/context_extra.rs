@@ -900,8 +900,8 @@ impl App {
         ) else {
             return;
         };
-        let src = match mt_skp::read(&path) {
-            Ok(s) => mt_kernel::import::from_skp(&s),
+        let src = match crate::errors::read_skp_model(&path) {
+            Ok(m) => m,
             Err(e) => {
                 self.file_error("open", &path, e);
                 return;

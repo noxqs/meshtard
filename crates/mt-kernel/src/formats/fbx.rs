@@ -130,7 +130,7 @@ pub fn parse_tree(bytes: &[u8]) -> Result<(u32, Vec<Node>), String> {
         };
         let mut nodes = Vec::new();
         while r.pos < bytes.len() {
-            match r.node()? {
+            match r.node(0)? {
                 Some(n) => nodes.push(n),
                 None => break,
             }
@@ -167,6 +167,24 @@ pub fn parse_tree(bytes: &[u8]) -> Result<(u32, Vec<Node>), String> {
     Ok((version, nodes))
 }
 
+/// Vertex coordinates and corners an FBX scene may place at least (see
+/// `parse_scene`); files get eight per byte.
+const MIN_GEOMETRY: usize = 1 << 24;
+
+/// How many numbers a node holds: its array property's, else its properties'.
+fn values(n: &Node) -> usize {
+    match n.props.first() {
+        Some(Prop::Ints(v)) => v.len(),
+        Some(Prop::Floats(v)) => v.len(),
+        _ => n.props.len(),
+    }
+}
+
+/// Deepest node nesting read (files have a handful of levels).
+const MAX_DEPTH: usize = 64;
+/// Most elements of an array property (read as 8-byte values: 256 MiB).
+const MAX_ARRAY: usize = 1 << 25;
+
 struct Binary<'a> {
     d: &'a [u8],
     pos: usize,
@@ -177,8 +195,9 @@ struct Binary<'a> {
 impl Binary<'_> {
     fn take(&mut self, n: usize) -> Result<&[u8], String> {
         let s = self
-            .d
-            .get(self.pos..self.pos + n)
+            .pos
+            .checked_add(n)
+            .and_then(|end| self.d.get(self.pos..end))
             .ok_or("truncated FBX data")?;
         self.pos += n;
         Ok(s)
@@ -196,10 +215,13 @@ impl Binary<'_> {
         }
     }
 
-    /// The next node, or `None` at a null record.
-    fn node(&mut self) -> Result<Option<Node>, String> {
-        let end = self.word()? as usize;
-        let count = self.word()? as usize;
+    /// The next node, or `None` at a null record. `depth`: the nodes above it.
+    fn node(&mut self, depth: usize) -> Result<Option<Node>, String> {
+        if depth > MAX_DEPTH {
+            return Err("FBX nesting too deep".into());
+        }
+        let end = usize::try_from(self.word()?).map_err(|_| "bad FBX record")?;
+        let count = self.word()?;
         let _len = self.word()?;
         let name_len = self.take(1)?[0] as usize;
         if end == 0 {
@@ -209,13 +231,13 @@ impl Binary<'_> {
             return Err("bad FBX record".into());
         }
         let name = String::from_utf8_lossy(self.take(name_len)?).into_owned();
-        let mut props = Vec::with_capacity(count.min(64));
+        let mut props = Vec::with_capacity(count.min(64) as usize);
         for _ in 0..count {
             props.push(self.prop()?);
         }
         let mut children = Vec::new();
         while self.pos < end {
-            match self.node()? {
+            match self.node(depth + 1)? {
                 Some(n) => children.push(n),
                 None => break,
             }
@@ -261,10 +283,15 @@ impl Binary<'_> {
                     b'f' | b'i' => 4,
                     _ => 1,
                 };
+                if n > MAX_ARRAY {
+                    return Err("FBX array too large".into());
+                }
                 let raw = self.take(clen)?;
                 let data = if encoding == 1 {
-                    let mut out = Vec::with_capacity(n * size);
+                    // Bounded: a few compressed bytes can claim gigabytes.
+                    let mut out = Vec::with_capacity((n * size).min(clen.saturating_mul(16)));
                     flate2::read::ZlibDecoder::new(raw)
+                        .take((n * size) as u64)
                         .read_to_end(&mut out)
                         .map_err(|e| format!("FBX array: {e}"))?;
                     out
@@ -812,7 +839,18 @@ pub fn parse_scene(bytes: &[u8], read: ReadFile) -> Result<(Scene, Hints), Strin
         }
     }
 
+    // Geometry shared by many models is copied for each: a small file can name a
+    // large mesh thousands of times.
+    let mut budget = MIN_GEOMETRY.max(bytes.len().saturating_mul(8));
     for (geom, model) in placed {
+        let cost = ["Vertices", "PolygonVertexIndex"]
+            .iter()
+            .filter_map(|n| geom.child(n))
+            .map(values)
+            .sum::<usize>();
+        budget = budget
+            .checked_sub(cost)
+            .ok_or("FBX: too much geometry (a mesh used by too many models)")?;
         let xf = axes
             * model.map_or(DMat4::IDENTITY, |(k, m)| {
                 doc.global_transform(k, m, 0) * geometric_transform(m)

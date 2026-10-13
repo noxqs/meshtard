@@ -36,13 +36,18 @@ pub(crate) struct ZipStyle {
 
 /// The largest archive entry read (bytes).
 const MAX_ENTRY: u64 = 64 << 20;
+/// Most bytes read from all entries.
+const MAX_TOTAL: u64 = 256 << 20;
+/// Most entries looked at.
+const MAX_ENTRIES: usize = 10_000;
 
 /// Reads a SketchUp `.style` archive.
 pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
     let mut zip =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("not a style file: {e}"))?;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for i in 0..zip.len() {
+    let mut total = 0u64;
+    for i in 0..zip.len().min(MAX_ENTRIES) {
         let Ok(mut f) = zip.by_index(i) else { continue };
         if f.is_dir() || f.size() > MAX_ENTRY {
             continue;
@@ -50,8 +55,14 @@ pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
         let Ok(name) = f.name().map(|n| n.replace('\\', "/")) else {
             continue;
         };
+        // The declared size can lie: read no more than the limits allow.
         let mut bytes = Vec::new();
-        if f.read_to_end(&mut bytes).is_ok() {
+        let room = MAX_TOTAL.saturating_sub(total).min(MAX_ENTRY);
+        if (&mut f).take(room + 1).read_to_end(&mut bytes).is_ok() {
+            if bytes.len() as u64 > room {
+                return Err("the style file is too large".into());
+            }
+            total += bytes.len() as u64;
             files.push((name, bytes));
         }
     }

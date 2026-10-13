@@ -209,7 +209,7 @@ pub fn interior_point(outer: &[DVec2], holes: &[&Vec<DVec2>]) -> DVec2 {
         flat.extend(h.iter().flat_map(|p| [p.x, p.y]));
     }
     let at = |i: usize| DVec2::new(flat[2 * i], flat[2 * i + 1]);
-    let tris = earcutr::earcut(&flat, &starts, 2).unwrap_or_default();
+    let tris = crate::geom::earcut(&flat, &starts).unwrap_or_default();
     let mut tris: Vec<(DVec2, DVec2, DVec2)> = tris
         .as_chunks::<3>()
         .0

@@ -138,7 +138,7 @@ const BLUE: egui::Color32 = egui::Color32::from_rgb(0, 0, 230);
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(240, 200, 0);
 
 fn decode(data: &[u8]) -> Option<image::RgbaImage> {
-    image::load_from_memory(data).ok().map(|i| i.to_rgba8())
+    mt_kernel::images::decode(data).ok().map(|i| i.to_rgba8())
 }
 
 impl Edit {
@@ -227,7 +227,7 @@ impl App {
             Ok(d) => d.into(),
             Err(e) => return self.file_error("open", path, e),
         };
-        let size = match image::load_from_memory(&data) {
+        let size = match mt_kernel::images::decode(&data) {
             Ok(i) => DVec2::new(f64::from(i.width()), f64::from(i.height())),
             Err(e) => return self.file_error("open", path, e),
         };

@@ -82,10 +82,7 @@ fn asset_for(path: &Path) -> Asset {
 /// File > Import defaults.
 pub(crate) fn load_model(path: &Path) -> Result<mt_kernel::Model, String> {
     match ext(path).as_str() {
-        "skp" => {
-            let src = mt_skp::read(path).map_err(|e| e.to_string())?;
-            Ok(mt_kernel::import::from_skp(&src))
-        }
+        "skp" => crate::errors::read_skp_model(path),
         "glb" | "gltf" => crate::import::read_gltf(path, true),
         e => {
             let kind = mt_kernel::formats::Kind::from_extension(e)

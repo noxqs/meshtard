@@ -235,8 +235,7 @@ impl Grid {
         'boxes: for (i, (a, b)) in boxes.iter().enumerate() {
             for (level, pairs) in pairs.iter_mut().enumerate() {
                 let (lo, hi) = (grid.key(*a, level), grid.key(*b, level));
-                let n = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
-                if n > Self::MAX_CELLS {
+                if cell_count(lo, hi) > i128::from(Self::MAX_CELLS) {
                     continue;
                 }
                 for x in lo[0]..=hi[0] {
@@ -334,8 +333,7 @@ impl Grid {
                 [k.x as i64, k.y as i64, k.z as i64]
             };
             let (lo, hi) = (key(a), key(b));
-            let n = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
-            if n > (cells.len() as i64).min(4096) {
+            if cell_count(lo, hi) > (cells.len() as i128).min(4096) {
                 // A query box this large: walk the filled cells instead.
                 for (k, &(from, to)) in cells {
                     if (0..3).all(|d| lo[d] <= k[d] && k[d] <= hi[d]) {
@@ -355,6 +353,14 @@ impl Grid {
             }
         }
     }
+}
+
+/// Cells from `lo` to `hi` (inclusive), without overflow: coordinates from damaged
+/// files can make keys `i64::MIN` and `i64::MAX`.
+fn cell_count(lo: [i64; 3], hi: [i64; 3]) -> i128 {
+    (0..3)
+        .map(|k| (i128::from(hi[k]) - i128::from(lo[k]) + 1).max(0))
+        .fold(1i128, i128::saturating_mul)
 }
 
 pub(crate) fn overlaps(a: &(DVec3, DVec3), b: &(DVec3, DVec3)) -> bool {
