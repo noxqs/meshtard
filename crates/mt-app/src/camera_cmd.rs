@@ -60,7 +60,14 @@ pub(crate) fn scene_bounds(scene: &crate::document::Scene) -> Option<(DVec3, DVe
         .edges
         .iter()
         .flat_map(|s| [s.a, s.b])
-        .chain(scene.vertices.iter().map(|v| v.position));
+        // Every face vertex, as drawn (single precision).
+        .chain(
+            scene
+                .triangles
+                .iter()
+                .flatten()
+                .map(|p| p.as_vec3().to_array()),
+        );
     let mut min = DVec3::splat(f64::INFINITY);
     let mut max = DVec3::splat(f64::NEG_INFINITY);
     for p in points {

@@ -32,6 +32,7 @@ mod grips;
 mod image_entity;
 mod image_igloo;
 mod import;
+mod instancing;
 mod label_fonts;
 mod lasso;
 mod library;
@@ -755,8 +756,7 @@ impl App {
             model_axes::apply(&doc.model, &mut style, &mut self.engine);
             self.viewport.set_style(device, style);
         }
-        self.viewport
-            .set_faces(device, &self.scene.vertices, &self.scene.indices);
+        instancing::upload_faces(&mut self.viewport, device, &self.scene);
         let casters = self.scene.shadow_casters();
         let caster_indices: &[u32] = if casters.is_some() {
             &self.scene.indices
@@ -832,7 +832,7 @@ impl App {
     /// the component's axes, as SketchUp does). Targets drawn live by a modify tool
     /// (`self.live`) are drawn at their transformed position.
     fn update_highlight(&mut self, device: &wgpu::Device) {
-        let (edges, vertices) = live_view::Highlight {
+        let (edges, vertices, instanced) = live_view::Highlight {
             scene: &self.scene,
             selection: &self.selection,
             document: self.document.as_ref(),
@@ -849,6 +849,8 @@ impl App {
         self.viewport
             .set_selected_faces(device, &vertices, &indices);
         self.viewport.set_edges(device, &edges);
+        let instances = self.scene.gpu_instances(instanced);
+        self.viewport.set_edge_instances(device, &instances);
     }
 
     /// Draws the targets of Move, Rotate or Scale at the transformed position while
@@ -875,13 +877,21 @@ impl App {
         if hidden(&self.live) != hide {
             match &hide {
                 Some(targets) => {
-                    let indices = live_view::kept_indices(&self.scene, targets, &stretch);
+                    let (indices, placements) =
+                        live_view::kept_indices(&self.scene, targets, &stretch);
                     self.viewport
                         .set_faces(device, &self.scene.vertices, &indices);
+                    let instances = self.scene.gpu_instances(placements);
+                    self.viewport.set_face_instances(device, &instances);
                 }
-                None => self
-                    .viewport
-                    .set_faces(device, &self.scene.vertices, &self.scene.indices),
+                None => {
+                    self.viewport
+                        .set_faces(device, &self.scene.vertices, &self.scene.indices);
+                    let all = self
+                        .scene
+                        .gpu_instances(0..self.scene.instancing.placements.len());
+                    self.viewport.set_face_instances(device, &all);
+                }
             }
         }
         match &want {

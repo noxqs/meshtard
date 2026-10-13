@@ -53,7 +53,7 @@ fn polygon(ents: &mut Entities, vs: &[VertexId]) {
 }
 
 /// A box of size `s` at `o`.
-fn add_box(ents: &mut Entities, o: DVec3, s: DVec3) {
+pub(crate) fn add_box(ents: &mut Entities, o: DVec3, s: DVec3) {
     let p = |x: f64, y: f64, z: f64| o + s * DVec3::new(x, y, z);
     let v: Vec<VertexId> = [
         p(0., 0., 0.),
@@ -80,7 +80,7 @@ fn add_box(ents: &mut Entities, o: DVec3, s: DVec3) {
     }
 }
 
-fn instance(definition: mt_kernel::DefinitionId, transform: DMat4) -> Instance {
+pub(crate) fn instance(definition: mt_kernel::DefinitionId, transform: DMat4) -> Instance {
     Instance {
         definition,
         transform,
@@ -93,7 +93,7 @@ fn instance(definition: mt_kernel::DefinitionId, transform: DMat4) -> Instance {
     }
 }
 
-fn definition(name: &str, entities: Entities, is_group: bool) -> Definition {
+pub(crate) fn definition(name: &str, entities: Entities, is_group: bool) -> Definition {
     Definition {
         name: name.into(),
         entities,
@@ -126,7 +126,7 @@ fn grid(n: usize) -> Model {
 }
 
 /// `count` instances of one box component in a square layout.
-fn instances(count: usize) -> Model {
+pub(crate) fn instances(count: usize) -> Model {
     let mut model = Model::default();
     let mut ents = Entities::default();
     add_box(&mut ents, DVec3::ZERO, DVec3::splat(20.0));
@@ -223,11 +223,15 @@ fn fnv(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-/// Checksum of what the scene draws and how it is picked.
+/// Checksum of what the scene draws and how it is picked. Instanced triangles count
+/// as their flattened vertices (the checksum of the same scene drawn without
+/// instancing), so instancing is checked to draw exactly what flattening does.
 pub fn checksum(scene: &Scene) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325;
-    fnv(&mut h, bytemuck::cast_slice(&scene.vertices));
-    fnv(&mut h, bytemuck::cast_slice(&scene.indices));
+    let vertices = scene.flattened_vertices();
+    fnv(&mut h, bytemuck::cast_slice(&vertices));
+    let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+    fnv(&mut h, bytemuck::cast_slice(&indices));
     fnv(&mut h, bytemuck::cast_slice(&scene.edges));
     fnv(&mut h, bytemuck::cast_slice(&scene.guides));
     fnv(
@@ -251,6 +255,45 @@ pub fn checksum(scene: &Scene) -> u64 {
         fnv(&mut h, format!("{c:?}").as_bytes());
     }
     h
+}
+
+/// Bytes of the scene's per-triangle and per-edge lists (and instanced meshes).
+fn scene_bytes(scene: &Scene) -> usize {
+    use std::mem::size_of_val;
+    let meshes: usize = (scene.instancing.meshes.iter())
+        .map(|m| {
+            size_of_val(&m.vertices[..]) * 2
+                + size_of_val(&m.indices[..])
+                + size_of_val(&m.edges[..])
+        })
+        .sum();
+    meshes
+        + size_of_val(&scene.instancing.placements[..])
+        + size_of_val(&scene.vertices[..])
+        + size_of_val(&scene.indices[..])
+        + size_of_val(&scene.triangles[..])
+        + size_of_val(&scene.tri_owner[..])
+        + size_of_val(&scene.tri_material[..])
+        + size_of_val(&scene.edges[..])
+        + size_of_val(&scene.edge_owner[..])
+}
+
+/// Bytes of the vertex, index, edge and instance buffers uploaded for the scene.
+fn gpu_bytes(scene: &Scene) -> usize {
+    use std::mem::size_of_val;
+    let (edges, instanced) = scene.flat_edges();
+    let meshes: usize = (scene.instancing.meshes.iter())
+        .map(|m| {
+            size_of_val(&m.vertices[..]) + size_of_val(&m.indices[..]) + size_of_val(&m.edges[..])
+        })
+        .sum();
+    // One transform per face instance, six per edge instance.
+    let instances = 64 * (scene.instancing.placements.len() + 6 * instanced.len());
+    size_of_val(&scene.vertices[..])
+        + size_of_val(&scene.indices[..])
+        + size_of_val(&edges[..])
+        + meshes
+        + instances
 }
 
 struct Gpu {
@@ -326,6 +369,11 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         scene.triangles.len(),
         checksum(&scene)
     );
+    eprintln!(
+        "bench: {name}: scene {:.1} MB, GPU buffers {:.1} MB",
+        scene_bytes(&scene) as f64 / 1e6,
+        gpu_bytes(&scene) as f64 / 1e6
+    );
     let bvh = report.time(name, "pick index (BVH)", || {
         Bvh::build(scene.triangles.clone())
     });
@@ -354,8 +402,10 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         let mut vp =
             mt_render::Viewport::new(&g.device, mt_render::Style::from_spec(&spec.default_model));
         report.time(name, "GPU upload", || {
-            vp.set_faces(&g.device, &scene.vertices, &scene.indices);
-            vp.set_edges(&g.device, &scene.edges);
+            crate::instancing::upload_faces(&mut vp, &g.device, &scene);
+            let (edges, instanced) = scene.flat_edges();
+            vp.set_edges(&g.device, &edges);
+            vp.set_edge_instances(&g.device, &scene.gpu_instances(instanced));
             g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         });
         // First frame builds pipelines and targets.

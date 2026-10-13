@@ -522,28 +522,34 @@ impl App {
         match want {
             Some(i) => {
                 let me = Some(Owner::Instance(i));
-                let mut kept = Vec::new();
                 let mut vertices = Vec::new();
                 for (t, owner) in self.scene.tri_owner.iter().enumerate() {
-                    let tri = &self.scene.indices[3 * t..3 * t + 3];
                     if *owner == me {
-                        for &k in tri {
-                            let mut v = self.scene.vertices[k as usize];
+                        for mut v in self.scene.tri_vertices(t) {
                             v.front[3] *= TRANSPARENT_ALPHA;
                             v.back[3] *= TRANSPARENT_ALPHA;
                             vertices.push(v);
                         }
-                    } else {
-                        kept.extend_from_slice(tri);
                     }
                 }
+                let (kept, placements) = (crate::live_view::kept_indices)(
+                    &self.scene,
+                    &[Owner::Instance(i)],
+                    &Default::default(),
+                );
                 self.viewport.set_faces(device, &self.scene.vertices, &kept);
+                let instances = self.scene.gpu_instances(placements);
+                self.viewport.set_face_instances(device, &instances);
                 let indices: Vec<u32> = (0..vertices.len() as u32).collect();
                 self.viewport.set_preview_faces(device, &vertices, &indices);
             }
             None => {
                 self.viewport
                     .set_faces(device, &self.scene.vertices, &self.scene.indices);
+                let all = self
+                    .scene
+                    .gpu_instances(0..self.scene.instancing.placements.len());
+                self.viewport.set_face_instances(device, &all);
                 self.viewport.set_preview_faces(device, &[], &[]);
             }
         }
