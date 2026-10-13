@@ -1,12 +1,19 @@
 name: Release
 
-# Pushing a tag like v0.1.0, or running this workflow by hand with a tag name,
-# builds the release binaries and publishes a GitHub release with them, using
-# docs/releases/<tag>.md as the notes. Run by hand, the tag is created on the
-# commit that was built. Tags with a hyphen (v0.2.0-rc1) and 0.x versions are
-# marked as pre-releases.
+# Publishes a GitHub release with the Windows, macOS and Linux binaries and
+# docs/releases/<tag>.md as the notes. Three ways to start it:
+# - automatically: when CI passes on the release branch and the workspace version
+#   (Cargo.toml) has no release yet but has its notes file, that commit is released
+#   as v<version>;
+# - pushing a tag like v0.1.0;
+# - by hand (Run workflow) with a tag name and optionally a commit.
+# Tags with a hyphen (v0.2.0-rc1) and 0.x versions are marked as pre-releases.
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [claude/sketchup-reverse-engineer-plan-j209rc]
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -25,7 +32,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  decide:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.d.outputs.tag }}
+      sha: ${{ steps.d.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+      - id: d
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          CI_RESULT: ${{ github.event.workflow_run.conclusion }}
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          IN_TAG: ${{ inputs.tag }}
+          IN_SHA: ${{ inputs.sha }}
+        run: |
+          case "$EVENT" in
+            workflow_run)
+              [ "$CI_RESULT" = success ] && [ "$CI_EVENT" = push ] || { echo "CI not a green push"; exit 0; }
+              ver=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+              tag="v$ver"
+              [ -f "docs/releases/$tag.md" ] || { echo "no notes for $tag"; exit 0; }
+              if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                echo "$tag already released"; exit 0
+              fi
+              sha="$RUN_SHA" ;;
+            workflow_dispatch) tag="$IN_TAG"; sha="${IN_SHA:-$GITHUB_SHA}" ;;
+            *) tag="$GITHUB_REF_NAME"; sha="$GITHUB_SHA" ;;
+          esac
+          echo "releasing $tag from $sha"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: decide
+    if: needs.decide.outputs.tag != ''
     strategy:
       matrix:
         include:
@@ -42,7 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ needs.decide.outputs.sha }}
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p mt-app ${{ matrix.features }}
@@ -66,12 +111,12 @@ jobs:
           path: ${{ matrix.name }}.*
 
   release:
-    needs: build
+    needs: [decide, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ needs.decide.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -79,8 +124,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
-          TARGET: ${{ inputs.sha || github.sha }}
+          TAG: ${{ needs.decide.outputs.tag }}
+          TARGET: ${{ needs.decide.outputs.sha }}
         run: |
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
