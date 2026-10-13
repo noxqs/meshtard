@@ -55,6 +55,7 @@ Each model is saved to `.skp` and opened again, then:
 | move preview (1/10) | one mouse move of Move with a tenth of everything selected: stretch of connected geometry, the kept and moved triangles, the highlight | every mouse move while Move, Rotate or Scale runs |
 | undo snapshot (first), move commit, undo snapshot (after an edit) | `Document::snapshot` alone (the first undo step copies everything), the Move itself (`Document::edit`, which takes an undo step), and the undo step the next edit would take (it copies only what the Move changed) | every edit |
 | rebuild after move, undo | `Document::scene` after the move (with the triangles kept from the first build), then Edit > Undo | after an edit |
+| small edit, undo snapshot (after a small edit), undo (small edit) | Move of one of the moved entities, the undo step the next edit would take, then Edit > Undo | every small edit |
 
 Each model also prints a checksum of its scene (every vertex, index, edge, owner,
 material, hidden edge and container; instanced triangles count as their flattened
@@ -392,6 +393,114 @@ bound by vertex and fragment work, shows no change.
    kept placements); the highlight draws selected and moving placements' edges
    flattened (with their selection color) and the rest instanced.
 
+## Third round: undo steps below the collection level
+
+The second round shared unchanged collections between undo steps, but an edit of a
+huge single context still copied all of it into the next step (grid: ~0.15 s per step
+on a quiet machine, ~0.3 to 0.6 s on a loaded one), and undoing such a step copied it
+back.
+
+### Options
+
+- **(a) Persistent chunked storage** for the vertex, edge and face slot maps: chunks
+  behind `Arc`s, copied on the first write after a copy. Tried first (a `ChunkMap`
+  with `slotmap`'s keys, versions and free list): undo steps were nearly free, but
+  every read went through the chunk table and every write checked the chunk's kind.
+  Random reads measured 10 to 30% slower and writes up to 60% slower in a
+  micro-benchmark, and the grid's generation ~10% slower. Rejected: kernel operations
+  must not get slower.
+- **(b) An operation log per edit** (changed slots before and after, recorded inside
+  `Document::edit`): every kernel write would have to go through a logging layer
+  anyway, and writes made outside `Document::edit` (Scenes, Texture Position's
+  preview, tests) would be missed unless logged too, which needs the same wrapper as
+  (c) plus replaying in both directions.
+- **(c) Dirty tracking** in the slot maps, with snapshots that share unchanged chunks:
+  chosen. Reads are exactly `SlotMap`'s (flat storage), a write sets one flag, and no
+  write can escape it, wherever it is made.
+
+### What changed
+
+1. **`mt_kernel::slot_store::SlotStore`** replaces `slotmap::SlotMap` for an
+   `Entities`' vertices, edges, faces and curves. It is the same flat slot map (same
+   keys, versions, free list and iteration order; its `Debug` output is
+   `SlotMap`'s, so the `.skp` checksum test, which hashes model dumps, is unchanged)
+   plus one flag per chunk of 256 slots, set by every `&mut` access (`get_mut`,
+   `IndexMut`, `insert`, `remove`, `retain`, `iter_mut`, `values_mut`).
+   `SlotStore::freeze` returns a `Snapshot` (the slots as shared, immutable chunks):
+   clean chunks are taken from the previous snapshot as they are (a reference
+   count), dirty ones are compared with it and copied only when they differ.
+   `SlotStore::thaw` makes the store equal to a snapshot again, rewriting only the
+   chunks that differ from its own last snapshot. Construction sites are unchanged
+   (`Entities` is still built by `Default`; the API is `SlotMap`'s).
+2. **`Entities::freeze` / `thaw` / `swap_to`** and `EntitiesSnapshot`: a collection's
+   state for undo is its three map snapshots plus a copy of the rest (instances,
+   curves, guides, annotations; small, copied whole when it changed). A thaw that
+   changes anything drops the spatial index, freed on another thread (a million
+   edges: ~0.2 s).
+3. **Undo steps** (`mt-app/src/undo.rs`) hold one `Arc<EntitiesSnapshot>` per
+   collection. Taking a step freezes each collection (a clean collection reuses its
+   last snapshot: no comparison any more); undo and redo freeze the current state and
+   thaw the target in place (`swap_to`), so they cost what differs between the two
+   states. The flags replace the full comparisons of the second round as the
+   guarantee that changes made without an undo step are never lost.
+4. The benchmark has three more stages: a **small edit** (moving one entity), the undo
+   step after it, and its undo.
+
+### Results
+
+`MESHTARD_BENCH_NO_GPU=1`, before (`bc0788b`) and after run back to back on a quieter
+machine than the second round's (load ~1.5, 4 cores), same scene and hover checksums
+for every model.
+
+| stage | grid 1M edges | instances 10k | groups 5k | nested 4^6 | coedge_orientation_regression.skp | gondola_v20.skp | Sponza.gltf | bridge.ifc | landscaping.ifc |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| undo snapshot (after a small edit) | 139 ms → 1.1 ms (126x) | 0.79 ms → 0.92 ms (~) | 38 ms → 27 ms (1.4x) | 0.07 ms → 0.02 ms (~) | 7.9 ms → 1.3 ms (6.1x) | 0.67 ms → 0.10 ms (6.7x) | 20 ms → 0.21 ms (94x) | 1.4 ms → 0.24 ms (5.8x) | 2.7 ms → 0.53 ms (5.1x) |
+| undo (small edit) | 132 ms → 0.74 ms (179x) | 0.44 ms → 1.2 ms (0.37x) | 13 ms → 9.9 ms (~) | 0.06 ms → 0.03 ms (~) | 3.8 ms → 0.75 ms (5.0x) | 0.44 ms → 0.08 ms (~) | 17 ms → 0.37 ms (47x) | 0.72 ms → 0.52 ms (1.4x) | 1.6 ms → 0.36 ms (4.5x) |
+| small edit | 900 ms → 909 ms (~) | 1.5 ms → 3.7 ms (0.40x) | 14 ms → 11 ms (~) | 0.25 ms → 0.08 ms (~) | 3.7 ms → 1.1 ms (3.2x) | 1.1 ms → 0.31 ms (3.7x) | 20 ms → 0.39 ms (50x) | 1.4 ms → 0.41 ms (3.3x) | 2.3 ms → 0.58 ms (3.9x) |
+| undo snapshot (after an edit) | 158 ms → 37 ms (4.2x) | 1.1 ms → 0.87 ms (~) | 20 ms → 11 ms (1.9x) | 0.04 ms → 0.02 ms (~) | 3.5 ms → 0.57 ms (6.2x) | 0.34 ms → 0.05 ms (~) | 23 ms → 0.34 ms (68x) | 0.65 ms → 0.09 ms (7.2x) | 1.6 ms → 0.24 ms (6.5x) |
+| undo | 0.21 ms → 49 ms (slower) | 0.84 ms → 1.4 ms (0.60x) | 11 ms → 11 ms (~) | 0.16 ms → 0.06 ms (~) | 3.2 ms → 2.9 ms (~) | 0.79 ms → 0.16 ms (4.9x) | 18 ms → 0.81 ms (22x) | 0.95 ms → 0.21 ms (4.5x) | 7.9 ms → 0.33 ms (24x) |
+| move commit | 4.85 s → 4.72 s (~) | 2.6 ms → 2.5 ms (~) | 50 ms → 9.8 ms (5.1x) | 0.05 ms → 0.03 ms (~) | 3.3 ms → 0.57 ms (5.8x) | 0.65 ms → 0.11 ms (5.9x) | 17 ms → 0.34 ms (51x) | 1.2 ms → 0.13 ms (9.0x) | 1.6 ms → 0.31 ms (5.1x) |
+| undo snapshot (first) | 128 ms → 180 ms (~) | 1.2 ms → 0.83 ms (~) | 33 ms → 34 ms (~) | 0.16 ms → 0.07 ms (~) | 20 ms → 13 ms (1.6x) | 1.6 ms → 1.9 ms (~) | 60 ms → 42 ms (1.4x) | 2.9 ms → 2.6 ms (~) | 4.6 ms → 6.3 ms (~) |
+
+Reading the rows:
+
+- The grid's **small edit** step goes from a copy of the whole context to ~1 ms, and
+  its undo from ~0.13 s to under a millisecond. The Move of a tenth of the grid
+  touches chunks all over the context: its step costs 37 ms instead of ~0.15 s.
+- **Undo after the big Move** got slower (0.2 ms → ~50 ms): before, the undo step
+  had already paid for a full copy, which undo then swapped in; now undo rewrites the
+  chunks the Move changed. Edit plus undo together went from ~0.16 s to ~0.09 s.
+- **Move commit** includes the step taken before the edit, which is now a check of
+  the flags instead of a comparison of every collection (5 to 50x on real files).
+- **instances 10k** is ~1 to 2 ms slower in undo and small edits: its 10,000 instances
+  are "the rest", copied whole into each step that changed one (as before) and now
+  also back on undo (before, undo moved the step's collection in). Splitting the
+  instance list the same way would remove it.
+- **undo snapshot (first)** copies every chunk (no snapshot to share with yet): same
+  as before within noise (repeated runs: 128 to 172 ms before, 130 to 187 ms after).
+
+**Kernel operations.** Reads are `SlotMap`'s; writes set one flag. Repeated
+alternating runs (three each, same binary inputs): scene build, `import::from_skp`
+and the grid's Move commit are the same within noise (scene 316 to 327 ms vs 317 to
+322 ms minimum on a 400 x 400 grid); generating the grid (pure insertion and
+`get_mut`, the most write-heavy path) measured ~3 to 5% slower minimum to minimum,
+and `callgrind` counts ~3% more instructions in it (the flag writes and an extra
+occupancy check per lookup). `SlotStore`'s slots are exactly as big as `SlotMap`'s.
+
+Tests: `slot_store::tests::behaves_as_slotmap` (20,000 random inserts, removes,
+changes and retains against `SlotMap`: same keys, iteration and dump; every snapshot
+keeps its state and thaws back to it exactly; a one-entry change shares all chunks but
+one), `undo::tests::steps_share_untouched_chunks` (5,000 lines, one vertex moved and
+one edge erased without telling the undo code: the step shares all but a few chunks;
+undo and redo restore exact dumps), and
+`undo_and_redo_restore_the_exact_model_after_many_edit_kinds` extended to 19 kinds of
+edit, now including 700 lines (several chunks), an untracked change inside a chunk
+shared with the previous step, erasing from the middle (free list) and drawing into
+the freed slots. Breaking the flags (treating every chunk as clean) makes four of the
+undo tests fail. The app was checked under Xvfb: rectangle, Push/Pull, Move, then
+Edit > Undo / Redo many times; every state renders identically to the same sequence on
+the commit before this change.
+
 ## Left to do
 
 Measured but not changed here, biggest first:
@@ -407,10 +516,10 @@ Measured but not changed here, biggest first:
 - **Move commit on huge flat contexts** (grid: 7-8 s for 100k faces). Spread over
   `transform_vertices`' welding: building the spatial index (`Entities::build_index`),
   `set_vertex_positions` and its `edges_in` / `faces_in` / `edges_near_segment` queries.
-- **Undo steps of huge flat contexts** (grid: ~0.3 s per edit, down from 0.6 s): an
-  edit of a collection copies all of it. Sharing below the collection (per entity, or
-  per chunk of each slot map) would need the kernel's entity storage to change.
-  Undo itself now compares the collections it keeps in place (up to ~25 ms).
+- **Undo of big edits in huge flat contexts** (grid, after moving a tenth of it: ~50
+  ms): undo rewrites every storage chunk the edit changed. Instances, curves, guides
+  and annotations of a collection are still copied whole into a step when any of them
+  changed (instances 10k: ~1 to 2 ms per step and per undo).
 - **Whole-scene rebuilds after small edits.** `App::rebuild` still rebuilds the scene
   (except the kept triangles of unchanged faces), pick index, snap geometry and GPU
   buffers for the whole model after every edit. Going further needs the scene split

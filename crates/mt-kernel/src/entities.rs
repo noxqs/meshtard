@@ -2,10 +2,11 @@
 //! (sticky geometry, auto-face, healing) lives in `ops`.
 
 use glam::{DMat4, DVec2, DVec3};
-use slotmap::{SlotMap, new_key_type};
+use slotmap::new_key_type;
 
 use crate::TOL;
 use crate::geom::Plane;
+use crate::slot_store::{SlotStore, Snapshot};
 
 new_key_type! {
     pub struct VertexId;
@@ -201,11 +202,13 @@ pub struct Instance {
 /// A collection of geometry: the model root or a component definition's contents.
 #[derive(Debug, Default)]
 pub struct Entities {
-    pub vertices: SlotMap<VertexId, Vertex>,
-    pub edges: SlotMap<EdgeId, Edge>,
-    pub faces: SlotMap<FaceId, Face>,
+    /// Vertices, edges and faces are slot maps that know what changed since their last
+    /// snapshot (`slot_store`; see `Entities::freeze`).
+    pub vertices: SlotStore<VertexId, Vertex>,
+    pub edges: SlotStore<EdgeId, Edge>,
+    pub faces: SlotStore<FaceId, Face>,
     pub instances: Vec<Instance>,
-    pub curves: SlotMap<CurveId, Curve>,
+    pub curves: SlotStore<CurveId, Curve>,
     /// Construction guides (Tape Measure, Protractor). Not geometry: they never split
     /// edges or bound faces.
     pub guides: Vec<Guide>,
@@ -238,6 +241,233 @@ impl Entities {
     fn is_large(&self) -> bool {
         self.vertices.len() + self.edges.len() + self.faces.len() >= PARALLEL_MIN
     }
+}
+
+/// The state of an [`Entities`] at [`Entities::freeze`], for undo: its vertices, edges
+/// and faces as [`Snapshot`]s (sharing the chunks an edit did not touch with the
+/// snapshots before) and a copy of the rest.
+pub struct EntitiesSnapshot {
+    vertices: Snapshot<Vertex>,
+    edges: Snapshot<Edge>,
+    faces: Snapshot<Face>,
+    /// Everything else (its slot maps empty).
+    rest: Entities,
+}
+
+impl EntitiesSnapshot {
+    /// [`Entities::size`] of the state held.
+    pub fn size(&self) -> usize {
+        self.vertices.len() + self.edges.len() + self.faces.len() + self.rest.instances.len()
+    }
+
+    /// The state held, as a new collection (a full copy).
+    pub fn to_entities(&self) -> Entities {
+        let mut e = Entities::default();
+        e.thaw(self);
+        e
+    }
+
+    /// The vertices', edges' and faces' snapshots.
+    pub fn maps(&self) -> (&Snapshot<Vertex>, &Snapshot<Edge>, &Snapshot<Face>) {
+        (&self.vertices, &self.edges, &self.faces)
+    }
+}
+
+impl Entities {
+    /// The current state for an undo step. Only the chunks of vertices, edges and faces
+    /// changed since the last `freeze` or `thaw` are copied
+    /// (`slot_store::SlotStore::freeze`), and the rest (instances, curves, guides,
+    /// annotations). When the state is still `prev`'s, that is returned instead.
+    pub fn freeze(
+        &mut self,
+        prev: Option<&std::sync::Arc<EntitiesSnapshot>>,
+    ) -> std::sync::Arc<EntitiesSnapshot> {
+        self.freeze_with(prev, false)
+    }
+
+    /// Makes this collection hold `s`'s state, rewriting only the vertex, edge and face
+    /// chunks that differ (`slot_store::SlotStore::thaw`). The spatial index is
+    /// dropped when anything changed. Returns whether anything did.
+    pub fn thaw(&mut self, s: &EntitiesSnapshot) -> bool {
+        let maps = self.thaw_maps(s);
+        let rest = !same_rest(&s.rest, self);
+        if rest {
+            self.set_rest(s.rest.rest_copy());
+        }
+        self.changed_by_thaw(maps || rest)
+    }
+
+    /// [`Entities::freeze`] then [`Entities::thaw`] (undo and redo): returns the state
+    /// replaced. The instances and annotations, when they differ, are moved into the
+    /// returned snapshot rather than copied.
+    pub fn swap_to(
+        &mut self,
+        s: &EntitiesSnapshot,
+        prev: Option<&std::sync::Arc<EntitiesSnapshot>>,
+    ) -> std::sync::Arc<EntitiesSnapshot> {
+        let rest = !same_rest(&s.rest, self);
+        // When the rest is to be replaced, moving it out is cheaper than checking it
+        // against `prev`'s.
+        let before = self.freeze_with(prev.filter(|_| !rest), rest);
+        let maps = self.thaw_maps(s);
+        if rest {
+            self.set_rest(s.rest.rest_copy());
+        }
+        self.changed_by_thaw(maps || rest);
+        before
+    }
+
+    /// See [`Entities::freeze`]; `take_rest` moves the rest into a new snapshot (and
+    /// leaves it empty here) instead of copying it.
+    fn freeze_with(
+        &mut self,
+        prev: Option<&std::sync::Arc<EntitiesSnapshot>>,
+        take_rest: bool,
+    ) -> std::sync::Arc<EntitiesSnapshot> {
+        let (vertices, edges, faces) = if self.is_large() {
+            let (v, e, f) = (&mut self.vertices, &mut self.edges, &mut self.faces);
+            std::thread::scope(|s| {
+                let e = s.spawn(|| e.freeze());
+                let f = s.spawn(|| f.freeze());
+                let v = v.freeze();
+                (v, e.join().unwrap(), f.join().unwrap())
+            })
+        } else {
+            (
+                self.vertices.freeze(),
+                self.edges.freeze(),
+                self.faces.freeze(),
+            )
+        };
+        if let Some(p) = prev
+            && p.vertices.ptr_eq(&vertices)
+            && p.edges.ptr_eq(&edges)
+            && p.faces.ptr_eq(&faces)
+            && same_rest(&p.rest, self)
+        {
+            return p.clone();
+        }
+        let rest = if take_rest {
+            self.take_rest()
+        } else {
+            self.rest_copy()
+        };
+        std::sync::Arc::new(EntitiesSnapshot {
+            vertices,
+            edges,
+            faces,
+            rest,
+        })
+    }
+
+    /// The vertex, edge and face part of [`Entities::thaw`].
+    fn thaw_maps(&mut self, s: &EntitiesSnapshot) -> bool {
+        if self.is_large() || s.size() >= PARALLEL_MIN {
+            let (v, e, f) = (&mut self.vertices, &mut self.edges, &mut self.faces);
+            std::thread::scope(|sc| {
+                let e = sc.spawn(|| e.thaw(&s.edges));
+                let f = sc.spawn(|| f.thaw(&s.faces));
+                let v = v.thaw(&s.vertices);
+                v | e.join().unwrap() | f.join().unwrap()
+            })
+        } else {
+            self.vertices.thaw(&s.vertices) | self.edges.thaw(&s.edges) | self.faces.thaw(&s.faces)
+        }
+    }
+
+    /// Drops the spatial index when a thaw changed anything; returns `changed`.
+    fn changed_by_thaw(&mut self, changed: bool) -> bool {
+        if changed {
+            // Freeing an index takes a while (a million edges: ~0.2 s, ten thousand
+            // instances: ~4 ms); nothing waits for it.
+            let old = std::mem::take(&mut self.index);
+            if old.grid.is_some() {
+                std::thread::spawn(move || drop(old));
+            }
+        }
+        changed
+    }
+
+    /// Replaces everything but the vertices, edges, faces and the spatial index with
+    /// `r`'s.
+    fn set_rest(&mut self, r: Entities) {
+        let Self {
+            instances,
+            curves,
+            guides,
+            section_planes,
+            active_section,
+            dimensions,
+            texts,
+            snaps,
+            ..
+        } = r;
+        self.instances = instances;
+        self.curves = curves;
+        self.guides = guides;
+        self.section_planes = section_planes;
+        self.active_section = active_section;
+        self.dimensions = dimensions;
+        self.texts = texts;
+        self.snaps = snaps;
+    }
+
+    /// Moves out everything but the vertices, edges, faces and the spatial index.
+    fn take_rest(&mut self) -> Entities {
+        Entities {
+            instances: std::mem::take(&mut self.instances),
+            curves: std::mem::take(&mut self.curves),
+            guides: std::mem::take(&mut self.guides),
+            section_planes: std::mem::take(&mut self.section_planes),
+            active_section: self.active_section.take(),
+            dimensions: std::mem::take(&mut self.dimensions),
+            texts: std::mem::take(&mut self.texts),
+            snaps: std::mem::take(&mut self.snaps),
+            ..Default::default()
+        }
+    }
+
+    /// A copy of everything but the vertices, edges, faces and the spatial index.
+    fn rest_copy(&self) -> Entities {
+        Entities {
+            instances: self.instances.clone(),
+            curves: self.curves.clone(),
+            guides: self.guides.clone(),
+            section_planes: self.section_planes.clone(),
+            active_section: self.active_section,
+            dimensions: self.dimensions.clone(),
+            texts: self.texts.clone(),
+            snaps: self.snaps.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Whether the two hold the same instances, curves, guides and annotations (curves'
+/// free slots included: they decide the keys of curves added later).
+fn same_rest(a: &Entities, b: &Entities) -> bool {
+    let Entities {
+        vertices: _,
+        edges: _,
+        faces: _,
+        instances,
+        curves,
+        guides,
+        section_planes,
+        active_section,
+        dimensions,
+        texts,
+        snaps,
+        index: _,
+    } = a;
+    *instances == b.instances
+        && curves.identical(&b.curves)
+        && *guides == b.guides
+        && *section_planes == b.section_planes
+        && *active_section == b.active_section
+        && *dimensions == b.dimensions
+        && *texts == b.texts
+        && *snaps == b.snaps
 }
 
 /// A copy without the spatial index (see `spatial`). Large collections (an undo step of
@@ -290,9 +520,6 @@ impl Clone for Entities {
 /// Floating-point fields compare as numbers: NaN never equals itself.
 impl PartialEq for Entities {
     fn eq(&self, other: &Self) -> bool {
-        fn same<K: slotmap::Key, V: PartialEq>(a: &SlotMap<K, V>, b: &SlotMap<K, V>) -> bool {
-            a.len() == b.len() && a.iter().eq(b.iter())
-        }
         let Self {
             vertices,
             edges,
@@ -308,7 +535,7 @@ impl PartialEq for Entities {
             index: _,
         } = self;
         let small = *instances == other.instances
-            && same(curves, &other.curves)
+            && curves.same_entries(&other.curves)
             && *guides == other.guides
             && *section_planes == other.section_planes
             && *active_section == other.active_section
@@ -323,15 +550,15 @@ impl PartialEq for Entities {
         }
         if self.is_large() {
             std::thread::scope(|s| {
-                let e = s.spawn(|| same(edges, &other.edges));
-                let f = s.spawn(|| same(faces, &other.faces));
-                let v = same(vertices, &other.vertices);
+                let e = s.spawn(|| edges.same_entries(&other.edges));
+                let f = s.spawn(|| faces.same_entries(&other.faces));
+                let v = vertices.same_entries(&other.vertices);
                 v & e.join().unwrap() & f.join().unwrap()
             })
         } else {
-            same(vertices, &other.vertices)
-                && same(edges, &other.edges)
-                && same(faces, &other.faces)
+            vertices.same_entries(&other.vertices)
+                && edges.same_entries(&other.edges)
+                && faces.same_entries(&other.faces)
         }
     }
 }
