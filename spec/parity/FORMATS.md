@@ -201,3 +201,7 @@ imports each file (its units, coplanar faces merged), exports OBJ, STL, COLLADA,
 PLY, 3MF, VRML, KMZ, 3DS and USDZ, re-imports OBJ/STL/FBX/PLY/3MF/3DS and compares area, bounding box,
 materials and textures (`MERGE=0` keeps the triangles). Exports were also read with the
 assimp 5.3 command line tool (`assimp info`) as an independent reader.
+
+## SketchUp .skp (VFF, 2021+) writing
+
+Not supported: Meshtard saves the legacy 2017 format only. Research notes on the 2021+ container (header, ZIP layout, meta.dat, the unknown header hash) are in `spec/VFF_FORMAT.md`; the work is parked (LEFTOVERS 21).

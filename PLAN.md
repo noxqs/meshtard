@@ -179,7 +179,7 @@ Reading first means real SketchUp models are available for testing everything el
 - [ ] Not saved yet: scenes, shadow settings, active section (formats need SketchUp-saved samples, M14).
 - [x] "Save changes?" prompt on New, Open, dropped files and closing.
 - [ ] Check in real SketchUp 2026 that saved files open correctly (during the trial).
-- [ ] VFF (2021+) writing: no reference implementation; needs own research against real SketchUp.
+- [ ] VFF (2021+) writing: no reference implementation. Container survey in `spec/VFF_FORMAT.md` (header, ZIP layout, meta.dat); writer not started (parked, low priority; LEFTOVERS 21).
 
 ### M9: Windows and macOS
 - [x] Builds and tests on Linux, Windows and macOS in CI (GitHub Actions); release binaries for Windows (with the CUDA option) and macOS are attached to every run. Rust pinned (`rust-toolchain.toml`).
