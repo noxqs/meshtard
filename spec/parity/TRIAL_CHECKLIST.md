@@ -1,5 +1,7 @@
 # SketchUp 2026 trial checklist
 
+Scripted part first: run `tools/trial/capture.rb` in the Ruby Console (see `tools/trial/README.md`). It saves the 1b sample files (2026 and 2017), `empty_default.skp` and text dumps, and lists the screenshots still to take by hand.
+
 Run on the Windows machine with SketchUp 2026. Prepare everything before starting the trial clock:
 
 - meshtard Windows release build and a few meshtard-saved `.skp` files on the machine (for scenario 12)
