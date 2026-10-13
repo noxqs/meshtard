@@ -281,11 +281,11 @@ fn render_scene(
     vp.set_edges(device, &edges);
     vp.set_edge_instances(device, &scene.gpu_instances(instanced));
     let pts = scene
-        .triangles
+        .triangles()
         .iter()
         .flatten()
         .copied()
-        .chain(scene.edges.iter().flat_map(|s| {
+        .chain(scene.edges().iter().flat_map(|s| {
             [
                 DVec3::from(glam::Vec3::from(s.a)),
                 DVec3::from(glam::Vec3::from(s.b)),
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(m.root.faces.len(), 8);
         let mut doc = Document::untitled();
         doc.model = m;
-        assert!(!doc.scene().triangles.is_empty());
+        assert!(!doc.scene().triangles().is_empty());
     }
 
     #[test]
@@ -528,7 +528,7 @@ mod tests {
         mt_kernel::add_line(&mut d.entities, DVec3::ZERO, DVec3::X * 10.0);
         let id = doc.model.definitions.insert(d);
         let scene = definition_scene(&mut doc, id);
-        assert_eq!(scene.edges.len(), 1);
+        assert_eq!(scene.edges().len(), 1);
         assert_eq!(doc.model.definitions.len(), 1);
         assert!(doc.model.root.instances.is_empty());
     }

@@ -61,6 +61,14 @@ pub struct Hit {
     pub triangle: usize,
 }
 
+impl Hit {
+    /// Whether a hit at `t` on triangle `i` beats `best`: nearer, or as near on a
+    /// lower-numbered triangle (so the answer does not depend on the index's shape).
+    pub fn nearer(t: f64, i: usize, best: Option<Hit>) -> bool {
+        best.is_none_or(|b| t < b.t || (t == b.t && i < b.triangle))
+    }
+}
+
 /// Nearest-hit ray queries over a triangle set: [`Bvh`] here, or a GPU-built index
 /// (`mt-cuda`'s `Lbvh`) for large models. Picking and inference take this.
 pub trait RayIndex: Send + Sync {
@@ -184,7 +192,7 @@ impl Bvh {
                 Node::Leaf { first, count, .. } => {
                     for &i in &self.order[first..first + count] {
                         if let Some(t) = ray_triangle(origin, dir, self.triangles[i])
-                            && t < t_max.min(best.map_or(f64::INFINITY, |h| h.t))
+                            && Hit::nearer(t, i, best)
                         {
                             best = Some(Hit { t, triangle: i });
                         }
@@ -220,6 +228,46 @@ impl Bvh {
                 Node::Leaf { first, count, .. } => {
                     for &i in &self.order[first..first + count] {
                         f(i);
+                    }
+                }
+                Node::Inner { left, right, .. } => {
+                    stack.push(left);
+                    stack.push(right);
+                }
+            }
+        }
+    }
+
+    /// Calls `f` with every triangle of the leaves whose box, grown by `pad` on every
+    /// side, the ray meets at a distance up to `t_max` (in units of `dir`); `f` returns
+    /// the new limit. For queries that test candidates themselves (two-level picking,
+    /// `mt-app`'s `pick_index`).
+    pub fn ray_visit(
+        &self,
+        origin: DVec3,
+        dir: DVec3,
+        pad: f64,
+        mut t_max: f64,
+        mut f: impl FnMut(usize) -> f64,
+    ) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let inv = DVec3::ONE / dir;
+        let mut stack = vec![0usize];
+        while let Some(n) = stack.pop() {
+            let b = self.nodes[n].bounds();
+            let grown = Aabb {
+                min: b.min - DVec3::splat(pad),
+                max: b.max + DVec3::splat(pad),
+            };
+            if grown.hit(origin, inv, t_max).is_none() {
+                continue;
+            }
+            match self.nodes[n] {
+                Node::Leaf { first, count, .. } => {
+                    for &i in &self.order[first..first + count] {
+                        t_max = f(i);
                     }
                 }
                 Node::Inner { left, right, .. } => {

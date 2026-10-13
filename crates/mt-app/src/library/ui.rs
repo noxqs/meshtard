@@ -555,11 +555,11 @@ fn render_thumbnail(
     vp.set_edges(device, &edges);
     vp.set_edge_instances(device, &scene.gpu_instances(instanced));
     let pts = scene
-        .triangles
+        .triangles()
         .iter()
         .flatten()
         .copied()
-        .chain(scene.edges.iter().flat_map(|s| {
+        .chain(scene.edges().iter().flat_map(|s| {
             [
                 glam::DVec3::from(glam::Vec3::from(s.a)),
                 glam::DVec3::from(glam::Vec3::from(s.b)),

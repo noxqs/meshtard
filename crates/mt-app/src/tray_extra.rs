@@ -1587,9 +1587,9 @@ mod tests {
         let colored = collect(&doc);
         assert!(colored.annotations.iter().all(|a| a.color == [10, 200, 30]));
         let green = [10.0 / 255.0, 200.0 / 255.0, 30.0 / 255.0, 1.0];
-        assert!(colored.edges.iter().all(|e| e.color == green));
+        assert!(colored.edges().iter().all(|e| e.color == green));
         doc.model.layers[1].visible = false;
         let hidden = collect(&doc);
-        assert!(hidden.annotations.is_empty() && hidden.edges.is_empty());
+        assert!(hidden.annotations.is_empty() && hidden.edges().is_empty());
     }
 }

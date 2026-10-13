@@ -7,12 +7,15 @@
 //! are drawn with (inherited material, tag, fading while another context is open),
 //! so instances drawn differently get meshes of their own.
 //!
-//! What instancing leaves out of the scene's flat lists is only what the GPU draws:
-//! `Scene::vertices` / `Scene::indices` hold the triangles not instanced, while the
-//! world-space lists used for picking, snapping and section cuts
-//! (`Scene::triangles`, `tri_owner`, `Scene::edges`, ...) still hold every triangle
-//! and edge, in the order the model is walked. [`Scene::tri_vertices`] gives any
-//! triangle's drawn vertices, exactly as they would have been flattened.
+//! Instanced geometry is not copied into the scene's flat lists either:
+//! `Scene::vertices` / `Scene::indices` hold the triangles not instanced, and the
+//! world-space triangles and edges used for picking, snapping and section cuts are
+//! numbered as if flattened (every triangle and edge, in the order the model is
+//! walked: [`Scene::tri`], [`Scene::edge`], with owners, materials and containers
+//! stored for each) but only those outside placements are stored; a placement's are
+//! computed from its mesh and transform when asked for, exactly as flattening made
+//! them. [`Scene::tri_vertices`] gives any triangle's drawn vertices the same way.
+//! Picking queries the meshes in their own coordinates (`pick_index`).
 //!
 //! Drawn flattened instead (each instance copied into the scene's buffers):
 //! definitions placed once, instances on the path to the open context (their
@@ -60,6 +63,13 @@ pub fn ccw(world: &[DVec3; 3], n: DVec3) -> [usize; 3] {
     }
 }
 
+/// The world triangle of local triangle `local` placed by `xf`, counter-clockwise
+/// around its face's world normal `n`.
+pub fn placed_tri(local: &[DVec3; 3], xf: &DMat4, n: DVec3) -> [DVec3; 3] {
+    let world = local.map(|p| xf.transform_point3(p));
+    ccw(&world, n).map(|k| world[k])
+}
+
 /// World normal of a face of normal `normal` placed by `normal_xf` (the placement's
 /// inverse transpose).
 pub fn world_normal(normal_xf: &DMat3, normal: DVec3) -> DVec3 {
@@ -71,6 +81,11 @@ fn f32x3(p: DVec3) -> [f32; 3] {
 }
 
 impl LocalTri {
+    /// The world triangle of [`LocalTri::place`] alone.
+    pub fn world(&self, xf: &DMat4, n: DVec3) -> [DVec3; 3] {
+        placed_tri(&self.local, xf, n)
+    }
+
     /// The drawn vertices and the world triangle (both counter-clockwise around the
     /// face's world normal `n`) of this triangle placed by `xf`.
     pub fn place(&self, xf: &DMat4, n: DVec3) -> ([FaceVertex; 3], [DVec3; 3]) {
@@ -89,6 +104,59 @@ impl LocalTri {
     }
 }
 
+/// One edge of a mesh as collected, in its coordinates, with what its world segment
+/// needs.
+#[derive(Clone, Copy)]
+pub struct LocalEdge {
+    pub a: DVec3,
+    pub b: DVec3,
+    /// The world segment of the first placement: color, style, flags and profile
+    /// (its ends and normals are set when placed).
+    pub seg: Segment,
+    /// The normals of its first `count` faces (none when hidden).
+    pub normals: [DVec3; 2],
+    pub count: u8,
+    /// Drawn as hidden geometry (`Scene::hidden_edges`).
+    pub hidden: bool,
+}
+
+/// One edge of a mesh: a [`LocalEdge`] with its ends and normals as indices into the
+/// mesh's `edge_points` and `edge_normals` (shared ends and normals are placed once
+/// per placement).
+#[derive(Clone, Copy)]
+pub struct MeshEdge {
+    pub seg: Segment,
+    pub ends: [u32; 2],
+    pub normals: [u32; 2],
+    pub count: u8,
+}
+
+/// A mesh's edge points and normals placed by one transform (single precision, as
+/// drawn): what [`Mesh::placed_edge`] reads.
+#[derive(Default)]
+pub struct PlacedTables {
+    points: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+}
+
+impl PlacedTables {
+    /// Fills the tables for `mesh` placed by `xf` (`normal_xf` its inverse transpose).
+    pub fn fill(&mut self, mesh: &Mesh, xf: &DMat4, normal_xf: &DMat3) {
+        self.points.clear();
+        (self.points).extend(
+            mesh.edge_points
+                .iter()
+                .map(|p| f32x3(xf.transform_point3(*p))),
+        );
+        self.normals.clear();
+        (self.normals).extend(
+            mesh.edge_normals
+                .iter()
+                .map(|n| f32x3(world_normal(normal_xf, *n))),
+        );
+    }
+}
+
 /// A definition's own faces and edges (not those of the instances it contains, which
 /// are placements of their own), in its coordinates.
 pub struct Mesh {
@@ -99,6 +167,62 @@ pub struct Mesh {
     pub edges: Vec<Segment>,
     /// The triangles as collected, to give the flattened vertices exactly.
     pub tris: Vec<LocalTri>,
+    /// Every edge of a placement (drawn or not), to give its world segments; `None`
+    /// when their colors depend on the transform (Styles > Edge > Color by axis): the
+    /// placements' edges are then stored in the scene.
+    pub local_edges: Option<Vec<MeshEdge>>,
+    /// Indices into `local_edges` of the hidden ones.
+    pub hidden_edges: Vec<u32>,
+    /// The distinct corners of `tris` (for bounds).
+    pub tri_points: Vec<DVec3>,
+    /// The distinct ends of the edges, and the distinct normals they take.
+    pub edge_points: Vec<DVec3>,
+    pub edge_normals: Vec<DVec3>,
+}
+
+impl Mesh {
+    /// The world segment of edge `k` (of `local_edges`) placed with `tables`, exactly
+    /// as the scene build makes it.
+    pub fn placed_edge(&self, k: usize, tables: &PlacedTables) -> Segment {
+        let e = &self.local_edges.as_ref().expect("edges given by the mesh")[k];
+        let mut s = e.seg;
+        s.a = tables.points[e.ends[0] as usize];
+        s.b = tables.points[e.ends[1] as usize];
+        if e.count >= 1 {
+            s.n1 = tables.normals[e.normals[0] as usize];
+        }
+        if e.count >= 2 {
+            s.n2 = tables.normals[e.normals[1] as usize];
+        }
+        s
+    }
+
+    /// The ends of edge `k` (of `local_edges`) in the mesh's coordinates.
+    pub fn edge_ends(&self, k: usize) -> [DVec3; 2] {
+        let e = &self.local_edges.as_ref().expect("edges given by the mesh")[k];
+        e.ends.map(|i| self.edge_points[i as usize])
+    }
+}
+
+/// Distinct values by bit pattern, in first-seen order, and the index of each.
+#[derive(Default)]
+struct Distinct {
+    values: Vec<DVec3>,
+    index: FxMap<[u64; 3], u32>,
+}
+
+impl Distinct {
+    fn add(&mut self, p: DVec3) -> u32 {
+        let next = self.values.len() as u32;
+        let i = *self
+            .index
+            .entry(p.to_array().map(f64::to_bits))
+            .or_insert(next);
+        if i == next {
+            self.values.push(p);
+        }
+        i
+    }
 }
 
 /// One instance drawn from a mesh.
@@ -108,11 +232,17 @@ pub struct Placement {
     pub transform: DMat4,
     /// What selects it (`None` outside the open context).
     pub owner: Option<Owner>,
-    /// Its triangles in `Scene::triangles` and its edges in `Scene::edges`.
+    /// Its triangles ([`Scene::tri`]) and its edges ([`Scene::edge`]).
     pub tris: Range<usize>,
     pub edges: Range<usize>,
+    /// The inverse transpose of `transform`, for normals.
+    pub normal_xf: DMat3,
+    /// Its edges come from the mesh's `local_edges` (not stored in the scene).
+    pub lazy_edges: bool,
     /// Triangles before `tris` that are not instanced (in `Scene::indices`).
     flat_before: usize,
+    /// Edges of placements before this one that come from their mesh.
+    lazy_edges_before: usize,
 }
 
 impl Placement {
@@ -130,6 +260,8 @@ pub struct Instancing {
     pub placements: Vec<Placement>,
     /// Triangles in placements so far.
     instanced_tris: usize,
+    /// Edges of placements so far that come from their mesh.
+    lazy_edges: usize,
 }
 
 /// What a mesh is made for: its definition and what its contents are drawn with.
@@ -157,16 +289,20 @@ pub struct Builder {
     pub made: FxMap<Key, Made>,
     /// Edges can be instanced (not colored by axis, no jitter).
     pub edges: bool,
+    /// Edges' world segments can be made from their mesh (their colors do not depend
+    /// on the transform: not colored by axis).
+    pub lazy_edges: bool,
 }
 
 impl Builder {
     pub fn new(model: &mt_kernel::Model) -> Self {
+        let by_axis =
+            model.style.edge_look.color_mode == mt_kernel::style_extras::EdgeColorMode::ByAxis;
         Self {
             reach: reach(model),
             made: FxMap::default(),
-            edges: model.style.edge_look.color_mode
-                != mt_kernel::style_extras::EdgeColorMode::ByAxis
-                && !model.style.edge_look.jitter,
+            edges: !by_axis && !model.style.edge_look.jitter,
+            lazy_edges: !by_axis,
         }
     }
 }
@@ -198,6 +334,7 @@ fn reach(model: &mt_kernel::Model) -> FxMap<DefinitionId, u32> {
 pub struct Build {
     pub tris: Vec<LocalTri>,
     pub edges: Vec<Segment>,
+    pub local_edges: Vec<LocalEdge>,
 }
 
 impl Build {
@@ -234,6 +371,36 @@ impl Build {
         for t in &self.tris {
             vertices.extend(t.place(&DMat4::IDENTITY, t.normal.normalize_or_zero()).0);
         }
+        // The placement's world triangles (and edges) were stored while collected:
+        // the mesh gives them from now on.
+        out.tri_list.truncate(out.tri_list.len() - tris.len());
+        let lazy = builder.lazy_edges;
+        if lazy {
+            out.edge_list.truncate(out.edge_list.len() - edges.len());
+        }
+        let hidden_edges = (self.local_edges.iter().enumerate())
+            .filter(|(_, e)| e.hidden)
+            .map(|(k, _)| k as u32)
+            .collect();
+        let mut tri_points = Distinct::default();
+        for p in self.tris.iter().flat_map(|t| t.local) {
+            tri_points.add(p);
+        }
+        let (mut points, mut normals) = (Distinct::default(), Distinct::default());
+        let local_edges: Vec<MeshEdge> = (self.local_edges.iter())
+            .map(|e| MeshEdge {
+                seg: e.seg,
+                ends: [points.add(e.a), points.add(e.b)],
+                normals: [0, 1].map(|k| {
+                    if k < usize::from(e.count) {
+                        normals.add(e.normals[k])
+                    } else {
+                        0
+                    }
+                }),
+                count: e.count,
+            })
+            .collect();
         let mesh = Mesh {
             indices: (0..vertices.len() as u32).collect(),
             vertices,
@@ -242,12 +409,17 @@ impl Build {
             } else {
                 Vec::new()
             },
+            tri_points: tri_points.values,
+            edge_points: points.values,
+            edge_normals: normals.values,
             tris: self.tris,
+            local_edges: lazy.then_some(local_edges),
+            hidden_edges,
         };
         let m = out.instancing.meshes.len() as u32;
         out.instancing.meshes.push(mesh);
         builder.made.insert(key, Made::Mesh(m));
-        out.instancing.place(m, xf, owner, tris, edges);
+        out.instancing.place(m, xf, owner, tris, edges, lazy);
     }
 }
 
@@ -260,21 +432,196 @@ impl Instancing {
         owner: Option<Owner>,
         tris: Range<usize>,
         edges: Range<usize>,
+        lazy_edges: bool,
     ) {
         let flat_before = tris.start - self.instanced_tris;
         self.instanced_tris += tris.len();
+        let lazy_edges_before = self.lazy_edges;
+        if lazy_edges {
+            self.lazy_edges += edges.len();
+        }
         self.placements.push(Placement {
             mesh,
             transform,
             owner,
             tris,
             edges,
+            normal_xf: DMat3::from_mat4(transform).inverse().transpose(),
+            lazy_edges,
             flat_before,
+            lazy_edges_before,
         });
     }
 }
 
 impl Scene {
+    /// Number of triangles (instanced ones included).
+    pub fn tri_count(&self) -> usize {
+        self.tri_owner.len()
+    }
+
+    /// Number of edges (those of placements included).
+    pub fn edge_count(&self) -> usize {
+        self.edge_owner.len()
+    }
+
+    /// The world triangles stored (those not instanced), by [`Scene::flat_tri`] index.
+    pub fn stored_tris(&self) -> &[[DVec3; 3]] {
+        &self.tri_list
+    }
+
+    /// The world edges stored (those not given by a mesh).
+    pub fn stored_edges(&self) -> &[Segment] {
+        &self.edge_list
+    }
+
+    /// World triangle `t`, exactly as flattening made it.
+    pub fn tri(&self, t: usize) -> [DVec3; 3] {
+        match self.placement_of_tri(t) {
+            Some(j) => {
+                let p = &self.instancing.placements[j];
+                let tri = &self.instancing.meshes[p.mesh as usize].tris[t - p.tris.start];
+                tri.world(&p.transform, world_normal(&p.normal_xf, tri.normal))
+            }
+            None => self.tri_list[self.flat_tri(t).expect("not instanced")],
+        }
+    }
+
+    /// Where edge `e` is: its index in the stored edges, or its placement and its
+    /// index in the placement's mesh.
+    fn edge_slot(&self, e: usize) -> Result<usize, (usize, usize)> {
+        let p = &self.instancing.placements;
+        let Some(j) = p.partition_point(|x| x.edges.start <= e).checked_sub(1) else {
+            return Ok(e);
+        };
+        let x = &p[j];
+        if x.lazy_edges && x.edges.contains(&e) {
+            return Err((j, e - x.edges.start));
+        }
+        let lazy = x.lazy_edges_before + if x.lazy_edges { x.edges.len() } else { 0 };
+        Ok(e - lazy)
+    }
+
+    /// World segment of edge `e`, exactly as flattening made it.
+    pub fn edge(&self, e: usize) -> Segment {
+        match self.edge_slot(e) {
+            Ok(i) => self.edge_list[i],
+            Err((j, k)) => self.placed_edge(j, k),
+        }
+    }
+
+    /// Edge `k` of placement `j` (whose edges come from its mesh).
+    fn placed_edge(&self, j: usize, k: usize) -> Segment {
+        let p = &self.instancing.placements[j];
+        let mesh = &self.instancing.meshes[p.mesh as usize];
+        let e = &mesh.local_edges.as_ref().expect("edges given by the mesh")[k];
+        let mut s = e.seg;
+        let point = |i: u32| f32x3(p.transform.transform_point3(mesh.edge_points[i as usize]));
+        let normal = |i: u32| f32x3(world_normal(&p.normal_xf, mesh.edge_normals[i as usize]));
+        (s.a, s.b) = (point(e.ends[0]), point(e.ends[1]));
+        if e.count >= 1 {
+            s.n1 = normal(e.normals[0]);
+        }
+        if e.count >= 2 {
+            s.n2 = normal(e.normals[1]);
+        }
+        s
+    }
+
+    /// Calls `f` with every edge in `range` (index and world segment), in order.
+    pub fn for_each_edge_in(&self, range: Range<usize>, mut f: impl FnMut(usize, Segment)) {
+        let p = &self.instancing.placements;
+        let mut e = range.start;
+        let mut j = p.partition_point(|x| x.edges.end <= e);
+        let mut tables = PlacedTables::default();
+        while e < range.end {
+            // The next placement whose edges come from its mesh.
+            while p
+                .get(j)
+                .is_some_and(|x| !x.lazy_edges || x.edges.is_empty())
+            {
+                j += 1;
+            }
+            let next = p.get(j);
+            let stop = next.map_or(range.end, |x| x.edges.start.max(e).min(range.end));
+            if e < stop {
+                let Ok(first) = self.edge_slot(e) else {
+                    unreachable!("a stored edge")
+                };
+                for (k, seg) in self.edge_list[first..first + stop - e].iter().enumerate() {
+                    f(e + k, *seg);
+                }
+                e = stop;
+            }
+            let Some(x) = next else { break };
+            let end = x.edges.end.min(range.end);
+            if e < end {
+                let mesh = &self.instancing.meshes[x.mesh as usize];
+                tables.fill(mesh, &x.transform, &x.normal_xf);
+                for i in e..end {
+                    f(i, mesh.placed_edge(i - x.edges.start, &tables));
+                }
+                e = end;
+            }
+            j += 1;
+        }
+    }
+
+    /// Calls `f` with every edge (index and world segment), in order.
+    pub fn for_each_edge(&self, f: impl FnMut(usize, Segment)) {
+        self.for_each_edge_in(0..self.edge_count(), f);
+    }
+
+    /// Calls `f` with every triangle (index and world triangle), in order.
+    pub fn for_each_tri(&self, mut f: impl FnMut(usize, [DVec3; 3])) {
+        let mut t = 0;
+        let mut flat = 0;
+        for p in &self.instancing.placements {
+            let n = p.tris.start - t;
+            for tri in &self.tri_list[flat..flat + n] {
+                f(t, *tri);
+                t += 1;
+            }
+            flat += n;
+            let tris = &self.instancing.meshes[p.mesh as usize].tris;
+            for tri in tris {
+                f(
+                    t,
+                    tri.world(&p.transform, world_normal(&p.normal_xf, tri.normal)),
+                );
+                t += 1;
+            }
+        }
+        for tri in &self.tri_list[flat..] {
+            f(t, *tri);
+            t += 1;
+        }
+    }
+
+    /// Every edge in world space (made on first use and kept).
+    pub fn edges(&self) -> &[Segment] {
+        self.all_edges.get_or_init(|| {
+            if self.instancing.lazy_edges == 0 {
+                return self.edge_list.clone();
+            }
+            let mut out = Vec::with_capacity(self.edge_count());
+            self.for_each_edge(|_, s| out.push(s));
+            out
+        })
+    }
+
+    /// Every triangle in world space (made on first use and kept).
+    pub fn triangles(&self) -> &[[DVec3; 3]] {
+        self.all_tris.get_or_init(|| {
+            if self.instancing.placements.is_empty() {
+                return self.tri_list.clone();
+            }
+            let mut out = Vec::with_capacity(self.tri_count());
+            self.for_each_tri(|_, t| out.push(t));
+            out
+        })
+    }
+
     /// The placement drawing triangle `t`, if instanced.
     pub fn placement_of_tri(&self, t: usize) -> Option<usize> {
         let p = &self.instancing.placements;
@@ -302,7 +649,7 @@ impl Scene {
                 Some(k) => (p[k].tris.end, p[k].flat_before),
                 None => (0, 0),
             };
-            let end = p.get(j).map_or(self.triangles.len(), |x| x.tris.start);
+            let end = p.get(j).map_or(self.tri_count(), |x| x.tris.start);
             (start..end).map(move |t| (t, flat + t - start))
         })
     }
@@ -337,7 +684,7 @@ impl Scene {
     /// would hold them (`indices` are then `0..3 * triangles`).
     #[cfg(test)]
     pub fn flattened_vertices(&self) -> Vec<FaceVertex> {
-        let mut out = Vec::with_capacity(3 * self.triangles.len());
+        let mut out = Vec::with_capacity(3 * self.tri_count());
         let mut t = 0;
         for p in &self.instancing.placements {
             for k in t..p.tris.start {
@@ -353,7 +700,7 @@ impl Scene {
             }
             t = p.tris.end;
         }
-        for k in t..self.triangles.len() {
+        for k in t..self.tri_count() {
             out.extend(self.tri_vertices(k));
         }
         out
@@ -362,18 +709,18 @@ impl Scene {
     /// The edges drawn flattened when nothing is selected or moving (those of
     /// placements whose edges are instanced left out), and those placements.
     pub fn flat_edges(&self) -> (Vec<Segment>, Vec<usize>) {
-        let mut out = Vec::with_capacity(self.edges.len());
+        let mut out = Vec::with_capacity(self.edge_list.len());
         let mut instanced = Vec::new();
         let mut e = 0;
         for (j, p) in self.instancing.placements.iter().enumerate() {
             if !p.edges_instanced(self) {
                 continue;
             }
-            out.extend_from_slice(&self.edges[e..p.edges.start]);
+            self.for_each_edge_in(e..p.edges.start, |_, s| out.push(s));
             e = p.edges.end;
             instanced.push(j);
         }
-        out.extend_from_slice(&self.edges[e..]);
+        self.for_each_edge_in(e..self.edge_count(), |_, s| out.push(s));
         (out, instanced)
     }
 
@@ -488,14 +835,14 @@ mod tests {
             let flat = doc.scene_with(false);
             assert!(flat.instancing.placements.is_empty());
             assert_eq!(checksum(&scene), checksum(&flat), "{name}");
-            assert_eq!(scene.triangles, flat.triangles, "{name}");
+            assert_eq!(scene.triangles(), flat.triangles(), "{name}");
             let expanded = scene.flattened_vertices();
             assert_eq!(
                 bytemuck::cast_slice::<_, u8>(&expanded),
                 bytemuck::cast_slice::<_, u8>(&flat.vertices),
                 "{name}"
             );
-            for t in 0..scene.triangles.len() {
+            for t in 0..scene.triangles().len() {
                 assert_eq!(
                     bytemuck::cast_slice::<_, u8>(&scene.tri_vertices(t)),
                     bytemuck::cast_slice::<_, u8>(&expanded[3 * t..3 * t + 3]),
@@ -511,7 +858,7 @@ mod tests {
             let n: usize = (instanced.iter())
                 .map(|&j| scene.instancing.placements[j].edges.len())
                 .sum();
-            assert_eq!(edges.len() + n, scene.edges.len(), "{name}");
+            assert_eq!(edges.len() + n, scene.edges().len(), "{name}");
             for &j in &instanced {
                 let p = &scene.instancing.placements[j];
                 assert_eq!(

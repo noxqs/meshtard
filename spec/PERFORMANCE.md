@@ -356,7 +356,8 @@ bound by vertex and fragment work, shows no change.
    holes are in the faces of the definition the openings are glued in, so they are in
    its mesh). The first placement of a mesh builds it (triangles kept with their
    double-precision positions and the texture coordinates per vertex); later
-   placements only add their world triangles and edges to the lists used for picking.
+   placements only add their world triangles and edges to the lists used for picking
+   (since the fourth round, not even those: see "Fourth round" below).
 2. **Flattened instead**: definitions placed once, the instances on the path to the
    open context (their contents are edited in place and selectable), hidden instances
    drawn by View > Hidden Objects, "Shadows face sun" components and everything in
@@ -501,6 +502,124 @@ undo tests fail. The app was checked under Xvfb: rectangle, Push/Pull, Move, the
 Edit > Undo / Redo many times; every state renders identically to the same sequence on
 the commit before this change.
 
+## Fourth round: picking from instanced meshes, undo after big edits
+
+Two items of the list below. The scene and hover checksums are again the same before
+and after for every model.
+
+### Results
+
+`MESHTARD_BENCH_NO_GPU=1`, the base commit (`238ac5a`) and this change built side by
+side and run alternately, twice each, on a quiet machine (load ~1 to 2); the table
+gives each side's faster run. Differences under about 1.5x are noise: the grid's
+"undo" (the same code on both sides) measured 16.7 and 62 ms in the base commit's two
+runs and 48 and 53 ms in this change's, and models without placements (grid, groups
+5k), whose pick, snap and bounds code paths do the same work as before, moved by up to
+1.6x either way between runs.
+
+| stage | grid 1M edges | instances 10k | groups 5k | nested 4^6 | coedge_orientation_regression.skp | legacy_v2014_synthetic.skp | gondola_v20.skp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| scene build | 732 ms → 774 ms (~) | 19.9 ms → 6.3 ms (3.2x) | 49 ms → 53 ms (~) | 8.3 ms → 1.8 ms (4.6x) | 95 ms → 88 ms (~) | 0.06 ms → 0.06 ms (~) | 10.8 ms → 8.9 ms (~) |
+| pick index (BVH) | 208 ms → 204 ms (~) | 27 ms → 4.3 ms (6.4x) | 11.4 ms → 15.7 ms (~) | 9.7 ms → 1.4 ms (7.0x) | 51 ms → 15.2 ms (3.3x) | <0.01 ms → <0.01 ms (~) | 10.7 ms → 4.2 ms (2.5x) |
+| snap geometry | 144 ms → 136 ms (~) | 14.0 ms → 15.3 ms (~) | 6.3 ms → 6.9 ms (~) | 5.1 ms → 5.2 ms (~) | 12.4 ms → 13.7 ms (~) | 0.01 ms → 0.01 ms (~) | 2.1 ms → 2.4 ms (~) |
+| instance bounds | 3.8 ms → 4.1 ms (~) | 11.9 ms → 9.3 ms (~) | 5.3 ms → 8.6 ms (0.61x) | 2.7 ms → 0.91 ms (3.0x) | 7.8 ms → 3.2 ms (2.4x) | 0.01 ms → 0.01 ms (~) | 2.1 ms → 1.9 ms (~) |
+| first hover pick | 270 ms → 264 ms (~) | 22 ms → 4.9 ms (4.5x) | 9.4 ms → 11.4 ms (~) | 7.9 ms → 1.1 ms (6.9x) | 16.3 ms → 4.8 ms (3.4x) | 0.01 ms → 0.01 ms (~) | 2.8 ms → 2.8 ms (~) |
+| hover pick | 0.02 ms → 0.02 ms (~) | 0.01 ms → 0.01 ms (~) | 0.01 ms → 0.01 ms (~) | <0.01 ms → <0.01 ms (~) | 0.02 ms → 0.02 ms (~) | <0.01 ms → <0.01 ms (~) | 0.01 ms → 0.01 ms (~) |
+| first hover inference | 332 ms → 330 ms (~) | 34 ms → 39 ms (~) | 15.0 ms → 16.3 ms (~) | 12.2 ms → 12.2 ms (~) | 29 ms → 37 ms (~) | 0.01 ms → 0.01 ms (~) | 4.6 ms → 5.4 ms (~) |
+| hover inference | 0.28 ms → 0.25 ms (~) | 0.13 ms → 0.15 ms (~) | 0.07 ms → 0.09 ms (~) | 0.01 ms → 0.01 ms (~) | 0.05 ms → 0.05 ms (~) | 0.01 ms → 0.01 ms (~) | 0.02 ms → 0.02 ms (~) |
+| select all | 49 ms → 49 ms (~) | 0.96 ms → 0.93 ms (~) | 0.53 ms → 0.57 ms (~) | 0.29 ms → 0.25 ms (~) | 0.83 ms → 0.94 ms (~) | <0.01 ms → <0.01 ms (~) | 0.19 ms → 0.22 ms (~) |
+| selection highlight | 197 ms → 194 ms (~) | 9.1 ms → 11.4 ms (~) | 4.2 ms → 3.6 ms (~) | 2.2 ms → 2.2 ms (~) | 2.7 ms → 3.4 ms (~) | 0.01 ms → 0.01 ms (~) | 0.86 ms → 0.94 ms (~) |
+| move preview (1/10) | 739 ms → 684 ms (~) | 6.7 ms → 7.1 ms (~) | 5.5 ms → 5.2 ms (~) | 16.0 ms → 15.9 ms (~) | 20 ms → 23 ms (~) | 0.01 ms → 0.01 ms (~) | 1.7 ms → 1.8 ms (~) |
+| undo snapshot (first) | 151 ms → 140 ms (~) | 0.83 ms → 0.90 ms (~) | 41 ms → 36 ms (~) | 0.08 ms → 0.07 ms (~) | 17.9 ms → 12.3 ms (~) | 0.03 ms → 0.03 ms (~) | 1.3 ms → 1.4 ms (~) |
+| move commit | 4.40 s → 4.66 s (~) | 2.2 ms → 2.3 ms (~) | 10.7 ms → 9.7 ms (~) | 0.03 ms → 0.03 ms (~) | 0.63 ms → 0.70 ms (~) | 0.02 ms → 0.02 ms (~) | 0.06 ms → 0.06 ms (~) |
+| undo snapshot (after an edit) | 40 ms → 37 ms (~) | 0.70 ms → 0.76 ms (~) | 12.2 ms → 10.6 ms (~) | 0.02 ms → 0.02 ms (~) | 0.49 ms → 0.46 ms (~) | 0.01 ms → 0.01 ms (~) | 0.04 ms → 0.05 ms (~) |
+| rebuild after move | 704 ms → 732 ms (~) | 18.5 ms → 5.3 ms (3.5x) | 50 ms → 51 ms (~) | 8.7 ms → 1.9 ms (4.4x) | 75 ms → 67 ms (~) | 0.02 ms → 0.02 ms (~) | 9.9 ms → 9.2 ms (~) |
+| undo | 16.7 ms → 48 ms (0.35x) | 1.3 ms → 1.2 ms (~) | 12.4 ms → 10.8 ms (~) | 0.06 ms → 0.05 ms (~) | 1.2 ms → 1.1 ms (~) | 0.01 ms → 0.01 ms (~) | 0.09 ms → 0.08 ms (~) |
+| small edit | 783 ms → 780 ms (~) | 2.8 ms → 2.7 ms (~) | 12.5 ms → 11.9 ms (~) | 0.11 ms → 0.08 ms (~) | 0.96 ms → 0.97 ms (~) | 0.02 ms → 0.01 ms (~) | 0.17 ms → 0.17 ms (~) |
+| undo snapshot (after a small edit) | 0.96 ms → 1.1 ms (~) | 0.77 ms → 0.85 ms (~) | 36 ms → 31 ms (~) | 0.02 ms → 0.02 ms (~) | 1.4 ms → 0.91 ms (1.5x) | 0.01 ms → 0.01 ms (~) | 0.05 ms → 0.05 ms (~) |
+| undo (small edit) | 1.1 ms → 0.76 ms (~) | 1.2 ms → 1.2 ms (~) | 11.3 ms → 13.0 ms (~) | 0.04 ms → 0.02 ms (~) | 0.58 ms → 0.61 ms (~) | 0.01 ms → 0.01 ms (~) | 0.04 ms → 0.04 ms (~) |
+
+Scene memory (the per-triangle and per-edge lists, `bench::scene_bytes`): instances 10k
+27.8 MB → 10.4 MB, nested 4^6 11.4 MB → 4.3 MB, the car 64.3 MB → 49.2 MB, gondola
+13.6 MB → 10.6 MB; models without placements unchanged.
+
+### Picking and snapping from the meshes
+
+The scene build used to transform every instanced triangle and edge into world space
+for the picking, snapping and section lists, and the pick index (a BVH over every
+world triangle) and the edge culling index were built over all of them. Now:
+
+1. **Placements' triangles and edges are not stored** (`document.rs`, `instancing.rs`).
+   They keep their numbers (triangle and edge indices, owners, materials, containers
+   and hidden marks are stored for every one, as before), but `Scene` stores the world
+   triangles and edges only outside placements. `Scene::tri(t)` / `Scene::edge(e)`
+   compute a placement's from its mesh and transform with the arithmetic of the
+   flattening (`LocalTri::world`, `Mesh::placed_edge`: the edge's ends and face normals
+   are kept per mesh, each distinct end and normal placed once per placement);
+   `for_each_tri` / `for_each_edge_in` walk them in order, and `triangles()` /
+   `edges()` make (and keep) the full lists for the rare users (section cuts, Zoom
+   Selection, thumbnails, tests). Edges colored by axis depend on the transform: their
+   placements still store them (`Placement::lazy_edges` false).
+2. **Two-level pick index** (`pick_index::PickIndex`, a `RayIndex`): a BVH over the
+   stored triangles (on the GPU for large models with `cuda`, as before), a box index
+   over the placements' world boxes (their mesh's box transformed, grown by 1e-7 of
+   its size plus rounding), and one BVH per mesh in its own coordinates
+   (`Bvh::ray_visit`, boxes grown likewise), queried with the ray taken into the
+   placement's coordinates (the ray parameter is the same in both, the map being
+   affine). Every candidate is tested on its world triangle, computed exactly as the
+   flattening does, so the hit is the flattened scene's. Ties at the same distance now
+   go to the lowest triangle number in `Bvh::ray` as well (`Hit::nearer`), so neither
+   index's shape decides them.
+3. **Two-level edge culling** (`pick_index::EdgeIndex`, behind `Scene::edges_near`): the
+   stored edges in one `cull::BoxIndex`, the placements by their world box, then (for
+   meshes of 32 edges or more) an index over the mesh's edges queried with the view
+   pyramid taken into the placement's coordinates (`cull::Pyramid::local`: distances
+   stay world distances, with a margin for rounding and the single-precision ends).
+   The exact pixel test then runs on the candidates' world segments as before.
+4. **Snap geometry, instance bounds, the highlight and the scene's bounds** walk the
+   edges and triangles without storing them; instance bounds use each mesh's distinct
+   points (8 transforms per box instead of 36 triangle corners and 24 edge ends).
+5. The section plane size no longer walks the triangles when there is no section plane.
+
+Inference still builds its world-space snap geometry (`mt_infer::Geometry`: every
+edge's ends and the de-duplicated vertices, in edge order) from the computed segments:
+its vertex de-duplication across instances decides the answers, so it is not
+two-level (see "Left to do"). Its face hits use the two-level index.
+
+Tests: `pick_index::tests::two_level_picking_matches_the_flattened_scene` (boxes and a
+120-edge grid placed moved, turned, mirrored, unevenly scaled and tilted, nested two
+levels, 1,500+ edges; plain, edges by axis, an open component and hidden geometry:
+every world triangle and edge, one by one and all at once, owners' containers and
+hidden marks, the checksum, ray hits (distance and triangle) at 3,600 cursors in
+three views and 3,000 random rays, `selection::pick`, `Engine::infer`, the snap
+geometry and the instances' bounds equal the flattened scene's), the existing
+`instanced_scene_flattens_to_the_flattened_one`, `culled_pick_matches_a_full_scan`
+and `culled_inference_matches_a_full_scan`.
+
+### Undo after a big edit: measured again
+
+The ~50 ms "undo" of the grid in the third round's table is one draw of a very noisy
+stage: single runs of the base commit measured anywhere from 5 to 62 ms for that undo
+(rewriting the chunks the Move changed); this change leaves the undo code as it was. A
+focused measurement (move a tenth of the grid, then undo and redo 15 times; minimum
+and median) gave on the base commit and on both variants tried below alike: undo 5 to
+7 ms (median 7 to 10 ms), redo 7 to 9 ms. Single runs are slower when the rewrite is
+the first in the process or other jobs share the machine. What an undo right after a
+big edit costs is mostly the step it takes of the edited state first
+(`Entities::swap_to` freezes before it thaws): 18 to 30 ms in all (about the "undo
+snapshot (after an edit)" row plus the "undo" row).
+
+Tried and not kept, as neither moved those numbers beyond the noise: rewriting the
+changed slots in place with `Clone::clone_from` (the entities' lists keep their
+allocations) instead of replacing them, and spreading `freeze` and `thaw` over several
+threads per slot map (already three maps on three threads; medians got worse on the
+shared machine). Swapping instead of copying (moving the current slots into the
+new snapshot and the target snapshot's into the store when it holds the only
+reference) does not apply as is: the store's last snapshot, the undo step and
+`undo::Shared` all hold the target, and the store needs its last snapshot to know
+which chunks are clean. A test was added for stores of many chunks with values that
+own heap memory: `slot_store::tests::many_chunks_freeze_and_thaw_exactly`.
+
 ## Left to do
 
 Measured but not changed here, biggest first:
@@ -516,23 +635,28 @@ Measured but not changed here, biggest first:
 - **Move commit on huge flat contexts** (grid: 7-8 s for 100k faces). Spread over
   `transform_vertices`' welding: building the spatial index (`Entities::build_index`),
   `set_vertex_positions` and its `edges_in` / `faces_in` / `edges_near_segment` queries.
-- **Undo of big edits in huge flat contexts** (grid, after moving a tenth of it: ~50
-  ms): undo rewrites every storage chunk the edit changed. Instances, curves, guides
-  and annotations of a collection are still copied whole into a step when any of them
-  changed (instances 10k: ~1 to 2 ms per step and per undo).
+- **Undo right after a big edit in a huge flat context** (grid, after moving a tenth
+  of it: ~20 to 25 ms, see "Fourth round"): the step of the edited state is taken
+  first (comparing and copying every chunk the edit touched), then the changed chunks
+  are rewritten. Taking that step in the background after the edit, or letting the
+  store's base snapshot lend its chunks to the store, would hide most of it. Instances,
+  curves, guides and annotations of a collection are still copied whole into a step
+  when any of them changed (instances 10k: ~1 to 2 ms per step and per undo).
 - **Whole-scene rebuilds after small edits.** `App::rebuild` still rebuilds the scene
   (except the kept triangles of unchanged faces), pick index, snap geometry and GPU
   buffers for the whole model after every edit. Going further needs the scene split
   per context, with owners and indices kept stable, and the GPU buffers updated in
   place. The first scene build of a model also fills the kept triangles (first builds
   measured up to ~20% slower, within noise on most models).
-- **What GPU instancing left flattened** (see "GPU instancing"): the world-space lists
-  for picking, snapping and section cuts (`Scene::triangles`, `Scene::edges` and their
-  owners) still hold every instance, and the scene build still transforms every
-  instanced triangle and edge for them (instances 10k: ~30 ms). Picking from the
-  meshes (a BVH per mesh, rays transformed per instance) and snapping from them would
-  remove that. Selected and moving instances draw their edges flattened, rebuilt with
-  the highlight. Translucent meshes are flattened (one-by-one sorting).
+- **What GPU instancing left flattened** (see "GPU instancing" and "Fourth round"):
+  inference's snap geometry (`mt_infer::Geometry`) still holds every instanced edge's
+  ends and vertices in world space, built on every rebuild (instances 10k: ~15 ms,
+  and ~35 ms for its culling index on the first hover). A two-level version must keep
+  the vertex de-duplication across instances (its order decides ties). Section cuts
+  make the full world triangle list. The owners, materials and containers are still
+  stored per triangle and edge (instances 10k: ~5 MB). Selected and moving instances
+  draw their edges flattened, rebuilt with the highlight. Translucent meshes are
+  flattened (one-by-one sorting).
 - **The highlight on huge models** (grid: ~0.25 s): it still rebuilds and re-uploads
   the whole edge list on every selection change.
 - **Frame time** on llvmpipe grows with edges and triangles drawn, instanced or not

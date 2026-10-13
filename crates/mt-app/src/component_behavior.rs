@@ -189,7 +189,7 @@ mod tests {
 
     fn area(scene: &Scene) -> f64 {
         scene
-            .triangles
+            .triangles()
             .iter()
             .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() / 2.0)
             .sum()
@@ -285,7 +285,7 @@ mod tests {
     fn face_camera_turns_toward_the_eye() {
         let mut doc = card(false);
         // As placed without a view.
-        let n = card_plane_normal(&doc.scene().triangles);
+        let n = card_plane_normal(doc.scene().triangles());
         assert!(n.x.abs() < 1e-9 && n.z.abs() < 1e-9);
         // Eye due east of the card: it turns its face east.
         let camera = Camera {
@@ -297,10 +297,10 @@ mod tests {
         };
         doc.view = Some(Facing::new(&camera, None));
         let scene = doc.scene();
-        let n = card_plane_normal(&scene.triangles);
+        let n = card_plane_normal(scene.triangles());
         assert!(n.y.abs() < 1e-9 && n.z.abs() < 1e-9 && n.x.abs() > 0.999);
         // It stays standing at its origin.
-        for t in &scene.triangles {
+        for t in scene.triangles() {
             for p in t {
                 assert!((p.x - 50.0).abs() < 1e-9);
             }
@@ -327,7 +327,7 @@ mod tests {
         ));
         let scene = doc.scene();
         // Drawn facing the camera (south).
-        let drawn = card_plane_normal(&scene.triangles);
+        let drawn = card_plane_normal(scene.triangles());
         assert!(drawn.y.abs() > 0.999);
         // Casting facing the sun (east).
         let casters = scene.shadow_casters().expect("sun-facing casters");

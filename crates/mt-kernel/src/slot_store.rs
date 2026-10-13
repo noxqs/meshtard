@@ -744,4 +744,48 @@ mod tests {
         a.clear();
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
     }
+
+    /// With many chunks and values with heap parts (lengths changing), every snapshot
+    /// restores its state exactly, back and forth.
+    #[test]
+    fn many_chunks_freeze_and_thaw_exactly() {
+        let mut b: SlotStore<Id, Vec<u32>> = SlotStore::with_key();
+        let keys: Vec<Id> = (0..100_000u32)
+            .map(|i| b.insert(vec![i; (i % 5) as usize]))
+            .collect();
+        let dump = |b: &SlotStore<Id, Vec<u32>>| format!("{b:?}");
+        let s0 = b.freeze();
+        let d0 = dump(&b);
+        for (n, k) in keys.iter().enumerate().step_by(3) {
+            b[*k].push(n as u32);
+        }
+        for k in keys.iter().skip(1).step_by(7) {
+            b.remove(*k);
+        }
+        for i in 0..5000 {
+            b.insert(vec![i]);
+        }
+        let d1 = dump(&b);
+        let s1 = b.freeze();
+        assert!(s1.chunks_shared_with(&s0).0 < 10, "most chunks changed");
+        assert!(b.thaw(&s0));
+        assert_eq!(dump(&b), d0);
+        assert!(b.thaw(&s1));
+        assert_eq!(dump(&b), d1);
+        assert!(!b.thaw(&s1), "nothing to rewrite");
+        assert!(b.freeze().ptr_eq(&s1));
+        // Changes across many chunks after a thaw.
+        for k in keys.iter().step_by(2) {
+            if let Some(v) = b.get_mut(*k) {
+                v.clear();
+            }
+        }
+        let d2 = dump(&b);
+        let s2 = b.freeze();
+        assert_eq!(format!("{:?}", s2.to_store::<Id>()), d2);
+        assert!(b.thaw(&s0));
+        assert_eq!(dump(&b), d0);
+        assert!(b.thaw(&s2));
+        assert_eq!(dump(&b), d2);
+    }
 }

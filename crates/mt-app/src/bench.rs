@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use egui_wgpu::wgpu;
 use glam::{DMat4, DVec2, DVec3};
-use mt_kernel::bvh::{Bvh, RayIndex};
+use mt_kernel::bvh::Bvh;
 use mt_kernel::{CoEdge, Definition, Entities, FaceAttrs, Instance, Loop, Model, VertexId, import};
 
 use crate::document::{Document, Owner, Scene};
@@ -104,7 +104,7 @@ pub(crate) fn definition(name: &str, entities: Entities, is_group: bool) -> Defi
 
 /// An `n` x `n` grid of quads at the root, gently waved so it is not one plane:
 /// `2 n (n + 1)` edges.
-fn grid(n: usize) -> Model {
+pub(crate) fn grid(n: usize) -> Model {
     let mut model = Model::default();
     let ents = &mut model.root;
     let mut v = Vec::with_capacity((n + 1) * (n + 1));
@@ -232,13 +232,13 @@ pub fn checksum(scene: &Scene) -> u64 {
     fnv(&mut h, bytemuck::cast_slice(&vertices));
     let indices: Vec<u32> = (0..vertices.len() as u32).collect();
     fnv(&mut h, bytemuck::cast_slice(&indices));
-    fnv(&mut h, bytemuck::cast_slice(&scene.edges));
+    fnv(&mut h, bytemuck::cast_slice(scene.edges()));
     fnv(&mut h, bytemuck::cast_slice(&scene.guides));
     fnv(
         &mut h,
         format!("{:?}{:?}", scene.edge_owner, scene.tri_owner).as_bytes(),
     );
-    for t in &scene.triangles {
+    for t in scene.triangles() {
         for p in t {
             fnv(&mut h, bytemuck::cast_slice(&p.to_array()));
         }
@@ -265,16 +265,17 @@ fn scene_bytes(scene: &Scene) -> usize {
             size_of_val(&m.vertices[..]) * 2
                 + size_of_val(&m.indices[..])
                 + size_of_val(&m.edges[..])
+                + m.local_edges.as_ref().map_or(0, |l| size_of_val(&l[..]))
         })
         .sum();
     meshes
         + size_of_val(&scene.instancing.placements[..])
         + size_of_val(&scene.vertices[..])
         + size_of_val(&scene.indices[..])
-        + size_of_val(&scene.triangles[..])
+        + size_of_val(scene.stored_tris())
         + size_of_val(&scene.tri_owner[..])
         + size_of_val(&scene.tri_material[..])
-        + size_of_val(&scene.edges[..])
+        + size_of_val(scene.stored_edges())
         + size_of_val(&scene.edge_owner[..])
 }
 
@@ -365,8 +366,8 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
     let scene = report.time(name, "scene build", || doc.scene());
     eprintln!(
         "bench: {name}: {} edges, {} triangles, checksum {:016x}",
-        scene.edges.len(),
-        scene.triangles.len(),
+        scene.edge_count(),
+        scene.tri_count(),
         checksum(&scene)
     );
     eprintln!(
@@ -375,7 +376,7 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         gpu_bytes(&scene) as f64 / 1e6
     );
     let bvh = report.time(name, "pick index (BVH)", || {
-        Bvh::build(scene.triangles.clone())
+        crate::pick_index::PickIndex::build(&scene, |t| Box::new(Bvh::build(t)))
     });
     let geometry = report.time(name, "snap geometry", || {
         crate::snap::geometry(&scene, Some(&doc), DMat4::IDENTITY)
@@ -422,7 +423,7 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
     // answers are hashed so a change can be checked to pick the same things.
     let mut answers = 0xcbf2_9ce4_8422_2325;
     let mut pick = |k: usize| {
-        let hit = crate::selection::pick(&scene, &bvh, &camera, cursors[k], px);
+        let hit = crate::selection::pick(&scene, &*bvh, &camera, cursors[k], px);
         fnv(&mut answers, format!("{hit:?}").as_bytes());
     };
     report.time(name, "first hover pick", || pick(0));
@@ -434,7 +435,7 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         viewport: px,
     };
     let mut infer = |k: usize| {
-        let i = engine.infer(&geometry, &bvh as &dyn RayIndex, view, cursors[k], None);
+        let i = engine.infer(&geometry, &*bvh, view, cursors[k], None);
         fnv(
             &mut answers,
             format!("{:?} {:?} {:?}", i.point, i.kind, i.edge).as_bytes(),
