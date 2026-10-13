@@ -29,9 +29,9 @@ Sub-items noted as "Left" under finished items, ranked by usefulness. Work down 
 
 ## Doable on Linux (no Windows or trial needed), added 2026-10-13
 In progress:
-18. [ ] Linux self-install: offer to install a newer binary into ~/.local/bin with an applications-menu entry, icon and .skp file type; Help > Install for This User; uninstall in Preferences. S
-19. [ ] Picking and inference from the shared (instanced) component meshes instead of flattened copies; faster undo after a big edit. M
-20. [ ] Fuzz the file readers (.skp, IFC, DXF, glTF, OBJ/STL/PLY/3MF/3DS/FBX, .style, .mtx): errors instead of crashes or hangs. M
+18. [x] Linux self-install: offer to install a newer binary into ~/.local/bin with an applications-menu entry, icon and .skp file type; Help > Install for This User; uninstall in Preferences. S
+19. [x] Picking and inference from the shared (instanced) component meshes instead of flattened copies; faster undo after a big edit. M
+20. [x] Fuzz the file readers (.skp, IFC, DXF, glTF, OBJ/STL/PLY/3MF/3DS/FBX, .style, .mtx): errors instead of crashes or hangs. M
 
 Waiting:
 22. [ ] On the user's Linux machine: try 0.1.2 on Cinnamon (Alt + drag question on first start, Alt tools afterwards; the "off" values for Cinnamon, GNOME and MATE are guesses). S
