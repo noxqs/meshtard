@@ -1,18 +1,20 @@
 //! Undo steps that share what did not change (spec/PERFORMANCE.md).
 //!
-//! A step holds the whole model, but each entities collection (the root's and each
-//! definition's) is an [`Arc`] that consecutive steps share while the collection stays
-//! the same. [`Shared`] keeps the copy of each collection made for the last step it
-//! was in; the next step reuses it after checking it still equals the model's
-//! collection, so only the collections an edit changed are copied again. The check
-//! compares the contents, so a change made without an undo step (Scenes, Texture
-//! Position's preview, tests) is never lost: it simply fails the check. The settings
-//! (everything but the collections) are small and copied whole into every step.
+//! A step holds the whole model: the settings (everything but the geometry, small:
+//! copied into every step) and one [`EntitiesSnapshot`] per entities collection (the
+//! root's and each definition's). A collection's vertices, edges and faces know which
+//! chunks of their storage changed since their last snapshot
+//! (`mt_kernel::slot_store`), so a snapshot copies only those chunks and shares the
+//! rest with the snapshots before. Every write marks its chunk, whether or not it is
+//! made inside an undoable edit, so a change made without an undo step (Scenes,
+//! Texture Position's preview, tests) is never lost. [`Shared`] keeps the snapshot of
+//! each collection in the last step, which the next step reuses when nothing changed.
+//! Undo and redo rewrite only the chunks that differ between the two states.
 
 use std::sync::Arc;
 
 use mt_kernel::spatial::FxMap;
-use mt_kernel::{DefinitionId, Entities, Model};
+use mt_kernel::{DefinitionId, Entities, EntitiesSnapshot, Model};
 
 /// An entities collection of the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,9 +27,9 @@ pub enum Ctx {
 pub struct Step {
     /// The model with every entities collection empty.
     shell: Model,
-    root: Arc<Entities>,
+    root: Arc<EntitiesSnapshot>,
     /// The definitions' collections, in `shell.definitions` order.
-    defs: Vec<(DefinitionId, Arc<Entities>)>,
+    defs: Vec<(DefinitionId, Arc<EntitiesSnapshot>)>,
 }
 
 impl Step {
@@ -40,18 +42,18 @@ impl Step {
     #[cfg(test)]
     pub fn model(&self) -> Model {
         let mut m = self.shell.clone();
-        m.root = (*self.root).clone();
+        m.root = self.root.to_entities();
         for (k, e) in &self.defs {
-            m.definitions[*k].entities = (**e).clone();
+            m.definitions[*k].entities = e.to_entities();
         }
         m
     }
 }
 
-/// The copies the next step can share; see the module documentation.
+/// The snapshots the next step can reuse; see the module documentation.
 #[derive(Default)]
 pub struct Shared {
-    copies: FxMap<Ctx, Arc<Entities>>,
+    copies: FxMap<Ctx, Arc<EntitiesSnapshot>>,
 }
 
 /// `model` with its entities collections left empty.
@@ -81,47 +83,9 @@ pub fn discard<T: Send + 'static>(x: T, size: usize) {
 /// Collections at least this large ([`Entities::size`]) are freed on another thread.
 const DISCARD_MIN: usize = 20_000;
 
-/// Above this much work in total ([`Entities::size`]), comparisons run on several
-/// threads.
-const PARALLEL_MIN: usize = 20_000;
-
-/// Whether each pair of collections is equal, compared on several threads when there
-/// is much to compare.
-fn equal_all(pairs: &[(&Entities, &Entities)]) -> Vec<bool> {
-    let total: usize = pairs.iter().map(|(a, _)| a.size()).sum();
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if total < PARALLEL_MIN || pairs.len() < 2 || threads < 2 {
-        return pairs.iter().map(|(a, b)| a == b).collect();
-    }
-    // Consecutive runs of about equal work, one per thread.
-    let share = total.div_ceil(threads);
-    let mut chunks: Vec<&[(&Entities, &Entities)]> = Vec::new();
-    let (mut start, mut work) = (0, 0);
-    for (i, (a, _)) in pairs.iter().enumerate() {
-        work += a.size();
-        if work >= share {
-            chunks.push(&pairs[start..=i]);
-            (start, work) = (i + 1, 0);
-        }
-    }
-    if start < pairs.len() {
-        chunks.push(&pairs[start..]);
-    }
-    std::thread::scope(|s| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|c| s.spawn(move || c.iter().map(|(a, b)| a == b).collect::<Vec<_>>()))
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("comparison thread"))
-            .collect()
-    })
-}
-
 impl Shared {
-    /// Records that `ctx` was (or may have been) changed: its copy is not offered to
-    /// the next step without comparing. Dropping it skips a comparison bound to fail.
+    /// Records that `ctx` was (or may have been) changed. Not needed for correctness
+    /// (writes are tracked); it only drops a snapshot the next step will not reuse.
     pub fn changed(&mut self, ctx: Ctx) {
         if let Some(a) = self.copies.remove(&ctx) {
             let size = a.size();
@@ -129,7 +93,7 @@ impl Shared {
         }
     }
 
-    /// Forgets the copies of definitions `model` no longer has.
+    /// Forgets the snapshots of definitions `model` no longer has.
     fn prune(&mut self, model: &Model) {
         let gone: Vec<Ctx> = (self.copies.keys())
             .filter(|c| matches!(c, Ctx::Def(d) if !model.definitions.contains_key(*d)))
@@ -140,46 +104,32 @@ impl Shared {
         }
     }
 
+    /// The snapshot of collection `ctx` (holding `ents`), remembered for the next step.
+    fn freeze(&mut self, ctx: Ctx, ents: &mut Entities) -> Arc<EntitiesSnapshot> {
+        let s = ents.freeze(self.copies.get(&ctx));
+        if let Some(old) = self.copies.insert(ctx, s.clone())
+            && !Arc::ptr_eq(&old, &s)
+        {
+            let size = old.size();
+            discard(old, size);
+        }
+        s
+    }
+
     /// The current state of `model` as a step.
     pub fn take(&mut self, model: &mut Model) -> Step {
         let shell = shell_of(model);
-        let colls: Vec<(Ctx, &Entities)> = std::iter::once((Ctx::Root, &model.root))
-            .chain((model.definitions.iter()).map(|(k, d)| (Ctx::Def(k), &d.entities)))
+        let root = self.freeze(Ctx::Root, &mut model.root);
+        let defs = (model.definitions.iter_mut())
+            .map(|(k, d)| (k, self.freeze(Ctx::Def(k), &mut d.entities)))
             .collect();
-        // Which copies still equal the collections.
-        let mut same = vec![false; colls.len()];
-        {
-            let (index, pairs): (Vec<usize>, Vec<(&Entities, &Entities)>) = (colls.iter())
-                .enumerate()
-                .filter_map(|(i, (c, e))| self.copies.get(c).map(|a| (i, (*e, &**a))))
-                .unzip();
-            for (i, s) in index.into_iter().zip(equal_all(&pairs)) {
-                same[i] = s;
-            }
-        }
-        let mut copies: Vec<Arc<Entities>> = Vec::with_capacity(colls.len());
-        for ((ctx, ents), same) in colls.iter().zip(same) {
-            if same {
-                copies.push(self.copies[ctx].clone());
-            } else {
-                let a = Arc::new((*ents).clone());
-                if let Some(old) = self.copies.insert(*ctx, a.clone()) {
-                    let size = old.size();
-                    discard(old, size);
-                }
-                copies.push(a);
-            }
-        }
-        let mut copies = copies.into_iter();
-        let root = copies.next().expect("the root's copy");
-        let defs = model.definitions.keys().zip(copies).collect();
         self.prune(model);
         Step { shell, root, defs }
     }
 
-    /// Makes `step` the model and returns the state it replaced as a step. Nothing
-    /// is copied for collections the two states share (they stay in place, with their
-    /// spatial index) or that only one of them holds (they are moved).
+    /// Makes `step` the model and returns the state it replaced as a step. Collections
+    /// both states have are rewritten in place where they differ (keeping their
+    /// spatial index when they do not).
     pub fn restore(&mut self, model: &mut Model, step: Step) -> Step {
         let Step { shell, root, defs } = step;
         let mut old = std::mem::replace(model, shell);
@@ -188,43 +138,31 @@ impl Shared {
         for (k, d) in old.definitions.iter_mut() {
             current.insert(Ctx::Def(k), std::mem::take(&mut d.entities));
         }
-        let targets: Vec<(Ctx, Arc<Entities>)> = std::iter::once((Ctx::Root, root))
-            .chain(defs.into_iter().map(|(k, a)| (Ctx::Def(k), a)))
-            .collect();
-        // Collections the step shares with what is there now stay in place (the
-        // comparison catches changes made since the copy).
-        let mut keep = vec![false; targets.len()];
-        {
-            let (index, pairs): (Vec<usize>, Vec<(&Entities, &Entities)>) = (targets.iter())
-                .enumerate()
-                .filter(|(_, (c, t))| self.copies.get(c).is_some_and(|a| Arc::ptr_eq(a, t)))
-                .filter_map(|(i, (c, t))| current.get(c).map(|e| (i, (e, &**t))))
-                .unzip();
-            for (i, s) in index.into_iter().zip(equal_all(&pairs)) {
-                keep[i] = s;
-            }
-        }
-        let mut now: FxMap<Ctx, Arc<Entities>> = FxMap::default();
-        for ((ctx, target), keep) in targets.into_iter().zip(keep) {
+        let targets = std::iter::once((Ctx::Root, root))
+            .chain(defs.into_iter().map(|(k, a)| (Ctx::Def(k), a)));
+        let mut now: FxMap<Ctx, Arc<EntitiesSnapshot>> = FxMap::default();
+        for (ctx, target) in targets {
             let content = match current.remove(&ctx) {
-                Some(e) if keep => {
-                    now.insert(ctx, target);
+                Some(mut e) => {
+                    let before = e.swap_to(&target, self.copies.get(&ctx));
+                    now.insert(ctx, before);
                     e
                 }
-                Some(e) => {
-                    now.insert(ctx, Arc::new(e));
-                    self.unwrap(ctx, target)
-                }
-                None => self.unwrap(ctx, target),
+                None => target.to_entities(),
             };
+            // The collection now holds `target` exactly.
+            if let Some(old) = self.copies.insert(ctx, target) {
+                let size = old.size();
+                discard(old, size);
+            }
             match ctx {
                 Ctx::Root => model.root = content,
                 Ctx::Def(k) => model.definitions[k].entities = content,
             }
         }
         // Definitions only the replaced state has.
-        for (ctx, e) in current {
-            now.insert(ctx, Arc::new(e));
+        for (ctx, mut e) in current {
+            now.insert(ctx, self.freeze(ctx, &mut e));
         }
         self.prune(model);
         let defs = (old.definitions.keys())
@@ -234,20 +172,6 @@ impl Shared {
             shell: old,
             root: now.remove(&Ctx::Root).expect("the root's collection"),
             defs,
-        }
-    }
-
-    /// The content of `target`, which becomes collection `ctx`: moved out when no other
-    /// step holds it, else copied (and `target` is then the shared copy of `ctx`).
-    fn unwrap(&mut self, ctx: Ctx, target: Arc<Entities>) -> Entities {
-        self.changed(ctx);
-        match Arc::try_unwrap(target) {
-            Ok(e) => e,
-            Err(target) => {
-                let e = (*target).clone();
-                self.copies.insert(ctx, target);
-                e
-            }
         }
     }
 }
@@ -310,5 +234,47 @@ mod tests {
         let first = shared.restore(&mut m, now);
         assert_eq!(dump(&m), dump(&third.model()));
         assert_eq!(dump(&first.model()), dump(&model()));
+    }
+
+    /// Within a collection, a step shares the storage chunks an edit did not touch,
+    /// and undo rewrites only those.
+    #[test]
+    fn steps_share_untouched_chunks() {
+        let mut shared = Shared::default();
+        let mut m = Model::default();
+        for i in 0..5000 {
+            let x = i as f64;
+            mt_kernel::add_line(
+                &mut m.root,
+                DVec3::new(x, 0.0, 0.0),
+                DVec3::new(x, 1.0, 0.0),
+            );
+        }
+        let first = shared.take(&mut m);
+        let before = dump(&m);
+        // One vertex moved and one edge removed: two chunks of each map change at most.
+        let v = m.root.vertices.keys().nth(4321).unwrap();
+        m.root.vertices[v].pos.z = 3.0;
+        let e = m.root.edges.keys().nth(17).unwrap();
+        mt_kernel::erase_edge(&mut m.root, e);
+        // Not reported with `changed`: the writes themselves are tracked.
+        let second = shared.take(&mut m);
+        let (same, all) = (second.root.maps().0).chunks_shared_with(first.root.maps().0);
+        assert!(
+            all >= 30 && same + 3 >= all,
+            "{same} of {all} vertex chunks shared"
+        );
+        let (same, all) = (second.root.maps().1).chunks_shared_with(first.root.maps().1);
+        assert!(
+            all >= 15 && same + 1 >= all,
+            "{same} of {all} edge chunks shared"
+        );
+        // The first step still holds the state before the edit.
+        assert_eq!(dump(&first.model()), before);
+        assert_eq!(dump(&second.model()), dump(&m));
+        let now = shared.restore(&mut m, first);
+        assert_eq!(dump(&m), before);
+        shared.restore(&mut m, now);
+        assert_eq!(dump(&m), dump(&second.model()));
     }
 }

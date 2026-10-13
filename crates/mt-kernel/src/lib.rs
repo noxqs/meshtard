@@ -34,6 +34,7 @@ pub mod photo_match;
 pub mod purge;
 pub mod push_pull;
 pub mod sandbox;
+pub mod slot_store;
 pub mod snaps;
 pub mod solid;
 pub mod spatial;

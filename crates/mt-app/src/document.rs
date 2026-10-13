@@ -1598,7 +1598,7 @@ mod tests {
                     .is_some()
             });
         }
-        let actions: [Action; 20] = [
+        let actions: [Action; 24] = [
             ("square", |d| {
                 d.edit(|e| {
                     square(e, 0.0);
@@ -1692,6 +1692,43 @@ mod tests {
                 let e = d.active().edges.keys().next().unwrap();
                 d.delete(&[Owner::Edge(e), Owner::Instance(0)]);
             }),
+            // Enough entities for several storage chunks (`mt_kernel::slot_store`), then
+            // changes to a few of them: steps share the chunks they did not touch.
+            ("many lines", |d| {
+                d.edit(|e| {
+                    for i in 0..700 {
+                        let x = i as f64 * 3.0;
+                        mt_kernel::add_line(
+                            e,
+                            DVec3::new(x, 100.0, 0.0),
+                            DVec3::new(x, 110.0, 1.0),
+                        );
+                    }
+                    true
+                });
+            }),
+            ("untracked change in a shared chunk", |d| {
+                let ents = d.active_mut_untracked();
+                let e = ents.edges.keys().nth(400).unwrap();
+                ents.edges[e].attrs.soft = true;
+                let v = ents.vertices.keys().nth(900).unwrap();
+                ents.vertices[v].pos.z += 0.5;
+            }),
+            ("erase from the middle", |d| {
+                let edges: Vec<Owner> = (d.active().edges.keys())
+                    .skip(300)
+                    .step_by(7)
+                    .take(40)
+                    .map(Owner::Edge)
+                    .collect();
+                d.erase(&edges, false, false);
+            }),
+            ("draw into freed slots", |d| {
+                d.edit(|e| {
+                    let a = DVec3::new(0.0, -50.0, 0.0);
+                    !mt_kernel::add_line(e, a, a + DVec3::X * 9.0).is_empty()
+                });
+            }),
         ];
         let mut doc = Document::untitled();
         // The state before each undo step.
@@ -1707,7 +1744,7 @@ mod tests {
         let names: Vec<_> = before.iter().map(|b| b.0).collect();
         assert_eq!(
             before.len(),
-            16,
+            19,
             "every edit kind is one undo step: {names:?}"
         );
         let mut after = Vec::new();

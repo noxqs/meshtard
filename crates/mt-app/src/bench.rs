@@ -463,6 +463,21 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
         checksum(&scene),
         "{name}: undo restores the scene"
     );
+    // A small edit (one of the moved entities) and its undo step: what an undo step
+    // costs when an edit touches little of a big context.
+    let one: Vec<Owner> = targets.iter().copied().take(1).collect();
+    report.time(name, "small edit", || {
+        doc.edit(|ents| {
+            crate::modify::apply(ents, &one, xf, false);
+            true
+        });
+    });
+    report.time(name, "undo snapshot (after a small edit)", || {
+        std::hint::black_box(doc.snapshot());
+    });
+    report.time(name, "undo (small edit)", || {
+        doc.undo();
+    });
 }
 
 fn wanted(name: &str) -> bool {
