@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=meshtard
+Name=Meshtard
 Comment=3D modeling
 Exec=meshtard %f
 Icon=meshtard
