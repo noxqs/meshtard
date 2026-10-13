@@ -56,3 +56,7 @@ These depend on API behaviour that could not be tried outside SketchUp. Check `l
 - Monochrome uses `Sketchup.send_action('renderMonochrome:')`, which runs later; the script waits 1.5 s before saving. The `RenderMode` and `EdgeDisplayMode` values used for the others (0 wireframe, 1 hidden line, `EdgeDisplayMode` 0 = edges off) are not documented. Each `variants/*.json` records the values that were actually set.
 - Fog distances, shadow time (`Time.utc`), tag dashes (a line style name containing "Dash") and the environment (a small generated `.hdr` file, SketchUp 2025+) are best guesses.
 - There is no API for Two-Point Perspective, Convert to Polygon, text and dimension fonts, or dimension expert settings. Those are the manual steps.
+
+## Optional: 2021+ file format checks
+
+If you have time, try the few open-in-SketchUp checks listed in `spec/VFF_FORMAT.md` section 6 (does SketchUp open a re-zipped file, or one with the header value changed). They tell us whether writing SketchUp 2021+ files is feasible later (low priority).
