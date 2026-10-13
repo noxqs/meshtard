@@ -778,7 +778,11 @@ impl App {
             }
             None => Default::default(),
         };
+        // The live operation's drawing goes with it: a stretch left behind would
+        // draw the edges of whatever sits at its old positions moved (after an undo,
+        // the restored geometry).
         self.live = None;
+        self.stretch = Default::default();
         self.ghost_xf = None;
         self.viewport.set_preview_faces(device, &[], &[]);
         self.update_highlight(device);

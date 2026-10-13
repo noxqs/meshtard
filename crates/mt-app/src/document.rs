@@ -2314,4 +2314,138 @@ mod tests {
             }
         }
     }
+
+    /// The GUI's sequence on a blank model: Rectangle, Push/Pull it into a box, Move
+    /// or Rotate part of it, or a copy (the tools' clicks inside `Document::edit`, as
+    /// the app runs them), then undo and redo: each step comes back exactly. (What
+    /// the viewport draws after the undo: `live_view`'s
+    /// `a_finished_moves_stretch_is_not_drawn`.)
+    #[test]
+    fn undo_after_moving_part_of_a_pushed_box() {
+        use crate::modify::{Kind, ModifyTool, PushPull, Transform};
+        fn at(p: DVec3) -> mt_infer::Inference {
+            mt_infer::Inference {
+                point: p,
+                kind: mt_infer::Kind::Free,
+                edge: None,
+                guide: None,
+                locked: false,
+                normal: None,
+                segment: None,
+                container: None,
+            }
+        }
+        fn modify(
+            doc: &mut Document,
+            tool: &mut dyn ModifyTool,
+            picked: Option<Owner>,
+            selection: &[Owner],
+            p: DVec3,
+        ) -> bool {
+            doc.edit(|ents| {
+                let mut ctx = crate::modify::Ctx {
+                    ents,
+                    picked,
+                    selection,
+                    ctrl: false,
+                    eye: DVec3::new(30.0, -40.0, 50.0),
+                };
+                tool.click(&mut ctx, &at(p))
+            })
+        }
+        fn face_toward(e: &Entities, n: DVec3) -> FaceId {
+            (e.faces.iter().find(|(_, f)| f.normal.dot(n) > 0.9))
+                .map(|(k, _)| k)
+                .unwrap()
+        }
+        fn edge_where(e: &Entities, f: impl Fn(DVec3, DVec3) -> bool) -> EdgeId {
+            (e.edges.keys())
+                .find(|&k| f(e.pos(e.edges[k].start), e.pos(e.edges[k].end)))
+                .unwrap()
+        }
+        // What is moved, from the box: the entity under the cursor or a selection.
+        type Pick = fn(&Entities) -> (Option<Owner>, Vec<Owner>);
+        let picks: [(&str, Pick); 6] = [
+            ("top edge", |e| {
+                let k = edge_where(e, |a, b| a.z > 4.0 && b.z > 4.0);
+                (Some(Owner::Edge(k)), vec![])
+            }),
+            ("vertical edge", |e| {
+                let k = edge_where(e, |a, b| (a - b).z.abs() > 4.0);
+                (Some(Owner::Edge(k)), vec![])
+            }),
+            ("top face", |e| {
+                (Some(Owner::Face(face_toward(e, DVec3::Z))), vec![])
+            }),
+            ("side face", |e| {
+                (Some(Owner::Face(face_toward(e, DVec3::X))), vec![])
+            }),
+            ("selected top face and an edge", |e| {
+                let f = face_toward(e, DVec3::Z);
+                let k = edge_where(e, |a, b| a.z < 1.0 && b.z < 1.0);
+                (None, vec![Owner::Face(f), Owner::Edge(k)])
+            }),
+            ("everything selected", |e| {
+                (None, crate::context_extra::all_owners(e))
+            }),
+        ];
+        // `dump`, with negative zeros as zeros: a translation recomputes the face
+        // normals (-0.0 becomes 0.0), and undo keeps storage chunks that compare
+        // equal.
+        fn exact(doc: &Document) -> String {
+            dump(doc).replace("-0.0,", "0.0,").replace("-0.0)", "0.0)")
+        }
+        for (kind, copy, (name, pick)) in [Kind::Move, Kind::Rotate]
+            .into_iter()
+            .flat_map(|k| [false, true].map(|c| (k, c)))
+            .flat_map(|(k, c)| picks.map(|p| (k, c, p)))
+        {
+            {
+                let name = format!("{kind:?} {name}, copy {copy}");
+                let mut doc = Document::untitled();
+                let mut states = vec![exact(&doc)];
+                let mut rect = crate::tools::for_command("tool.rectangle").unwrap();
+                assert!(!doc.edit(|e| rect.click(e, &at(DVec3::ZERO))));
+                assert!(doc.edit(|e| rect.click(e, &at(DVec3::new(10.0, 8.0, 0.0)))));
+                states.push(exact(&doc));
+                let f = doc.active().faces.keys().next().unwrap();
+                let mut pp = PushPull::default();
+                let p = DVec3::new(5.0, 4.0, 0.0);
+                assert!(!modify(&mut doc, &mut pp, Some(Owner::Face(f)), &[], p));
+                // Pulled up (a ground face points down: the distance is along it).
+                let n = doc.active().faces[f].normal;
+                let up = p + n * 5.0 * n.z.signum();
+                assert!(modify(&mut doc, &mut pp, Some(Owner::Face(f)), &[], up));
+                states.push(exact(&doc));
+                let (picked, sel) = pick(doc.active());
+                let mut tool = Transform::new(kind);
+                if copy {
+                    tool.toggle_ctrl();
+                }
+                // Move: base point, destination. Rotate: center, start, end (a
+                // quarter turn about the vertical through the corner).
+                let c = DVec3::new(10.0, 8.0, 5.0);
+                let clicks = match kind {
+                    Kind::Move => vec![c, c + DVec3::new(3.0, 2.0, 1.0)],
+                    Kind::Rotate => vec![c, c + DVec3::X, c + DVec3::Y],
+                };
+                let (last, first) = clicks.split_last().unwrap();
+                for &p in first {
+                    assert!(!modify(&mut doc, &mut tool, picked, &sel, p), "{name}");
+                }
+                assert!(modify(&mut doc, &mut tool, picked, &sel, *last), "{name}");
+                states.push(exact(&doc));
+                assert_ne!(states[3], states[2], "{name}");
+                assert_eq!(doc.undo.len(), 3, "{name}: three undo steps");
+                for (i, s) in states.iter().enumerate().rev().skip(1) {
+                    assert!(doc.undo());
+                    assert_eq!(exact(&doc), *s, "{name}: undo to state {i}");
+                }
+                for (i, s) in states.iter().enumerate().skip(1) {
+                    assert!(doc.redo());
+                    assert_eq!(exact(&doc), *s, "{name}: redo to state {i}");
+                }
+            }
+        }
+    }
 }

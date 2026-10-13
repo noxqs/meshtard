@@ -143,7 +143,8 @@ impl App {
             m.cancel();
         }
         self.shift_lock.reset(&mut self.engine);
-        self.live = None;
+        // `self.live` stays: the next frame's `update_live` sees the operation gone
+        // and puts back what it drew (the hidden targets, the preview, the stretch).
         true
     }
 

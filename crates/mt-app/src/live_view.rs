@@ -17,6 +17,7 @@ pub struct Highlight<'a> {
     pub scene: &'a Scene,
     pub selection: &'a Selection,
     pub document: Option<&'a Document>,
+    /// The stretch of `live`; ignored without one.
     pub stretch: &'a Stretch,
     /// Compatibility > Bounding box only.
     pub box_only: bool,
@@ -71,7 +72,8 @@ impl Highlight<'_> {
             }
             _ => sel_color,
         };
-        let stretching = !self.stretch.owners.is_empty();
+        // The stretch belongs to the live operation: without one it is stale.
+        let stretching = self.live.is_some() && !self.stretch.owners.is_empty();
         // Compatibility > Bounding box only: selected groups and components show
         // their box, not their edges.
         let box_only = self.box_only;
@@ -267,6 +269,75 @@ pub fn all_owners(scene: &Scene) -> Vec<Owner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The edges `Highlight` draws, as endpoint pairs.
+    fn drawn(
+        doc: &Document,
+        scene: &Scene,
+        live: Option<&(Vec<Owner>, DMat4, bool)>,
+        stretch: &Stretch,
+    ) -> Vec<([f32; 3], [f32; 3])> {
+        let (edges, _, _) = Highlight {
+            scene,
+            selection: &Selection::default(),
+            document: Some(doc),
+            stretch,
+            box_only: false,
+            live,
+            ctx_xf: DMat4::IDENTITY,
+            inst_bounds: &HashMap::new(),
+            ghost: None,
+            cut_lines: &[],
+        }
+        .build();
+        edges.iter().map(|s| (s.a, s.b)).collect()
+    }
+
+    /// Move a box's top edge, then undo: the box is drawn as it is, not with the
+    /// edges at the moved corners stretched there as during the move. The app keeps
+    /// the move's stretch until the next live operation; it used to draw it with no
+    /// operation running, so after the undo the edges met the moved corners ("the box
+    /// half restored", and after a second undo the rectangle "with the moved corner").
+    #[test]
+    fn a_finished_moves_stretch_is_not_drawn() {
+        let mut doc = Document::untitled();
+        doc.edit(|e| {
+            let p = [(0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (0.0, 8.0)]
+                .map(|(x, y)| DVec3::new(x, y, 0.0));
+            for i in 0..4 {
+                mt_kernel::add_line(e, p[i], p[(i + 1) % 4]);
+            }
+            let f = e.faces.keys().next().unwrap();
+            mt_kernel::push_pull::push_pull(e, f, -5.0, false).is_some()
+        });
+        let top = (doc.active().edges.keys())
+            .find(|&k| {
+                let (e, ents) = (&doc.active().edges[k], doc.active());
+                ents.pos(e.start).z > 1.0 && ents.pos(e.end).z > 1.0
+            })
+            .unwrap();
+        let box_scene = doc.scene();
+        let box_edges = drawn(&doc, &box_scene, None, &Stretch::default());
+        assert_eq!(box_edges.len(), 12);
+        // The move as it runs: connected edges stretch.
+        let live = (
+            vec![Owner::Edge(top)],
+            DMat4::from_translation(DVec3::new(3.0, 2.0, 1.0)),
+            false,
+        );
+        let stretch =
+            crate::move_extra::live_stretch(Some(&doc), &Some(live.clone()), DMat4::IDENTITY);
+        assert!(!stretch.owners.is_empty());
+        assert_ne!(drawn(&doc, &box_scene, Some(&live), &stretch), box_edges);
+        // Committed, then undone: no operation runs, the stretch is the move's.
+        doc.edit(|e| {
+            crate::modify::apply(e, &live.0, live.1, false);
+            true
+        });
+        assert!(doc.undo());
+        let scene = doc.scene();
+        assert_eq!(drawn(&doc, &scene, None, &stretch), box_edges);
+    }
 
     /// The bit sets give what a hash set gives, for every corpus file (with hidden
     /// geometry shown: hidden faces add edges owned by their face).
