@@ -156,6 +156,23 @@ impl Format3d {
         )
     }
 
+    /// The unit File > Import assumes for this format (its import default), so a
+    /// file exported with the default reads back at the same size. `None`: the
+    /// model's units (formats that carry their own units).
+    fn default_units(self) -> Option<Units> {
+        use mt_kernel::formats::Kind;
+        let kind = match self {
+            Self::Obj => Kind::Obj,
+            Self::Stl => Kind::Stl,
+            Self::Other(ExportKind::Ply) => Kind::Ply,
+            Self::Other(ExportKind::ThreeMf) => Kind::ThreeMf,
+            Self::Other(ExportKind::Fbx) => Kind::Fbx,
+            Self::Other(ExportKind::ThreeDs) => Kind::ThreeDs,
+            _ => return None,
+        };
+        Some(kind.default_hints().0)
+    }
+
     /// STL and PLY are binary or ASCII.
     fn has_ascii(self) -> bool {
         matches!(self, Self::Stl | Self::Other(ExportKind::Ply))
@@ -568,6 +585,7 @@ impl App {
                                 for f in Format3d::ALL {
                                     if ui.selectable_value(&mut d.format, f, f.label()).changed() {
                                         (d.two_sided, d.y_up) = f.defaults();
+                                        d.units = f.default_units();
                                     }
                                 }
                             });
