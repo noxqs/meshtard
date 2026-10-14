@@ -24,3 +24,7 @@ Changes since 0.1.4, grouped by area (each area under its own `##` heading).
 - Extensions can keep attribute dictionaries on groups and components (`get_attribute`, `set_attribute`, `delete_attribute`); they are saved in the .skp file, and attribute dictionaries of opened .skp files are now kept when saving.
 - Extension tools can have their own mouse cursor (a PNG with a hotspot).
 - A single permission of an installed extension can be taken back (or approved) in the Extension Manager without reinstalling it.
+
+## Import and export
+
+- IFC import cuts openings out of elements made of mapped items (shared type geometry) and out of open shells with flat holes, and reads curved faces on surfaces of extrusion, surfaces of revolution and offset surfaces, and cylinder bands without a seam edge. Openings come in as hidden groups next to their element. IFC export now writes those openings back, rooms (spaces) with what they contain, textures, and loose edges.

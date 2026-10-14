@@ -34,8 +34,17 @@
 //!   carries the transform's scale and mirroring (shear is lost).
 //! - Loose faces of the model root become one proxy named after the file.
 //! - Materials are `IfcSurfaceStyle`s (shading color and transparency) on the face
-//!   sets; faces with the default material have no style. Textures, edges, hidden
-//!   entities and hidden tags are left out.
+//!   sets; faces with the default material have no style. A material's texture is
+//!   an `IfcBlobTexture` (PNG, JPEG or BMP) in an `IfcSurfaceStyleWithTextures`, the
+//!   faces' texture coordinates an `IfcIndexedTriangleTextureMap`. Hidden entities
+//!   and hidden tags are left out (but for spaces and openings, below).
+//! - Loose edges (without faces) are polylines of an `IfcGeometricCurveSet` in an
+//!   `Annotation` representation of their element (the import does not read them).
+//! - Space groups (Type `IfcSpace`, hidden or not) are `IfcSpace`s aggregated under
+//!   their storey (or space), with their faces as their body and what they hold
+//!   contained in them. Openings an IFC import kept (hidden `IfcOpeningElement`
+//!   groups naming their element's GlobalId) are `IfcOpeningElement`s voiding the
+//!   element they name (`IfcRelVoidsElement`), placed relative to it.
 //! - Units: the chosen length unit (SI with prefix, or inch / foot as conversion
 //!   based units), square and cubic meters, radians.
 //! - GlobalIds are made from the file name, so the same model exports the same file;
@@ -44,12 +53,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
-use glam::{DMat3, DMat4, DVec3};
+use glam::{DMat3, DMat4, DVec2, DVec3};
 
-use super::ifc::split_rigid;
+use super::ifc::{OPENING_DICT, OPENING_KEY, split_rigid};
 use super::step::{quote, real};
 use super::{ExportOptions, Files};
-use crate::entities::{DefinitionId, Instance, MaterialId};
+use crate::entities::{DefinitionId, Entities, Instance, MaterialId};
 use crate::mesh_export::{Triangle, Units, face_triangles};
 use crate::model::Model;
 use crate::solid;
@@ -76,6 +85,15 @@ struct Writer<'a> {
     metre: Option<u64>,
     /// GlobalIds written.
     used: HashSet<String>,
+    /// Imported openings (hidden `IfcOpeningElement` groups) by the GlobalId of the
+    /// element they void: definition, world transform (inches), name.
+    openings: HashMap<String, Vec<(DefinitionId, DMat4, String)>>,
+    /// The annotation subcontext, made when loose edges are written.
+    annotation: Option<u64>,
+    /// Material -> its surface texture, when it has one.
+    textures: BTreeMap<MaterialId, u64>,
+    /// The `Body` context, kept for the annotation subcontext.
+    ctx: u64,
 }
 
 fn splitmix(mut x: u64) -> u64 {
@@ -198,27 +216,61 @@ impl Writer<'_> {
             return *s;
         }
         let model = self.model;
-        let s = m.and_then(|i| model.materials.get(i)).map(|mat| {
-            let [r, g, b] = mat.color.map(|c| real(f64::from(c) / 255.0));
-            let colour = self.add(format!("IFCCOLOURRGB($,{r},{g},{b})"));
-            let shading = self.add(format!(
-                "IFCSURFACESTYLESHADING(#{colour},{})",
-                real(1.0 - mat.opacity.clamp(0.0, 1.0))
-            ));
-            self.add(format!(
-                "IFCSURFACESTYLE({},.BOTH.,(#{shading}))",
-                quote(&mat.name)
-            ))
-        });
+        let s = m
+            .and_then(|i| Some((i, model.materials.get(i)?)))
+            .map(|(i, mat)| {
+                let [r, g, b] = mat.color.map(|c| real(f64::from(c) / 255.0));
+                let colour = self.add(format!("IFCCOLOURRGB($,{r},{g},{b})"));
+                let shading = self.add(format!(
+                    "IFCSURFACESTYLESHADING(#{colour},{})",
+                    real(1.0 - mat.opacity.clamp(0.0, 1.0))
+                ));
+                let mut styles = format!("#{shading}");
+                // A texture image goes in as a blob (the file stands alone).
+                let format = mat.texture.as_ref().and_then(|t| {
+                    let d = &t.data[..];
+                    let f = if d.starts_with(b"\x89PNG") {
+                        "PNG"
+                    } else if d.starts_with(b"\xff\xd8") {
+                        "JPG"
+                    } else if d.starts_with(b"BM") {
+                        "BMP"
+                    } else {
+                        return None;
+                    };
+                    Some((f, d))
+                });
+                if let Some((f, data)) = format {
+                    let mut hex = String::with_capacity(data.len() * 2 + 3);
+                    hex.push_str("\"0");
+                    for b in data {
+                        let _ = write!(hex, "{b:02X}");
+                    }
+                    hex.push('"');
+                    let tex = self.add(format!("IFCBLOBTEXTURE(.T.,.T.,$,$,$,'{f}',{hex})"));
+                    let with = self.add(format!("IFCSURFACESTYLEWITHTEXTURES((#{tex}))"));
+                    let _ = write!(styles, ",#{with}");
+                    self.textures.insert(i, tex);
+                }
+                self.add(format!(
+                    "IFCSURFACESTYLE({},.BOTH.,({styles}))",
+                    quote(&mat.name)
+                ))
+            });
         self.styles.insert(m, s);
         s
     }
 
-    /// Triangulated face sets (one per material, styled) of triangles in inches.
+    /// Triangulated face sets (one per material, styled, textured with the
+    /// triangles' texture coordinates) of triangles in inches.
     fn face_sets(&mut self, tris: Vec<Triangle>) -> Vec<u64> {
-        let mut by_material: BTreeMap<Option<MaterialId>, Vec<[DVec3; 3]>> = BTreeMap::new();
+        type Tri = ([DVec3; 3], Option<[DVec2; 3]>);
+        let mut by_material: BTreeMap<Option<MaterialId>, Vec<Tri>> = BTreeMap::new();
         for t in tris {
-            by_material.entry(t.material).or_default().push(t.points);
+            by_material
+                .entry(t.material)
+                .or_default()
+                .push((t.points, t.uv));
         }
         let mut out = Vec::new();
         for (m, tris) in by_material {
@@ -226,7 +278,7 @@ impl Writer<'_> {
             let mut coords = String::new();
             let mut faces = String::new();
             let mut n = 0;
-            for t in &tris {
+            for (t, _) in &tris {
                 let mut ids = [0; 3];
                 for (k, p) in t.iter().enumerate() {
                     let p = *p * self.scale;
@@ -250,6 +302,35 @@ impl Writer<'_> {
             let set = self.add(format!("IFCTRIANGULATEDFACESET(#{pl},$,$,({faces}),$)"));
             if let Some(s) = self.style(m) {
                 self.add(format!("IFCSTYLEDITEM(#{set},(#{s}),$)"));
+            }
+            if let Some(tex) = m.and_then(|m| self.textures.get(&m).copied()) {
+                // Texture coordinates per triangle corner, shared when equal.
+                let mut index: HashMap<[u64; 2], usize> = HashMap::new();
+                let mut coords = String::new();
+                let mut corners = String::new();
+                for (_, uv) in &tris {
+                    let uv = uv.unwrap_or([DVec2::ZERO; 3]);
+                    let ids = uv.map(|q| {
+                        let n = index.len();
+                        *index
+                            .entry(q.to_array().map(f64::to_bits))
+                            .or_insert_with(|| {
+                                if n > 0 {
+                                    coords.push(',');
+                                }
+                                let _ = write!(coords, "({},{})", real(q.x), real(q.y));
+                                n + 1
+                            })
+                    });
+                    if !corners.is_empty() {
+                        corners.push(',');
+                    }
+                    let _ = write!(corners, "({},{},{})", ids[0], ids[1], ids[2]);
+                }
+                let tvl = self.add(format!("IFCTEXTUREVERTEXLIST(({coords}))"));
+                self.add(format!(
+                    "IFCINDEXEDTRIANGLETEXTUREMAP((#{tex}),#{set},#{tvl},({corners}))"
+                ));
             }
             out.push(set);
         }
@@ -303,8 +384,59 @@ impl Writer<'_> {
         result
     }
 
+    /// An `Annotation` representation of polylines (inches): a geometric curve set,
+    /// `None` without lines.
+    fn curves(&mut self, lines: &[Vec<DVec3>]) -> Option<u64> {
+        if lines.is_empty() {
+            return None;
+        }
+        let ctx = match self.annotation {
+            Some(c) => c,
+            None => {
+                let c = self.add(format!(
+                    "IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Annotation','Model',*,*,*,*,#{},$,.MODEL_VIEW.,$)",
+                    self.ctx
+                ));
+                self.annotation = Some(c);
+                c
+            }
+        };
+        let mut polys = Vec::new();
+        for l in lines {
+            let pts: Vec<u64> = l.iter().map(|p| self.point(*p * self.scale)).collect();
+            polys.push(self.add(format!("IFCPOLYLINE(({}))", refs(&pts))));
+        }
+        let set = self.add(format!("IFCGEOMETRICCURVESET(({}))", refs(&polys)));
+        Some(self.add(format!(
+            "IFCSHAPEREPRESENTATION(#{ctx},'Annotation','GeometricCurveSet',(#{set}))"
+        )))
+    }
+
+    /// A product definition shape of a body of `items` (none: no body) and the
+    /// representation `curves`; `$` when both are missing.
+    fn product_shape(&mut self, items: &[u64], mapped: bool, curves: Option<u64>) -> String {
+        let mut reps = Vec::new();
+        if !items.is_empty() {
+            let kind = if mapped {
+                "MappedRepresentation"
+            } else {
+                "Tessellation"
+            };
+            reps.push(self.shape(kind, items));
+        }
+        reps.extend(curves);
+        if reps.is_empty() {
+            return "$".to_owned();
+        }
+        format!(
+            "#{}",
+            self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,({}))", refs(&reps)))
+        )
+    }
+
     /// An element of `class` (a proxy when `None`) with GlobalId `guid` (a new one
-    /// when it is not usable).
+    /// when it is not usable), its body `items` and its loose edges `curves` (an
+    /// [`Self::curves`] representation).
     #[allow(clippy::too_many_arguments)]
     fn element(
         &mut self,
@@ -315,21 +447,9 @@ impl Writer<'_> {
         placement: u64,
         items: &[u64],
         mapped: bool,
+        curves: Option<u64>,
     ) -> u64 {
-        let rep = if items.is_empty() {
-            "$".to_owned()
-        } else {
-            let kind = if mapped {
-                "MappedRepresentation"
-            } else {
-                "Tessellation"
-            };
-            let shape = self.shape(kind, items);
-            format!(
-                "#{}",
-                self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{shape}))"))
-            )
-        };
+        let rep = self.product_shape(items, mapped, curves);
         let g = self.guid_or(guid);
         let ot = if object_type.is_empty() {
             "$".to_owned()
@@ -407,7 +527,10 @@ impl Writer<'_> {
             return None;
         }
         let def = model.definitions.get(inst.definition)?;
-        if def.entities.faces.is_empty() && def.entities.instances.is_empty() {
+        if def.entities.faces.is_empty()
+            && def.entities.instances.is_empty()
+            && def.entities.edges.values().all(|e| !e.faces.is_empty())
+        {
             return None;
         }
         let world = parent_world * inst.transform;
@@ -486,6 +609,14 @@ impl Writer<'_> {
             ""
         };
         let object_type = if def.is_group { "" } else { def.name.as_str() };
+        // Loose edges, of the body and of the components made part of it.
+        let mut lines = Vec::new();
+        loose_lines(model, &def.entities, local, &mut lines);
+        for k in &inline {
+            let d = &model.definitions[k.definition];
+            loose_lines(model, &d.entities, local * k.transform, &mut lines);
+        }
+        let curves = self.curves(&lines);
         let proxy = self.element(
             Some(&class),
             guid,
@@ -494,6 +625,7 @@ impl Writer<'_> {
             placement,
             &items,
             mapped,
+            curves,
         );
         if let Some(t) = ty {
             self.typed.entry(t).or_default().push(proxy);
@@ -515,6 +647,14 @@ impl Writer<'_> {
             Some(def.name.as_str())
         };
         self.properties(proxy, &class, reference, volume);
+        // Imported openings voiding it.
+        if def.is_group
+            && let Some(openings) = self.openings.remove(def.description.as_str())
+        {
+            for (d, w, name) in openings {
+                self.opening(proxy, rigid, placement, d, w, &name);
+            }
+        }
         stack.push(inst.definition);
         let kids: Vec<u64> = def
             .entities
@@ -532,6 +672,115 @@ impl Writer<'_> {
             ));
         }
         Some(proxy)
+    }
+
+    /// An `IfcOpeningElement` voiding `element` (placed at `element_rigid` by
+    /// `element_placement`): the faces of definition `def` placed by `world`.
+    fn opening(
+        &mut self,
+        element: u64,
+        element_rigid: DMat4,
+        element_placement: u64,
+        def: DefinitionId,
+        world: DMat4,
+        name: &str,
+    ) {
+        let model = self.model;
+        let Some(d) = model.definitions.get(def) else {
+            return;
+        };
+        let (rigid, local) = split_rigid(world);
+        let mut tris = Vec::new();
+        face_triangles(model, &d.entities, local, None, &mut tris);
+        if tris.is_empty() {
+            return;
+        }
+        let axis = self.axis2(element_rigid.inverse() * rigid);
+        let pl = self.add(format!("IFCLOCALPLACEMENT(#{element_placement},#{axis})"));
+        let sets = self.face_sets(tris);
+        let rep = self.product_shape(&sets, false, None);
+        let g = self.guid_or(&d.description);
+        let opening = self.add(format!(
+            "IFCOPENINGELEMENT({g},$,{},$,$,#{pl},{rep},$,.OPENING.)",
+            quote(name)
+        ));
+        let g = self.guid();
+        self.add(format!(
+            "IFCRELVOIDSELEMENT({g},$,$,$,#{element},#{opening})"
+        ));
+    }
+
+    /// The `IfcSpace` of a space group (written even when hidden, as spaces come in
+    /// from IFC; hidden faces included), what it holds contained in it and the
+    /// spaces in it aggregated under it. Arguments as for [`Self::instance`].
+    fn space(
+        &mut self,
+        inst: &Instance,
+        parent_world: DMat4,
+        parent_rigid: DMat4,
+        parent_placement: u64,
+        inherited: Option<MaterialId>,
+        stack: &mut Vec<DefinitionId>,
+    ) -> Option<u64> {
+        let model = self.model;
+        if !layer_visible(model, inst.layer) || stack.contains(&inst.definition) || stack.len() > 32
+        {
+            return None;
+        }
+        let def = model.definitions.get(inst.definition)?;
+        let world = parent_world * inst.transform;
+        let (rigid, local) = split_rigid(world);
+        let axis = self.axis2(parent_rigid.inverse() * rigid);
+        let placement = self.add(format!("IFCLOCALPLACEMENT(#{parent_placement},#{axis})"));
+        let material = inst.material.or(inherited);
+        let mut shown = def.entities.clone();
+        for f in shown.faces.values_mut() {
+            f.attrs.hidden = false;
+        }
+        let mut tris = Vec::new();
+        face_triangles(model, &shown, local, material, &mut tris);
+        let sets = self.face_sets(tris);
+        let rep = self.product_shape(&sets, false, None);
+        let name = if inst.name.is_empty() {
+            &def.name
+        } else {
+            &inst.name
+        };
+        let g = self.guid_or(&def.description);
+        let space = self.add(format!(
+            "IFCSPACE({g},$,{},$,$,#{placement},{rep},$,.ELEMENT.,.NOTDEFINED.,$)",
+            quote(name)
+        ));
+        stack.push(inst.definition);
+        let (mut spaces, mut contained) = (Vec::new(), Vec::new());
+        for k in &def.entities.instances {
+            if is_space(model, k) {
+                spaces.extend(self.space(k, world, rigid, placement, material, stack));
+            } else {
+                contained.extend(self.instance(k, world, rigid, placement, material, stack));
+            }
+        }
+        stack.pop();
+        self.relate(space, &spaces, &contained);
+        Some(space)
+    }
+
+    /// `parts` aggregated under `whole` and `contained` in it (each when any).
+    fn relate(&mut self, whole: u64, parts: &[u64], contained: &[u64]) {
+        if !parts.is_empty() {
+            let g = self.guid();
+            self.add(format!(
+                "IFCRELAGGREGATES({g},$,$,$,#{whole},({}))",
+                refs(parts)
+            ));
+        }
+        if !contained.is_empty() {
+            let g = self.guid();
+            self.add(format!(
+                "IFCRELCONTAINEDINSPATIALSTRUCTURE({g},$,$,$,({}),#{whole})",
+                refs(contained)
+            ));
+        }
     }
 
     fn units(&mut self, units: Units) -> u64 {
@@ -733,31 +982,103 @@ struct Spatial<'m> {
     building: Option<(&'m str, &'m str)>,
     /// Storey groups: instance, world transform of its parent, inherited material.
     storeys: Vec<(&'m Instance, DMat4, Option<MaterialId>)>,
+    /// Space groups outside storeys.
+    spaces: Vec<(&'m Instance, DMat4, Option<MaterialId>)>,
     /// Other instances outside storeys.
     elements: Vec<(&'m Instance, DMat4, Option<MaterialId>)>,
     /// Loose faces of the root and the project / site / building groups (world).
     loose: Vec<Triangle>,
+    /// Their loose edges.
+    loose_lines: Vec<Vec<DVec3>>,
 }
 
 const ABOVE_STOREY: [&str; 3] = ["IfcProject", "IfcSite", "IfcBuilding"];
 
-/// The instances of `ents` (placed by `xf`) with space groups replaced by their
-/// contents (spaces are not written; what they hold is contained in the storey).
-fn expand_spaces<'m>(
-    model: &'m Model,
-    ents: &'m crate::entities::Entities,
+/// Whether `inst` is a space group (Type `IfcSpace`).
+fn is_space(model: &Model, inst: &Instance) -> bool {
+    model
+        .definitions
+        .get(inst.definition)
+        .is_some_and(|d| d.attributes.kind == "IfcSpace")
+}
+
+/// The loose edges (no faces) of `ents` that show, placed by `xf`, chained into
+/// polylines.
+fn loose_lines(model: &Model, ents: &Entities, xf: DMat4, out: &mut Vec<Vec<DVec3>>) {
+    use crate::entities::{EdgeId, VertexId};
+    let loose: Vec<EdgeId> = ents
+        .edges
+        .iter()
+        .filter(|(_, e)| {
+            e.faces.is_empty() && !e.attrs.hidden && layer_visible(model, e.attrs.layer)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    let mut at: BTreeMap<VertexId, Vec<EdgeId>> = BTreeMap::new();
+    for &e in &loose {
+        let ed = &ents.edges[e];
+        at.entry(ed.start).or_default().push(e);
+        at.entry(ed.end).or_default().push(e);
+    }
+    let mut used: HashSet<EdgeId> = HashSet::new();
+    // Chains start at ends and branch points, then closed loops anywhere.
+    let starts: Vec<VertexId> = at
+        .iter()
+        .filter(|(_, v)| v.len() != 2)
+        .map(|(&v, _)| v)
+        .chain(at.keys().copied())
+        .collect();
+    for v0 in starts {
+        while let Some(&first) = at[&v0].iter().find(|e| !used.contains(*e)) {
+            let mut pts = vec![xf.transform_point3(ents.pos(v0))];
+            let (mut e, mut v) = (first, v0);
+            loop {
+                used.insert(e);
+                v = ents.edges[e].other(v);
+                pts.push(xf.transform_point3(ents.pos(v)));
+                let next = at[&v].iter().find(|x| !used.contains(*x));
+                match next {
+                    Some(&n) if at[&v].len() == 2 => e = n,
+                    _ => break,
+                }
+            }
+            out.push(pts);
+        }
+    }
+}
+
+/// Imported openings under `ents` (placed by `xf`): hidden `IfcOpeningElement`
+/// groups naming the element they void, by its GlobalId.
+fn find_openings(
+    model: &Model,
+    ents: &Entities,
     xf: DMat4,
-    inherited: Option<MaterialId>,
-    out: &mut Vec<(&'m Instance, DMat4, Option<MaterialId>)>,
+    out: &mut HashMap<String, Vec<(DefinitionId, DMat4, String)>>,
     depth: usize,
 ) {
-    for k in &ents.instances {
-        match model.definitions.get(k.definition) {
-            Some(d) if d.attributes.kind == "IfcSpace" && !k.hidden && depth < 8 => {
-                let m = k.material.or(inherited);
-                expand_spaces(model, &d.entities, xf * k.transform, m, out, depth + 1);
+    for inst in &ents.instances {
+        let Some(d) = model.definitions.get(inst.definition) else {
+            continue;
+        };
+        let world = xf * inst.transform;
+        let voids = inst
+            .attrs
+            .dictionaries
+            .get(OPENING_DICT)
+            .and_then(|x| x.get(OPENING_KEY));
+        match voids {
+            Some(mt_skp::AttrValue::String(g)) if d.attributes.kind == "IfcOpeningElement" => {
+                let name = if inst.name.is_empty() {
+                    &d.name
+                } else {
+                    &inst.name
+                };
+                out.entry(g.clone())
+                    .or_default()
+                    .push((inst.definition, world, name.clone()));
             }
-            _ => out.push((k, xf, inherited)),
+            _ if depth < 32 => find_openings(model, &d.entities, world, out, depth + 1),
+            _ => {}
         }
     }
 }
@@ -774,13 +1095,14 @@ fn find_spatial<'m>(
     depth: usize,
 ) {
     for inst in &ents.instances {
-        if inst.hidden || !layer_visible(model, inst.layer) {
-            continue;
-        }
         let Some(def) = model.definitions.get(inst.definition) else {
             continue;
         };
         let kind = def.attributes.kind.as_str();
+        // Spaces are written even when hidden (as they come in from IFC).
+        if (inst.hidden && kind != "IfcSpace") || !layer_visible(model, inst.layer) {
+            continue;
+        }
         let material = inst.material.or(inherited);
         let world = xf * inst.transform;
         let label = |d: &'m crate::model::Definition| -> (&'m str, &'m str) {
@@ -800,10 +1122,9 @@ fn find_spatial<'m>(
             });
         if kind == "IfcBuildingStorey" {
             out.storeys.push((inst, xf, inherited));
-        } else if depth < 16
-            && (ABOVE_STOREY.contains(&kind)
-                || kind == "IfcSpace"
-                || (kind.is_empty() && holds_spatial))
+        } else if kind == "IfcSpace" {
+            out.spaces.push((inst, xf, inherited));
+        } else if depth < 16 && (ABOVE_STOREY.contains(&kind) || (kind.is_empty() && holds_spatial))
         {
             let slot = match kind {
                 "IfcProject" => Some(&mut out.project),
@@ -817,6 +1138,7 @@ fn find_spatial<'m>(
                 *slot = Some(label(def));
             }
             face_triangles(model, &def.entities, world, material, &mut out.loose);
+            loose_lines(model, &def.entities, world, &mut out.loose_lines);
             find_spatial(model, &def.entities, world, material, out, depth + 1);
         } else {
             out.elements.push((inst, xf, inherited));
@@ -854,9 +1176,14 @@ pub fn to_ifc(model: &Model, opts: &ExportOptions) -> Files {
         typed: BTreeMap::new(),
         used: HashSet::new(),
         metre: None,
+        openings: HashMap::new(),
+        annotation: None,
+        textures: BTreeMap::new(),
+        ctx: 0,
     };
     let mut spatial = Spatial::default();
     find_spatial(model, &model.root, DMat4::IDENTITY, None, &mut spatial, 0);
+    find_openings(model, &model.root, DMat4::IDENTITY, &mut w.openings, 0);
     let origin = w.point(DVec3::ZERO);
     w.wcs = w.add(format!("IFCAXIS2PLACEMENT3D(#{origin},$,$)"));
     let geo = model.geo;
@@ -875,6 +1202,7 @@ pub fn to_ifc(model: &Model, opts: &ExportOptions) -> Files {
         "IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#{},{true_north})",
         w.wcs
     ));
+    w.ctx = ctx;
     w.body = w.add(format!(
         "IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Body','Model',*,*,*,*,#{ctx},$,.MODEL_VIEW.,$)"
     ));
@@ -959,30 +1287,27 @@ pub fn to_ifc(model: &Model, opts: &ExportOptions) -> Files {
         ));
         storeys.push(storey);
         let material = inst.material.or(inherited);
-        let mut contained = Vec::new();
+        let (mut spaces, mut contained) = (Vec::new(), Vec::new());
         let mut tris = Vec::new();
         face_triangles(model, &def.entities, DMat4::IDENTITY, material, &mut tris);
-        if !tris.is_empty() {
+        let mut lines = Vec::new();
+        loose_lines(model, &def.entities, DMat4::IDENTITY, &mut lines);
+        if !tris.is_empty() || !lines.is_empty() {
             let sets = w.face_sets(tris);
+            let curves = w.curves(&lines);
             let ep = w.add(format!("IFCLOCALPLACEMENT(#{pl},#{})", w.wcs));
-            contained.push(w.element(None, "", name, "", ep, &sets, false));
+            contained.push(w.element(None, "", name, "", ep, &sets, false, curves));
         }
         stack.push(inst.definition);
-        let mut members = Vec::new();
-        expand_spaces(model, &def.entities, world, material, &mut members, 0);
-        for (k, parent, inherited) in members {
-            if let Some(e) = w.instance(k, parent, rigid, pl, inherited, &mut stack) {
-                contained.push(e);
+        for k in &def.entities.instances {
+            if is_space(model, k) {
+                spaces.extend(w.space(k, world, rigid, pl, material, &mut stack));
+            } else {
+                contained.extend(w.instance(k, world, rigid, pl, material, &mut stack));
             }
         }
         stack.pop();
-        if !contained.is_empty() {
-            let g = w.guid();
-            w.add(format!(
-                "IFCRELCONTAINEDINSPATIALSTRUCTURE({g},$,$,$,({}),#{storey})",
-                refs(&contained)
-            ));
-        }
+        w.relate(storey, &spaces, &contained);
     }
     // Everything else: in the one storey, or in the building next to storeys.
     let (container, container_pl) = if storeys.is_empty() {
@@ -1002,13 +1327,17 @@ pub fn to_ifc(model: &Model, opts: &ExportOptions) -> Files {
         refs(&storeys)
     ));
     let mut top = Vec::new();
-    // Loose faces of the root and of the project, site and building groups.
+    // Loose faces and edges of the root and of the project, site and building
+    // groups.
     let mut tris = std::mem::take(&mut spatial.loose);
     face_triangles(model, &model.root, DMat4::IDENTITY, None, &mut tris);
-    if !tris.is_empty() {
+    let mut lines = std::mem::take(&mut spatial.loose_lines);
+    loose_lines(model, &model.root, DMat4::IDENTITY, &mut lines);
+    if !tris.is_empty() || !lines.is_empty() {
         let sets = w.face_sets(tris);
+        let curves = w.curves(&lines);
         let pl = w.add(format!("IFCLOCALPLACEMENT(#{container_pl},#{})", w.wcs));
-        top.push(w.element(None, "", &opts.base_name, "", pl, &sets, false));
+        top.push(w.element(None, "", &opts.base_name, "", pl, &sets, false, curves));
     }
     for &(inst, parent, inherited) in &spatial.elements {
         if let Some(p) = w.instance(
@@ -1022,13 +1351,18 @@ pub fn to_ifc(model: &Model, opts: &ExportOptions) -> Files {
             top.push(p);
         }
     }
-    if !top.is_empty() {
-        let g = w.guid();
-        w.add(format!(
-            "IFCRELCONTAINEDINSPATIALSTRUCTURE({g},$,$,$,({}),#{container})",
-            refs(&top)
+    let mut spaces = Vec::new();
+    for &(inst, parent, inherited) in &spatial.spaces {
+        spaces.extend(w.space(
+            inst,
+            parent,
+            DMat4::IDENTITY,
+            container_pl,
+            inherited,
+            &mut stack,
         ));
     }
+    w.relate(container, &spaces, &top);
     for (ty, objs) in std::mem::take(&mut w.typed) {
         let g = w.guid();
         w.add(format!(
@@ -1254,6 +1588,141 @@ mod tests {
         world_area(&back, &back.root, DMat4::IDENTITY, &mut b);
         assert!((a.0 - b.0).abs() < 1e-6 * a.0, "{} {}", a.0, b.0);
         assert!((a.1 / a.0 - b.1 / b.0).length() < 1e-4);
+    }
+
+    #[test]
+    fn openings_spaces_edges_and_textures_round_trip() {
+        // A wall with a window opening; a room holding a table and an empty room.
+        let body = "\
+#58=IFCDIRECTION((0.,0.,1.));
+#50=IFCWALL('2WallGuid0000000000001',$,'Wall A',$,$,#51,#52,$,$);
+#51=IFCLOCALPLACEMENT(#100,#53);
+#53=IFCAXIS2PLACEMENT3D(#54,$,$);
+#54=IFCCARTESIANPOINT((1000.,0.,0.));
+#52=IFCPRODUCTDEFINITIONSHAPE($,$,(#55));
+#55=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#56));
+#56=IFCEXTRUDEDAREASOLID(#57,$,#58,2500.);
+#57=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4000.,200.);
+#80=IFCOPENINGELEMENT('2OpenGuid0000000000001',$,'Window opening',$,$,#81,#82,$,.OPENING.);
+#81=IFCLOCALPLACEMENT(#51,#83);
+#83=IFCAXIS2PLACEMENT3D(#84,$,$);
+#84=IFCCARTESIANPOINT((500.,0.,900.));
+#82=IFCPRODUCTDEFINITIONSHAPE($,$,(#85));
+#85=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#86));
+#86=IFCEXTRUDEDAREASOLID(#87,$,#58,1200.);
+#87=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1000.,400.);
+#88=IFCRELVOIDSELEMENT('v',$,$,$,#50,#80);
+#90=IFCSPACE('2RoomGuid0000000000001',$,'Room 1',$,$,#100,#91,$,.ELEMENT.,.INTERNAL.,$);
+#91=IFCPRODUCTDEFINITIONSHAPE($,$,(#92));
+#92=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#93));
+#93=IFCEXTRUDEDAREASOLID(#94,$,#58,2500.);
+#94=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,3000.,3000.);
+#95=IFCSPACE('2RoomGuid0000000000002',$,'Room 2',$,$,#100,#91,$,.ELEMENT.,.INTERNAL.,$);
+#96=IFCFURNITURE('2TablGuid0000000000001',$,'Table',$,$,#100,#97,$,$);
+#97=IFCPRODUCTDEFINITIONSHAPE($,$,(#98));
+#98=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#99));
+#99=IFCEXTRUDEDAREASOLID(#57,$,#58,700.);
+#101=IFCRELAGGREGATES('r5',$,$,$,#30,(#90,#95));
+#102=IFCRELCONTAINEDINSPATIALSTRUCTURE('c2',$,$,$,(#96),#90);
+#70=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#50),#30);
+";
+        let text = crate::formats::ifc::tests::file(body);
+        let (mut m, _) = import(text.as_bytes(), &IfcOptions::default()).unwrap();
+        // A loose two-segment line, and the table painted with a 2 x 2 image.
+        crate::ops::add_line(&mut m.root, DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0));
+        crate::ops::add_line(&mut m.root, DVec3::new(10.0, 0.0, 0.0), DVec3::splat(10.0));
+        let png = super::super::ifc_geom::png(2, 2, 3, &[255; 12]).unwrap();
+        m.materials.push(crate::Material {
+            name: "Wood".into(),
+            color: [200, 150, 100],
+            opacity: 1.0,
+            texture: Some(crate::Texture {
+                filename: "wood.png".into(),
+                data: png.into(),
+                width: 10.0,
+                height: 10.0,
+                colorize: false,
+            }),
+        });
+        let wood = m.materials.len() - 1;
+        let table = m
+            .definitions
+            .values_mut()
+            .find(|d| d.attributes.kind == "IfcFurniture")
+            .unwrap();
+        for f in table.entities.faces.values_mut() {
+            f.attrs.material = Some(wood);
+        }
+        let opts = ExportOptions {
+            units: Units::Millimeters,
+            base_name: "rooms".into(),
+            ..Default::default()
+        };
+        let out = String::from_utf8(to_ifc(&m, &opts).main).unwrap();
+        assert_eq!(to_ifc(&m, &opts).main, out.as_bytes());
+        assert!(out.contains("IFCOPENINGELEMENT('2OpenGuid0000000000001',$,'Window opening'"));
+        assert_eq!(out.matches("IFCRELVOIDSELEMENT(").count(), 1);
+        assert!(out.contains("IFCSPACE('2RoomGuid0000000000001',$,'Room 1'"));
+        assert!(out.contains("IFCSPACE('2RoomGuid0000000000002',$,'Room 2'"));
+        assert!(out.contains("IFCBLOBTEXTURE(.T.,.T.,$,$,$,'PNG',\"089504E47"));
+        assert!(out.contains("IFCINDEXEDTRIANGLETEXTUREMAP("));
+        assert!(out.contains("'Annotation','GeometricCurveSet'"));
+        assert_eq!(out.matches("IFCPOLYLINE(").count(), 1);
+        // The wall's volume is still the cut one.
+        let want = (4000.0 * 200.0 * 2500.0 - 1000.0 * 200.0 * 1200.0) * 1e-9;
+        assert!(out.contains(&format!("'NetVolume',$,$,{},$", real(want))));
+
+        let (back, report) = import(out.as_bytes(), &IfcOptions::default()).unwrap();
+        for d in back.definitions.values() {
+            assert!(validate(&d.entities, Checks::TOPOLOGY).is_empty());
+        }
+        let def = |kind: &str| {
+            back.definitions
+                .iter()
+                .find(|(_, d)| d.attributes.kind == kind)
+                .unwrap_or_else(|| panic!("{kind}"))
+        };
+        // The wall, already cut, cut again: the same solid; the opening kept.
+        let (_, wall) = def("IfcWall");
+        assert!(solid::is_solid(&wall.entities));
+        let v = solid::volume(&wall.entities) * 0.0254_f64.powi(3);
+        assert!((v - want).abs() < 1e-6 * want, "{v} {want}");
+        assert_eq!(report.cut.get("IfcOpeningElement"), Some(&1));
+        let (op, _) = def("IfcOpeningElement");
+        let op_inst = back
+            .definitions
+            .values()
+            .flat_map(|d| &d.entities.instances)
+            .find(|i| i.definition == op)
+            .unwrap();
+        assert!(op_inst.hidden);
+        assert_eq!(
+            op_inst.attrs.dictionaries[OPENING_DICT][OPENING_KEY],
+            mt_skp::AttrValue::String("2WallGuid0000000000001".into())
+        );
+        // Both rooms, the table in the first.
+        let rooms: Vec<&Definition> = back
+            .definitions
+            .values()
+            .filter(|d| d.attributes.kind == "IfcSpace")
+            .collect();
+        assert_eq!(rooms.len(), 2);
+        let (table_def, _) = def("IfcFurniture");
+        let holder = rooms
+            .iter()
+            .find(|r| {
+                r.entities
+                    .instances
+                    .iter()
+                    .any(|i| i.definition == table_def)
+            })
+            .unwrap();
+        assert_eq!(holder.description, "2RoomGuid0000000000001");
+        // The texture came back on the table.
+        let textured = back.materials.iter().find(|x| x.texture.is_some()).unwrap();
+        assert!(textured.name.starts_with("Wood"), "{}", textured.name);
+        let (_, table) = def("IfcFurniture");
+        assert!(table.entities.faces.values().all(|f| f.attrs.uv.is_some()));
     }
 
     #[test]

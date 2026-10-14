@@ -26,9 +26,11 @@
 //!   primitives `IfcBlock`, `IfcRightCircularCylinder`, `IfcRightCircularCone`,
 //!   `IfcSphere` (12 bands) and `IfcRectangularPyramid`, `IfcCsgSolid`,
 //!   `IfcAdvancedBrep` (with voids; planar faces from their edge loops, curved faces
-//!   on B-spline, cylindrical, conical, spherical and toroidal surfaces tessellated
-//!   inside their edge loops, [`ifc_geom::surface_triangles`]; edges are lines,
-//!   circles, ellipses, polylines or B-spline curves, shared by both faces),
+//!   on B-spline, cylindrical, conical, spherical and toroidal surfaces, surfaces of
+//!   linear extrusion and of revolution and offset surfaces tessellated inside their
+//!   edge loops, [`ifc_geom::surface_triangles`], a band between two loops around a
+//!   cylinder cut open along a seam; edges are lines, circles, ellipses, polylines,
+//!   offset curves or B-spline curves, shared by both faces),
 //!   `IfcMappedItem` (a component per `IfcRepresentationMap`, named after the type
 //!   that owns it) and `IfcBooleanResult` / `IfcBooleanClippingResult` (see below).
 //!   Curves are 24 segments per full circle.
@@ -63,12 +65,16 @@
 //!   (`IfcHalfSpaceSolid`, `IfcBoxedHalfSpace`: a box on the material side of the
 //!   plane, larger than the first operand; `IfcPolygonalBoundedHalfSpace`: that box
 //!   intersected with the boundary's prism). A cut happens only when both operands are
-//!   closed solids ([`solid::is_solid`]: an element with mapped items is not) and the
-//!   result passes the topology checks; otherwise the first operand is kept whole as
-//!   before and the opening or second operand is counted in [`IfcReport::skipped`].
-//!   Cuts made are counted by class in [`IfcReport::cut`]. Openings are not imported
-//!   as objects. Everything else that is not read is counted by class in
-//!   [`IfcReport::skipped`].
+//!   closed solids ([`solid::is_solid`]) and the result passes the topology checks;
+//!   an element made of mapped items has them read into its body to be cut (kept as
+//!   components when nothing could be cut), and an open shell whose holes are planar
+//!   loops is closed with a face per hole first. Otherwise the first operand is kept
+//!   whole as before and the opening or second operand is counted in
+//!   [`IfcReport::skipped`]. Cuts made are counted by class in [`IfcReport::cut`].
+//!   Openings come in as hidden groups next to their element (Type
+//!   `IfcOpeningElement`, the element's GlobalId in the instance's [`OPENING_DICT`]
+//!   attribute dictionary), which export writes back. Everything else that is not
+//!   read is counted by class in [`IfcReport::skipped`].
 //! - Faces become kernel faces as in mesh import ([`mesh_import::to_entities`]):
 //!   welded, coplanar neighbors merged when asked. Faces with holes are triangulated
 //!   first; merging joins them again.
@@ -108,6 +114,10 @@ const MIN_BOOLEANS: usize = 1000;
 /// Most bytes an IFCZIP's `.ifc` may unpack to: 100 per compressed byte, at least
 /// 16 MiB (text compresses about 10:1).
 const UNZIP_RATIO: u64 = 100;
+/// The attribute dictionary of an imported opening's (hidden) group instance and
+/// its key holding the GlobalId of the element the opening voids.
+pub(crate) const OPENING_DICT: &str = "IFC";
+pub(crate) const OPENING_KEY: &str = "VoidsElement";
 
 /// IFC import choices.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -889,6 +899,12 @@ struct Reader<'a> {
     /// Vertices the geometry items may still make: [`MIN_POINTS`], or 64 per entity
     /// (a few bytes can make an item's geometry be made over and over).
     points: usize,
+    /// Mapped items are read into the geometry itself, not placed as components
+    /// (bodies to be cut).
+    inline_maps: bool,
+    /// The opening groups of the element [`Self::node`] last returned, placed in its
+    /// parent next to it.
+    openings_out: Vec<Instance>,
 }
 
 impl<'a> Reader<'a> {
@@ -930,6 +946,8 @@ impl<'a> Reader<'a> {
                     .values()
                     .filter(|e| e.class.starts_with("IFCBOOLEAN"))
                     .count(),
+            inline_maps: false,
+            openings_out: Vec::new(),
         };
         r.units();
         r.index();
@@ -1397,6 +1415,17 @@ impl<'a> Reader<'a> {
                 out
             }
             "IFCTRIMMEDCURVE" => self.trimmed(e, depth)?,
+            "IFCOFFSETCURVE2D" | "IFCOFFSETCURVE3D" => {
+                let base = self.curve(e.arg(0), depth + 1)?;
+                let d = e.arg(1).as_f64()?;
+                let up = if e.class == "IFCOFFSETCURVE3D" {
+                    self.direction(e.arg(3)).unwrap_or(DVec3::Z)
+                } else {
+                    DVec3::Z
+                };
+                let closed = self.is_closed_curve(e.arg(0));
+                ifc_geom::offset_points(&base, d, up, closed)
+            }
             "IFCBSPLINECURVEWITHKNOTS" | "IFCRATIONALBSPLINECURVEWITHKNOTS" => {
                 let points: Vec<DVec3> = e
                     .arg(1)
@@ -1441,6 +1470,56 @@ impl<'a> Reader<'a> {
         };
         let out = dedup(&out);
         (out.len() >= 2).then_some(out)
+    }
+
+    /// Whether a curve returns to its start: circles and ellipses, polylines and
+    /// indexed poly curves whose last point is the first.
+    fn is_closed_curve(&self, v: &Value) -> bool {
+        let Some((_, e)) = self.get(v) else {
+            return false;
+        };
+        let ends = |pts: Vec<DVec3>| {
+            pts.len() > 2 && (pts[0] - pts[pts.len() - 1]).length_squared() <= 1e-18
+        };
+        match e.class.as_str() {
+            "IFCCIRCLE" | "IFCELLIPSE" => true,
+            "IFCPOLYLINE" => ends(
+                e.arg(0)
+                    .list()
+                    .iter()
+                    .filter_map(|p| self.point(p))
+                    .collect(),
+            ),
+            "IFCINDEXEDPOLYCURVE" => {
+                let pts = self.point_list(e.arg(0));
+                let idx: Vec<i64> = match e.arg(1) {
+                    Value::Null => (1..=pts.len() as i64).collect(),
+                    segs => segs
+                        .list()
+                        .iter()
+                        .flat_map(|s| {
+                            s.list()
+                                .iter()
+                                .filter_map(Value::as_i64)
+                                .collect::<Vec<_>>()
+                        })
+                        .collect(),
+                };
+                let at = |k: i64| {
+                    usize::try_from(k - 1)
+                        .ok()
+                        .and_then(|k| pts.get(k).copied())
+                };
+                match (
+                    idx.first().and_then(|&k| at(k)),
+                    idx.last().and_then(|&k| at(k)),
+                ) {
+                    (Some(a), Some(b)) => idx.len() > 2 && (a - b).length_squared() <= 1e-18,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 
     fn trimmed(&mut self, e: &Entity, depth: usize) -> Option<Vec<DVec3>> {
@@ -1802,7 +1881,8 @@ impl<'a> Reader<'a> {
     // ---- cutting ----
 
     /// `geo` as kernel entities (model units, coplanar faces merged) when it is a
-    /// closed solid.
+    /// closed solid, or an open shell whose holes are planar loops, closed with a
+    /// face each ([`planar_holes`]).
     fn solid_ents(&self, geo: &Geo) -> Option<Entities> {
         if !geo.instances.is_empty() || geo.mesh.polygons.is_empty() {
             return None;
@@ -1813,6 +1893,20 @@ impl<'a> Reader<'a> {
         };
         let ids: Vec<usize> = (0..self.model.materials.len()).collect();
         let ents = mesh_import::to_entities(&geo.mesh, &opts, &ids);
+        if solid::is_solid(&ents) {
+            return Some(ents);
+        }
+        let holes = planar_holes(&ents)?;
+        let k = 1.0 / self.opts.inches_per_unit;
+        let mut capped = Geo {
+            mesh: geo.mesh.clone(),
+            instances: Vec::new(),
+        };
+        for h in holes {
+            let pts: Vec<DVec3> = h.iter().map(|p| *p * k).collect();
+            capped.face(&pts, &[], None);
+        }
+        let ents = mesh_import::to_entities(&capped.mesh, &opts, &ids);
         solid::is_solid(&ents).then_some(ents)
     }
 
@@ -1977,33 +2071,90 @@ impl<'a> Reader<'a> {
         validate(&out, Checks::TOPOLOGY).is_empty().then_some(out)
     }
 
+    /// The body of opening `op` (its body items with mapped items placed inline) in
+    /// its own coordinates, one [`Geo`] per item, and its placement relative to an
+    /// element placed at `world` (file units); `None` when it has no placement or
+    /// shape.
+    fn opening_body(&mut self, op: u64, world: DMat4) -> Option<(Vec<Geo>, DMat4)> {
+        let o = self.f.get(op)?;
+        if o.args.len() < 7 {
+            return None;
+        }
+        let rel = world.inverse() * self.placement(o.arg(5), 0);
+        let inline = std::mem::replace(&mut self.inline_maps, true);
+        let mut out = Vec::new();
+        for it in self.body_items(o.arg(6)) {
+            let mut g = Geo::default();
+            self.item(it, DMat4::IDENTITY, None, &mut g, 0);
+            out.push(g);
+        }
+        self.inline_maps = inline;
+        Some((out, rel))
+    }
+
     /// Cuts the openings of an element out of its body `ents` (model units, in the
-    /// element's coordinates; `world` is the element's placement, file units).
-    fn cut_openings(&mut self, ents: &mut Entities, openings: &BTreeSet<u64>, world: DMat4) {
-        let solid = solid::is_solid(ents);
+    /// element's coordinates; `world` is the element's placement, file units). A body
+    /// that is an open shell with planar holes is closed first (kept closed only when
+    /// something was cut). Returns the number of openings cut (those not cut are
+    /// counted as skipped) and each opening's body (its own coordinates) and
+    /// placement relative to the element.
+    fn cut_openings(
+        &mut self,
+        ents: &mut Entities,
+        openings: &BTreeSet<u64>,
+        world: DMat4,
+    ) -> (usize, Vec<(u64, Geo, DMat4)>) {
+        let body = if solid::is_solid(ents) {
+            Some(ents.clone())
+        } else if ents.instances.is_empty() && !ents.faces.is_empty() {
+            let mut g = Geo::default();
+            self.add_ents(&mut g, ents);
+            self.solid_ents(&g)
+        } else {
+            None
+        };
+        let mut done = 0;
+        let mut body = body;
+        let mut kept = Vec::new();
         for &op in openings {
-            let Some(o) = self.f.get(op) else { continue };
-            let class = o.class.clone();
-            if !solid || o.args.len() < 7 {
-                self.skip(&class);
+            let Some(class) = self.f.get(op).map(|o| o.class.clone()) else {
                 continue;
-            }
-            let rel = world.inverse() * self.placement(o.arg(5), 0);
+            };
             let items = self.report.items.clone();
+            let parts = self.opening_body(op, world);
             // Each body item is cut on its own: openings are often several touching
             // extrusions, whose faces together are not one solid.
-            let mut cut = Some(ents.clone());
-            for it in self.body_items(o.arg(6)) {
-                let mut g = Geo::default();
-                self.item(it, rel, None, &mut g, 0);
-                cut = cut.and_then(|body| {
-                    let c = self.solid_ents(&g)?;
-                    Self::subtract(&body, &c)
-                });
+            let mut cut = match (&parts, &body) {
+                (Some(_), Some(b)) => Some(b.clone()),
+                _ => None,
+            };
+            let mut whole = Geo::default();
+            if let Some((parts, rel)) = parts {
+                for mut g in parts {
+                    let mut placed = Geo {
+                        mesh: g.mesh.clone(),
+                        instances: Vec::new(),
+                    };
+                    for p in &mut placed.mesh.positions {
+                        *p = rel.transform_point3(*p);
+                    }
+                    if cut.is_some() {
+                        cut = cut.and_then(|b| {
+                            let c = self.solid_ents(&placed)?;
+                            Self::subtract(&b, &c)
+                        });
+                    }
+                    g.instances.clear();
+                    whole.append(g);
+                }
+                if !whole.mesh.polygons.is_empty() {
+                    kept.push((op, whole, rel));
+                }
             }
             match cut {
                 Some(out) => {
-                    *ents = out;
+                    body = Some(out);
+                    done += 1;
                     *self.report.cut.entry(class_name(&class)).or_default() += 1;
                 }
                 None => {
@@ -2012,6 +2163,12 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        if done > 0
+            && let Some(b) = body
+        {
+            *ents = b;
+        }
+        (done, kept)
     }
 
     /// The faces of a shell or connected face set: faces bounded by poly loops or
@@ -2114,6 +2271,18 @@ impl<'a> Reader<'a> {
         let class = e.class.as_str();
         let s = match class {
             "IFCPLANE" => return None,
+            "IFCOFFSETSURFACE" => {
+                // An offset plane is a plane: its face is flat between its edges.
+                let base = match self.surface(e.arg(0), xf)? {
+                    Ok(b) => b,
+                    Err(_) => return Some(Err(class.to_owned())),
+                };
+                let scale = DMat3::from_mat4(xf).determinant().abs().cbrt();
+                Surface::Offset {
+                    base: Box::new(base),
+                    d: num(1) * scale,
+                }
+            }
             "IFCCYLINDRICALSURFACE" => Surface::Cylinder {
                 m: xf * self.axis2(e.arg(0)),
                 r: num(1),
@@ -2172,9 +2341,60 @@ impl<'a> Reader<'a> {
                     _ => return Some(Err(class.to_owned())),
                 }
             }
+            "IFCSURFACEOFLINEAREXTRUSION" | "IFCSURFACEOFREVOLUTION" => {
+                let m = xf * self.axis2(e.arg(1));
+                let swept = self.swept_curve(e.arg(0)).and_then(|(pts, closed)| {
+                    let pts = pts.into_iter().map(|p| m.transform_point3(p)).collect();
+                    ifc_geom::Polyline::new(pts, closed)
+                });
+                let s = match (class, swept) {
+                    ("IFCSURFACEOFLINEAREXTRUSION", Some(curve)) => {
+                        let dir = self.direction(e.arg(2)).unwrap_or(DVec3::Z);
+                        let normal = m.x_axis.truncate().cross(m.y_axis.truncate());
+                        match (
+                            m.transform_vector3(dir).try_normalize(),
+                            normal.try_normalize(),
+                        ) {
+                            (Some(dir), Some(normal)) => {
+                                Some(Surface::Extrusion { curve, dir, normal })
+                            }
+                            _ => None,
+                        }
+                    }
+                    (_, Some(curve)) => self.get(e.arg(2)).and_then(|(_, ax)| {
+                        let origin = m.transform_point3(self.point(ax.arg(0))?);
+                        let axis =
+                            m.transform_vector3(self.direction(ax.arg(1)).unwrap_or(DVec3::Z));
+                        Surface::revolution(curve, origin, axis)
+                    }),
+                    _ => None,
+                };
+                match s {
+                    Some(s) => s,
+                    None => return Some(Err(class.to_owned())),
+                }
+            }
             other => return Some(Err(other.to_owned())),
         };
         Some(Ok(s))
+    }
+
+    /// The curve of a swept surface's profile (profile coordinates) and whether it
+    /// is closed: an arbitrary profile's curve, else a profile's outline.
+    fn swept_curve(&mut self, v: &Value) -> Option<(Vec<DVec3>, bool)> {
+        let (_, p) = self.get(v)?;
+        match p.class.as_str() {
+            "IFCARBITRARYOPENPROFILEDEF"
+            | "IFCARBITRARYCLOSEDPROFILEDEF"
+            | "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
+                let pts = self.curve(p.arg(2), 0)?;
+                Some((pts, p.class != "IFCARBITRARYOPENPROFILEDEF"))
+            }
+            _ => {
+                let outline = self.profile(v, 0)?.into_iter().next()?;
+                Some((outline.into_iter().map(|q| q.extend(0.0)).collect(), true))
+            }
+        }
     }
 
     /// The points of an `IfcEdgeLoop` (item coordinates), each edge once.
@@ -2858,6 +3078,29 @@ impl<'a> Reader<'a> {
         };
         let origin = self.axis2(map.arg(0));
         let target = self.operator(e.arg(1));
+        if self.inline_maps {
+            // The map's items themselves, read in the map's coordinates and placed
+            // (faces turned back when mirrored).
+            let m = xf * target * origin;
+            let mut g = Geo::default();
+            if let Some((_, rep)) = self.get(map.arg(1)) {
+                for it in rep.arg(3).refs() {
+                    self.item(it, DMat4::IDENTITY, style, &mut g, depth + 1);
+                }
+            }
+            for p in &mut g.mesh.positions {
+                *p = m.transform_point3(*p);
+            }
+            if m.determinant() < 0.0 {
+                for p in &mut g.mesh.polygons {
+                    p.vertices.reverse();
+                    p.uvs.reverse();
+                }
+            }
+            let made = !g.mesh.polygons.is_empty() || !g.instances.is_empty();
+            geo.append(g);
+            return made;
+        }
         let Some(def) = self.map_definition(map_id, map, depth) else {
             return false;
         };
@@ -3038,6 +3281,8 @@ impl<'a> Reader<'a> {
             if let Some(inst) = self.node(r, DMat4::IDENTITY, &children, &mut seen, 0) {
                 self.model.root.instances.push(inst);
             }
+            let openings = std::mem::take(&mut self.openings_out);
+            self.model.root.instances.extend(openings);
         }
         self.georeference();
         (self.model, self.report)
@@ -3163,6 +3408,45 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// A hidden group for opening `op` (its body `geo` in its own coordinates, placed
+    /// by `rel` in its element's): Type `IfcOpeningElement`, the GlobalId as its
+    /// description and the GlobalId of the element it voids in the instance's
+    /// [`OPENING_DICT`] dictionary, so export writes it back.
+    fn opening_group(&mut self, op: u64, geo: Geo, rel: DMat4, element: &str) -> Option<Instance> {
+        let e = self.f.get(op)?;
+        let ents = self.build(geo);
+        if ents.faces.is_empty() {
+            return None;
+        }
+        let class = class_name(&e.class);
+        self.groups += 1;
+        let definition = self.model.definitions.insert(Definition {
+            name: format!("Group#{}", self.groups),
+            entities: ents,
+            is_group: true,
+            description: e.arg(0).as_str().unwrap_or("").to_owned(),
+            attributes: crate::model::DefinitionAttrs {
+                kind: class.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let label = e.arg(2).as_str().unwrap_or("").trim();
+        let label = if label.is_empty() { &class } else { label };
+        let c = self.conversion();
+        let mut inst = instance(definition, c * rel * c.inverse(), label, None);
+        inst.hidden = true;
+        inst.attrs
+            .dictionaries
+            .entry(OPENING_DICT.to_owned())
+            .or_default()
+            .insert(
+                OPENING_KEY.to_owned(),
+                mt_skp::AttrValue::String(element.to_owned()),
+            );
+        Some(inst)
+    }
+
     /// The group of object `id` and the objects under it, placed relative to
     /// `parent_world` (file units).
     fn node(
@@ -3201,12 +3485,16 @@ impl<'a> Reader<'a> {
             }
         };
         let mut geo = Geo::default();
-        if !is_project && e.args.len() >= 7 {
-            for it in self.body_items(e.arg(6)) {
-                self.item(it, DMat4::IDENTITY, None, &mut geo, 0);
-            }
+        let body = if !is_project && e.args.len() >= 7 {
+            self.body_items(e.arg(6))
+        } else {
+            Vec::new()
+        };
+        for &it in &body {
+            self.item(it, DMat4::IDENTITY, None, &mut geo, 0);
         }
         let has_geometry = !geo.mesh.polygons.is_empty() || !geo.instances.is_empty();
+        let mapped = !geo.instances.is_empty();
         // Geometry far from the element's own origin (coordinates written in map
         // units): moved near it, the element's origin moved the other way.
         let shift = self.far_shift(&geo);
@@ -3223,8 +3511,31 @@ impl<'a> Reader<'a> {
             world * DMat4::from_translation(shift)
         };
         let mut ents = self.build(geo);
+        let mut openings_kept = Vec::new();
         if let Some(openings) = self.voids.get(&id).cloned() {
-            self.cut_openings(&mut ents, &openings, world);
+            if mapped {
+                // Mapped items are made part of the body to cut it; kept as
+                // components when nothing could be cut.
+                let report = self.report.clone();
+                let inline = std::mem::replace(&mut self.inline_maps, true);
+                let mut flat = Geo::default();
+                for &it in &body {
+                    self.item(it, DMat4::IDENTITY, None, &mut flat, 0);
+                }
+                self.inline_maps = inline;
+                self.report = report;
+                for p in &mut flat.mesh.positions {
+                    *p -= shift;
+                }
+                let mut flat = self.build(flat);
+                let (cut, kept) = self.cut_openings(&mut flat, &openings, world);
+                if cut > 0 {
+                    ents = flat;
+                }
+                openings_kept = kept;
+            } else {
+                openings_kept = self.cut_openings(&mut ents, &openings, world).1;
+            }
         }
         if has_geometry && !is_empty(&ents) {
             self.report.with_geometry += 1;
@@ -3235,6 +3546,7 @@ impl<'a> Reader<'a> {
                 if let Some(inst) = self.node(k, world, children, seen, depth + 1) {
                     ents.instances.push(inst);
                 }
+                ents.instances.append(&mut self.openings_out);
             }
         }
         // Spaces come in hidden; one holding objects (furniture contained in a
@@ -3273,6 +3585,17 @@ impl<'a> Reader<'a> {
         let material = self.product_paint(id);
         let mut inst = instance(definition, c * rel * c.inverse(), label, material);
         inst.hidden = is_space && !holds;
+        // Openings stay as hidden groups next to their element (written back on
+        // export).
+        let element = e.arg(0).as_str().unwrap_or("").to_owned();
+        let mut openings = Vec::new();
+        for (op, g, rel) in openings_kept {
+            if let Some(mut o) = self.opening_group(op, g, rel, &element) {
+                o.transform = inst.transform * o.transform;
+                openings.push(o);
+            }
+        }
+        self.openings_out = openings;
         Some(inst)
     }
 }
@@ -3317,6 +3640,69 @@ fn orient(mut loops: Vec<Vec<DVec2>>) -> Vec<Vec<DVec2>> {
         }
     }
     loops
+}
+
+/// The holes of an open shell as loops of points (the edges with one face each,
+/// chained), when every hole is a simple planar loop: closing each with a face makes
+/// the shell closed. `None` when there is no hole, a boundary vertex has more than two
+/// boundary edges, or a loop is not flat.
+fn planar_holes(ents: &Entities) -> Option<Vec<Vec<DVec3>>> {
+    use crate::entities::{EdgeId, VertexId};
+    let open: Vec<EdgeId> = ents
+        .edges
+        .iter()
+        .filter(|(_, e)| e.faces.len() == 1)
+        .map(|(id, _)| id)
+        .collect();
+    if open.is_empty() || ents.edges.values().any(|e| e.faces.len() > 2) {
+        return None;
+    }
+    let mut at: BTreeMap<VertexId, Vec<EdgeId>> = BTreeMap::new();
+    for &e in &open {
+        let ed = &ents.edges[e];
+        at.entry(ed.start).or_default().push(e);
+        at.entry(ed.end).or_default().push(e);
+    }
+    if at.values().any(|v| v.len() != 2) {
+        return None;
+    }
+    let mut used: BTreeSet<EdgeId> = BTreeSet::new();
+    let mut out = Vec::new();
+    for &first in &open {
+        if used.contains(&first) {
+            continue;
+        }
+        let start = ents.edges[first].start;
+        let mut pts = vec![ents.pos(start)];
+        let (mut e, mut v) = (first, ents.edges[first].end);
+        loop {
+            used.insert(e);
+            if v == start {
+                break;
+            }
+            pts.push(ents.pos(v));
+            let next = at[&v].iter().copied().find(|&x| x != e)?;
+            if used.contains(&next) {
+                return None;
+            }
+            e = next;
+            v = ents.edges[e].other(v);
+        }
+        if pts.len() < 3 {
+            return None;
+        }
+        let n = newell(&pts).try_normalize()?;
+        let c = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
+        let size = pts.iter().map(|p| (*p - c).length()).fold(0.0, f64::max);
+        if pts
+            .iter()
+            .any(|p| (*p - c).dot(n).abs() > 1e-6 * size + 1e-9)
+        {
+            return None;
+        }
+        out.push(pts);
+    }
+    Some(out)
 }
 
 fn is_empty(ents: &Entities) -> bool {
@@ -3644,12 +4030,36 @@ END-ISO-10303-21;
         let v = crate::solid::volume(wall);
         let want = (4000.0 * 200.0 * 2500.0 - 1000.0 * 200.0 * 1200.0) * MM3;
         assert!((v - want).abs() < 1e-6 * want, "{v} {want}");
-        // No opening object comes in.
-        assert!(
-            m.definitions
-                .values()
-                .all(|d| d.attributes.kind != "IfcOpeningElement")
+        // The opening comes in as a hidden group next to the wall, in its own
+        // place, naming the wall it voids.
+        let storey = m
+            .definitions
+            .values()
+            .find(|d| d.attributes.kind == "IfcBuildingStorey")
+            .unwrap();
+        let [wall_inst, opening] = &storey.entities.instances[..] else {
+            panic!("the wall and its opening")
+        };
+        assert_eq!(
+            m.definitions[wall_inst.definition].attributes.kind,
+            "IfcWall"
         );
+        assert!(!wall_inst.hidden);
+        assert!(opening.hidden);
+        assert_eq!(
+            opening.attrs.dictionaries[OPENING_DICT][OPENING_KEY],
+            mt_skp::AttrValue::String("w".into())
+        );
+        assert_eq!(opening.name, "Window opening");
+        let od = &m.definitions[opening.definition];
+        assert_eq!(od.attributes.kind, "IfcOpeningElement");
+        assert_eq!(od.description, "o");
+        assert!(crate::is_solid(&od.entities));
+        let t = (wall_inst.transform.inverse() * opening.transform)
+            .w_axis
+            .truncate()
+            * 25.4;
+        assert!((t - DVec3::new(500.0, 0.0, 900.0)).length() < 1e-6, "{t}");
         // Deterministic.
         let (again, _) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
         let pts = |e: &Entities| -> Vec<[u64; 3]> {
@@ -3731,9 +4141,9 @@ END-ISO-10303-21;
     }
 
     #[test]
-    fn openings_of_mapped_elements_are_not_cut() {
-        // The element's body is a mapped item: not a solid in the kernel's sense
-        // (nested instance), so the opening is counted as skipped.
+    fn openings_of_mapped_elements_and_open_shells_are_cut() {
+        // The element's body is two mapped copies of a 1000 mm cube (the second
+        // mirrored): they are made part of the body and cut by a block through both.
         let body = "\
 #58=IFCDIRECTION((0.,0.,1.));
 #57=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1000.,1000.);
@@ -3742,18 +4152,82 @@ END-ISO-10303-21;
 #61=IFCREPRESENTATIONMAP(#6,#60);
 #62=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#5,$,$);
 #63=IFCMAPPEDITEM(#61,#62);
-#64=IFCSHAPEREPRESENTATION($,'Body','MappedRepresentation',(#63));
+#67=IFCDIRECTION((-1.,0.,0.));
+#68=IFCCARTESIANPOINT((2000.,0.,0.));
+#69=IFCCARTESIANTRANSFORMATIONOPERATOR3D(#67,$,#68,$,$);
+#71=IFCMAPPEDITEM(#61,#69);
+#64=IFCSHAPEREPRESENTATION($,'Body','MappedRepresentation',(#63,#71));
 #65=IFCPRODUCTDEFINITIONSHAPE($,$,(#64));
 #66=IFCWALL('w',$,'W',$,$,#100,#65,$,$);
 #80=IFCOPENINGELEMENT('o',$,$,$,$,#100,#82,$,.OPENING.);
-#82=IFCPRODUCTDEFINITIONSHAPE($,$,(#60));
+#83=IFCCARTESIANPOINT((-600.,-100.,400.));
+#84=IFCAXIS2PLACEMENT3D(#83,$,$);
+#85=IFCBLOCK(#84,3200.,200.,200.);
+#86=IFCSHAPEREPRESENTATION($,'Body','CSG',(#85));
+#82=IFCPRODUCTDEFINITIONSHAPE($,$,(#86));
 #88=IFCRELVOIDSELEMENT('v',$,$,$,#66,#80);
 #70=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#66),#30);
 ";
         let (m, report) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
         valid(&m);
-        assert_eq!(report.skipped.get("IfcOpeningElement"), Some(&1));
-        assert!(report.cut.is_empty());
+        assert_eq!(report.cut.get("IfcOpeningElement"), Some(&1));
+        assert_eq!(report.skipped.get("IfcOpeningElement"), None);
+        assert_eq!(report.items.get("IfcMappedItem"), Some(&2));
+        let wall = body_of(&m, "IfcWall");
+        let want = 2.0 * (1e9 - 1000.0 * 200.0 * 200.0) * MM3;
+        let v = crate::solid::volume(wall);
+        assert!((v - want).abs() < 1e-6 * want, "{v} {want}");
+        // No component is placed any more.
+        assert!(wall.instances.is_empty());
+
+        // An open box (no top) with a hole through two sides: closed with a top
+        // face, then cut.
+        let body = "\
+#200=IFCCARTESIANPOINT((0.,0.,0.));
+#201=IFCCARTESIANPOINT((1000.,0.,0.));
+#202=IFCCARTESIANPOINT((1000.,1000.,0.));
+#203=IFCCARTESIANPOINT((0.,1000.,0.));
+#210=IFCCARTESIANPOINT((0.,0.,1000.));
+#211=IFCCARTESIANPOINT((1000.,0.,1000.));
+#212=IFCCARTESIANPOINT((1000.,1000.,1000.));
+#213=IFCCARTESIANPOINT((0.,1000.,1000.));
+#230=IFCPOLYLOOP((#200,#203,#202,#201));
+#231=IFCFACEOUTERBOUND(#230,.T.);
+#232=IFCFACE((#231));
+#233=IFCPOLYLOOP((#200,#201,#211,#210));
+#234=IFCFACEOUTERBOUND(#233,.T.);
+#235=IFCFACE((#234));
+#236=IFCPOLYLOOP((#201,#202,#212,#211));
+#237=IFCFACEOUTERBOUND(#236,.T.);
+#238=IFCFACE((#237));
+#239=IFCPOLYLOOP((#202,#203,#213,#212));
+#240=IFCFACEOUTERBOUND(#239,.T.);
+#241=IFCFACE((#240));
+#242=IFCPOLYLOOP((#203,#200,#210,#213));
+#243=IFCFACEOUTERBOUND(#242,.T.);
+#244=IFCFACE((#243));
+#260=IFCOPENSHELL((#232,#235,#238,#241,#244));
+#261=IFCSHELLBASEDSURFACEMODEL((#260));
+#262=IFCSHAPEREPRESENTATION($,'Body','SurfaceModel',(#261));
+#263=IFCPRODUCTDEFINITIONSHAPE($,$,(#262));
+#264=IFCWALL('w2',$,'W2',$,$,#100,#263,$,$);
+#80=IFCOPENINGELEMENT('o',$,$,$,$,#100,#82,$,.OPENING.);
+#83=IFCCARTESIANPOINT((-100.,400.,400.));
+#84=IFCAXIS2PLACEMENT3D(#83,$,$);
+#85=IFCBLOCK(#84,1200.,200.,200.);
+#86=IFCSHAPEREPRESENTATION($,'Body','CSG',(#85));
+#82=IFCPRODUCTDEFINITIONSHAPE($,$,(#86));
+#88=IFCRELVOIDSELEMENT('v',$,$,$,#264,#80);
+#70=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#264),#30);
+";
+        let (m, report) = import(file(body).as_bytes(), &IfcOptions::default()).unwrap();
+        valid(&m);
+        assert_eq!(report.cut.get("IfcOpeningElement"), Some(&1));
+        let wall = body_of(&m, "IfcWall");
+        assert!(crate::is_solid(wall));
+        let want = (1e9 - 1000.0 * 200.0 * 200.0) * MM3;
+        let v = crate::solid::volume(wall);
+        assert!((v - want).abs() < 1e-6 * want, "{v} {want}");
     }
 
     #[test]
@@ -4055,6 +4529,87 @@ END-ISO-10303-21;
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
         let disk = 12.0 * 1000.0 * 1000.0 * (TAU / 24.0).sin();
         assert!(near(solid_volume(&m, "IfcColumn"), disk * 1000.0, 1e-6));
+    }
+
+    #[test]
+    fn advanced_brep_bands_and_swept_surfaces() {
+        // The cylinder of `advanced_brep_cylinder` with its side bounded by the two
+        // circles only (no seam edge; the top circle starts a quarter turn on), the
+        // side given as a cylinder, a surface of revolution of a line, a surface of
+        // linear extrusion of a circle profile, or a smaller cylinder offset outward.
+        let sides = [
+            "#518=IFCCYLINDRICALSURFACE(#6,1000.);",
+            "#540=IFCCARTESIANPOINT((1000.,0.));
+#541=IFCCARTESIANPOINT((1000.,1000.));
+#542=IFCPOLYLINE((#540,#541));
+#543=IFCARBITRARYOPENPROFILEDEF(.CURVE.,$,#542);
+#544=IFCDIRECTION((0.,1.,0.));
+#545=IFCAXIS1PLACEMENT(#5,#544);
+#546=IFCDIRECTION((1.,0.,0.));
+#547=IFCAXIS2PLACEMENT3D(#5,#544,#546);
+#548=IFCDIRECTION((0.,-1.,0.));
+#549=IFCAXIS2PLACEMENT3D(#5,#548,#546);
+#518=IFCSURFACEOFREVOLUTION(#543,#549,#545);",
+            "#540=IFCCIRCLEPROFILEDEF(.AREA.,$,$,1000.);
+#518=IFCSURFACEOFLINEAREXTRUSION(#540,#6,#58,1000.);",
+            "#540=IFCCYLINDRICALSURFACE(#6,800.);
+#518=IFCOFFSETSURFACE(#540,200.,.F.);",
+        ];
+        let disk = 12.0 * 1000.0 * 1000.0 * (TAU / 24.0).sin();
+        for side in sides {
+            let body = format!(
+                "\
+#58=IFCDIRECTION((0.,0.,1.));
+#59=IFCDIRECTION((0.,0.,-1.));
+#500=IFCCARTESIANPOINT((1000.,0.,0.));
+#501=IFCCARTESIANPOINT((0.,1000.,1000.));
+#502=IFCVERTEXPOINT(#500);
+#503=IFCVERTEXPOINT(#501);
+#504=IFCCIRCLE(#6,1000.);
+#505=IFCCARTESIANPOINT((0.,0.,1000.));
+#506=IFCAXIS2PLACEMENT3D(#505,$,$);
+#507=IFCCIRCLE(#506,1000.);
+#508=IFCEDGECURVE(#502,#502,#504,.T.);
+#509=IFCEDGECURVE(#503,#503,#507,.T.);
+#512=IFCORIENTEDEDGE(*,*,#508,.T.);
+#514=IFCORIENTEDEDGE(*,*,#509,.F.);
+#516=IFCEDGELOOP((#512));
+#517=IFCFACEOUTERBOUND(#516,.T.);
+#510=IFCEDGELOOP((#514));
+#511=IFCFACEBOUND(#510,.T.);
+{side}
+#519=IFCADVANCEDFACE((#517,#511),#518,.T.);
+#520=IFCEDGELOOP((#512));
+#521=IFCFACEOUTERBOUND(#520,.T.);
+#522=IFCAXIS2PLACEMENT3D(#5,#59,$);
+#523=IFCPLANE(#522);
+#524=IFCADVANCEDFACE((#521),#523,.T.);
+#525=IFCORIENTEDEDGE(*,*,#509,.T.);
+#526=IFCEDGELOOP((#525));
+#527=IFCFACEOUTERBOUND(#526,.T.);
+#528=IFCPLANE(#506);
+#529=IFCADVANCEDFACE((#527),#528,.T.);
+#530=IFCCLOSEDSHELL((#519,#524,#529));
+#531=IFCADVANCEDBREP(#530);
+#532=IFCSHAPEREPRESENTATION($,'Body','AdvancedBrep',(#531));
+#533=IFCPRODUCTDEFINITIONSHAPE($,$,(#532));
+#534=IFCCOLUMN('c',$,$,$,$,#100,#533,$,$);
+#535=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#534),#30);
+"
+            );
+            let (m, report) = import(file(&body).as_bytes(), &IfcOptions::default()).unwrap();
+            valid(&m);
+            assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+            let v = solid_volume(&m, "IfcColumn");
+            assert!(near(v, disk * 1000.0, 1e-6), "{side}: {v}");
+            // Outward: the side's normals point away from the axis.
+            let col = body_of(&m, "IfcColumn");
+            let side_faces = col.faces.values().filter(|f| f.normal.z.abs() < 0.5);
+            for f in side_faces {
+                let p = col.loop_points(&f.outer)[0];
+                assert!(f.normal.dot(DVec3::new(p.x, p.y, 0.0)) > 0.0, "{side}");
+            }
+        }
     }
 
     #[test]
