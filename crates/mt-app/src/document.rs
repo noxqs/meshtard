@@ -1671,7 +1671,10 @@ impl Document {
                 // counter-clockwise around the front normal.
                 let (verts, tri) = lt.place(&xf, n);
                 match build {
-                    Some(b) => b.tris.push(lt),
+                    Some(b) => {
+                        b.tris.push(lt);
+                        b.hidden_faces |= hidden;
+                    }
                     None => {
                         for v in verts {
                             out.vertices.push(v);

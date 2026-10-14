@@ -448,6 +448,160 @@ struct Instances {
     /// Mesh and range in instances (edges: in vertices, 6 per instance).
     ranges: Vec<(usize, std::ops::Range<u32>)>,
     bounds: Option<(Vec3, Vec3)>,
+    /// Mesh and transform of each instance, in the buffer's order.
+    placed: Vec<(usize, Mat4)>,
+}
+
+/// A stretch of the translucent triangles drawn back to front (see [`Blend`]): of
+/// the model's faces (a range of their index buffer), or of one face instance (a
+/// range of [`Blend::indices`], drawn as instance `instance` of the instance buffer,
+/// whose mesh is `mesh`).
+#[derive(Clone, Debug, PartialEq)]
+enum Run {
+    Model(std::ops::Range<u32>),
+    Instance {
+        mesh: usize,
+        instance: u32,
+        range: std::ops::Range<u32>,
+    },
+}
+
+/// The translucent triangles of the model's faces and of the face instances sorted
+/// back to front together, as if every instance were copied into the model's faces
+/// (Nicer transparency, X-ray). Each instance's translucent triangles are indices
+/// into its mesh's vertices, in sorted order, in a stretch of `indices` of its own;
+/// the triangles are drawn in runs of consecutive ones from the same source.
+struct Blend {
+    /// The face instances with translucent triangles: index in the instance buffer,
+    /// mesh, and where its stretch of `indices` starts.
+    instances: Vec<(u32, usize, u32)>,
+    indices: wgpu::Buffer,
+    runs: Vec<Run>,
+    /// The view last sorted for.
+    sorted_for: Option<(Vec3, Vec3, bool)>,
+}
+
+/// Appends `run` to `runs`, joining it to the last run when it continues it.
+fn push_run(runs: &mut Vec<Run>, run: Run) {
+    match (runs.last_mut(), run) {
+        (Some(Run::Model(r)), Run::Model(n)) if r.end == n.start => r.end = n.end,
+        (
+            Some(Run::Instance {
+                instance, range, ..
+            }),
+            Run::Instance {
+                instance: i,
+                range: n,
+                ..
+            },
+        ) if *instance == i && range.end == n.start => range.end = n.end,
+        (_, run) => runs.push(run),
+    }
+}
+
+impl Blend {
+    /// The face instances of `instances` whose mesh has translucent triangles, with
+    /// an index buffer for them; `None` when there are none.
+    fn new(device: &wgpu::Device, meshes: &[InstMesh], instances: &Instances) -> Option<Self> {
+        let mut list = Vec::new();
+        let mut at = 0u32;
+        for (k, &(m, _)) in instances.placed.iter().enumerate() {
+            let n = (meshes[m].faces.as_ref()).map_or(0, |f| f.translucent.len() as u32);
+            if n > 0 {
+                list.push((k as u32, m, at));
+                at += n;
+            }
+        }
+        (!list.is_empty()).then(|| Self {
+            instances: list,
+            indices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sorted instance indices"),
+                size: u64::from(at) * 4,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            runs: Vec::new(),
+            sorted_for: None,
+        })
+    }
+
+    /// Sorts the model's translucent triangles (`faces`) and the instances' back to
+    /// front for a camera at `eye` looking along `forward`, as
+    /// [`FaceBuffers::sort_translucent`] sorts the model's alone (an instance's
+    /// centroids are its mesh's placed by its transform), and writes the order. Does
+    /// nothing when the view is unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn sort(
+        &mut self,
+        queue: &wgpu::Queue,
+        faces: Option<&mut FaceBuffers>,
+        meshes: &[InstMesh],
+        instances: &Instances,
+        eye: Vec3,
+        forward: Vec3,
+        perspective: bool,
+    ) {
+        let view = (eye, forward, perspective);
+        if self.sorted_for == Some(view) {
+            return;
+        }
+        self.sorted_for = Some(view);
+        let key = |c: Vec3| {
+            if perspective {
+                c.distance_squared(eye)
+            } else {
+                c.dot(forward)
+            }
+        };
+        const MODEL: u32 = u32::MAX;
+        // (depth key, source: MODEL or an index into `instances`, triangle).
+        let mut entries: Vec<(f32, u32, u32)> = Vec::new();
+        if let Some(f) = faces.as_deref() {
+            let tris = f.translucent_tris().iter().enumerate();
+            entries.extend(tris.map(|(t, (_, c))| (key(*c), MODEL, t as u32)));
+        }
+        for (j, &(k, m, _)) in self.instances.iter().enumerate() {
+            let xf = instances.placed[k as usize].1;
+            let tris = (meshes[m].faces.as_ref()).map_or(&[][..], |f| f.translucent_tris());
+            entries.extend(
+                (tris.iter().enumerate())
+                    .map(|(t, (_, c))| (key(xf.transform_point3(*c)), j as u32, t as u32)),
+            );
+        }
+        entries.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let model_start = faces.as_deref().map_or(0, |f| f.translucent.start);
+        let mut model_order = Vec::new();
+        let mut cursors: Vec<u32> = self.instances.iter().map(|x| x.2).collect();
+        let mut sorted = vec![0u32; (self.indices.size() / 4) as usize];
+        self.runs.clear();
+        for &(_, source, t) in &entries {
+            if source == MODEL {
+                let at = model_start + 3 * model_order.len() as u32;
+                model_order.push(t);
+                push_run(&mut self.runs, Run::Model(at..at + 3));
+            } else {
+                let j = source as usize;
+                let (instance, mesh, _) = self.instances[j];
+                let faces = meshes[mesh].faces.as_ref().expect("a translucent mesh");
+                let at = cursors[j];
+                cursors[j] += 3;
+                sorted[at as usize..at as usize + 3]
+                    .copy_from_slice(&faces.translucent_tris()[t as usize].0);
+                push_run(
+                    &mut self.runs,
+                    Run::Instance {
+                        mesh,
+                        instance,
+                        range: at..at + 3,
+                    },
+                );
+            }
+        }
+        if let Some(f) = faces {
+            f.write_translucent(queue, &model_order);
+        }
+        queue.write_buffer(&self.indices, 0, bytemuck::cast_slice(&sorted));
+    }
 }
 
 impl Instances {
@@ -469,6 +623,7 @@ impl Instances {
             return None;
         }
         sorted.sort_by_key(|(m, _)| *m);
+        let placed = sorted.iter().map(|&&(m, xf)| (m as usize, xf)).collect();
         let mut data = Vec::with_capacity(sorted.len() * repeat as usize);
         let mut ranges: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
         let mut bounds = None;
@@ -496,6 +651,7 @@ impl Instances {
             }),
             ranges,
             bounds,
+            placed,
         })
     }
 }
@@ -706,7 +862,13 @@ pub struct Viewport {
     inst_translucent: wgpu::RenderPipeline,
     inst_shadow: wgpu::RenderPipeline,
     inst_lines: wgpu::RenderPipeline,
+    /// Jitter's second stroke of instanced edges.
+    inst_jitter_lines: wgpu::RenderPipeline,
     inst_back_lines: wgpu::RenderPipeline,
+    /// Translucent triangles of instances sorted with the model's (see [`Blend`]).
+    blend: Option<Blend>,
+    /// `blend` must be made again: the faces or the face instances changed.
+    blend_stale: bool,
     textures: Textures,
     /// Environments panel: skydome and reflections (bind group 3).
     env: EnvPass,
@@ -930,6 +1092,14 @@ impl Viewport {
             true,
             alpha,
         );
+        let inst_jitter_lines = pipeline(
+            "instanced jitter lines",
+            "inst_jitter_line_vs",
+            "line_fs",
+            &inst_segments,
+            true,
+            alpha,
+        );
         let inst_back_lines = pipeline_cmp(
             "instanced back edges",
             "inst_back_line_vs",
@@ -1072,7 +1242,10 @@ impl Viewport {
             inst_translucent,
             inst_shadow,
             inst_lines,
+            inst_jitter_lines,
             inst_back_lines,
+            blend: None,
+            blend_stale: true,
             textures,
             env,
             selection,
@@ -1160,20 +1333,24 @@ impl Viewport {
         if !updated {
             self.set_faces(device, vertices, indices);
         }
+        self.blend_stale = true;
     }
 
     /// Replaces the model's faces: an indexed triangle list. Empty slices clear.
     /// Triangles with any alpha below 1 are drawn translucent, after everything else.
     pub fn set_faces(&mut self, device: &wgpu::Device, vertices: &[FaceVertex], indices: &[u32]) {
         self.faces = FaceBuffers::new(device, vertices, indices);
+        self.blend_stale = true;
     }
 
     /// Replaces the meshes drawn per instance (components placed many times) and
     /// clears their instances. Each instance draws its mesh's faces like those of
-    /// [`Viewport::set_faces`] (translucent triangles unsorted, after the sorted
-    /// ones) and its edges like those of [`Viewport::set_edges`] (one stroke: no
-    /// Jitter), at the instance's transform. Shadows, the section plane, X-ray, fog,
-    /// profiles and the other styles apply as to the other faces and edges.
+    /// [`Viewport::set_faces`] and its edges like those of [`Viewport::set_edges`],
+    /// at the instance's transform, as if copied into them: translucent triangles
+    /// are sorted back to front together with the model's (Nicer transparency,
+    /// X-ray; with Faster they come before the model's, unsorted), and Jitter draws
+    /// the second stroke. Shadows, the section plane, X-ray, fog, profiles and the
+    /// other styles apply as to the other faces and edges.
     pub fn set_instance_meshes(&mut self, device: &wgpu::Device, meshes: &[InstanceMesh]) {
         self.inst_meshes = meshes
             .iter()
@@ -1200,6 +1377,7 @@ impl Viewport {
             .collect();
         self.face_instances = None;
         self.edge_instances = None;
+        self.blend_stale = true;
     }
 
     /// The instances whose faces are drawn: mesh (index into the last
@@ -1213,6 +1391,7 @@ impl Viewport {
             |m| m.faces.is_some(),
             |m| &m.face_points,
         );
+        self.blend_stale = true;
     }
 
     /// The instances whose edges are drawn, as [`Viewport::set_face_instances`].
@@ -1268,6 +1447,85 @@ impl Viewport {
             pass.set_vertex_buffer(0, faces.vertices.slice(..));
             pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(r, 0, instances);
+        }
+    }
+
+    /// Sorts the translucent triangles back to front: the model's alone, or with the
+    /// face instances' when some have translucent triangles (`blend`).
+    fn sort_translucent(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        eye: Vec3,
+        forward: Vec3,
+        perspective: bool,
+    ) {
+        if self.blend_stale {
+            self.blend_stale = false;
+            self.blend = (self.face_instances.as_ref())
+                .and_then(|inst| Blend::new(device, &self.inst_meshes, inst));
+        }
+        match (&mut self.blend, &self.face_instances) {
+            (Some(blend), Some(inst)) => blend.sort(
+                queue,
+                self.faces.as_mut(),
+                &self.inst_meshes,
+                inst,
+                eye,
+                forward,
+                perspective,
+            ),
+            _ => {
+                if let Some(faces) = &mut self.faces {
+                    faces.sort_translucent(queue, eye, forward, perspective);
+                }
+            }
+        }
+    }
+
+    /// Draws the runs of `blend`: the model's and the instances' translucent
+    /// triangles, back to front.
+    fn draw_blend(&self, pass: &mut wgpu::RenderPass<'_>, blend: &Blend) {
+        let Some(inst) = &self.face_instances else {
+            return;
+        };
+        // What is set: the model's faces (`Some(None)`) or a mesh's.
+        let mut set: Option<Option<usize>> = None;
+        for run in &blend.runs {
+            match run {
+                Run::Model(r) => {
+                    let Some(faces) = &self.faces else { continue };
+                    if set != Some(None) {
+                        pass.set_pipeline(&self.faces_translucent);
+                        pass.set_vertex_buffer(0, faces.vertices.slice(..));
+                        pass.set_index_buffer(faces.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        set = Some(None);
+                    }
+                    pass.draw_indexed(r.clone(), 0, 0..1);
+                }
+                Run::Instance {
+                    mesh,
+                    instance,
+                    range,
+                } => {
+                    let Some(faces) = &self.inst_meshes[*mesh].faces else {
+                        continue;
+                    };
+                    if set != Some(Some(*mesh)) {
+                        if !matches!(set, Some(Some(_))) {
+                            pass.set_pipeline(&self.inst_translucent);
+                            pass.set_vertex_buffer(1, inst.buffer.slice(..));
+                            pass.set_index_buffer(
+                                blend.indices.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                        }
+                        pass.set_vertex_buffer(0, faces.vertices.slice(..));
+                        set = Some(Some(*mesh));
+                    }
+                    pass.draw_indexed(range.clone(), 0, *instance..*instance + 1);
+                }
+            }
         }
     }
 
@@ -1459,14 +1717,10 @@ impl Viewport {
         }
         self.textures.upload(device, queue);
         self.env.prepare(device, queue);
-        if let Some(faces) = self
-            .faces
-            .as_mut()
-            .filter(|_| self.style.transparency == Transparency::Nicer || self.xray)
-        {
+        if self.style.transparency == Transparency::Nicer || self.xray {
             let eye = camera.eye.as_vec3();
             let forward = camera.forward().as_vec3();
-            faces.sort_translucent(queue, eye, forward, camera.perspective);
+            self.sort_translucent(device, queue, eye, forward, camera.perspective);
         }
         let targets = self.targets.as_ref().expect("targets just created");
 
@@ -1839,19 +2093,27 @@ impl Viewport {
             pass.set_index_buffer(sel.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..sel.translucent.end.max(sel.opaque.end), 0, 0..1);
         }
-        // Jitter draws a second stroke of each model edge (vertices 6..12).
-        let vertices = if style.jitter { 12 } else { 6 };
-        for (edges, count) in [
-            (&self.edges, self.edges_count),
-            (&self.extra_edges, self.extra_count),
-        ] {
-            if let Some(edges) = edges {
-                pass.set_pipeline(&self.lines);
-                pass.set_vertex_buffer(0, edges.slice(..));
-                pass.draw(0..vertices, 0..count);
+        // Jitter draws a second stroke of each model edge (vertices 6..12), after
+        // every edge's first one (flattened and instanced edges alike, so they
+        // overlap each other the same way).
+        let strokes: &[(std::ops::Range<u32>, &wgpu::RenderPipeline)] = if style.jitter {
+            &[(0..6, &self.inst_lines), (6..12, &self.inst_jitter_lines)]
+        } else {
+            &[(0..6, &self.inst_lines)]
+        };
+        for (vertices, instanced) in strokes {
+            for (edges, count) in [
+                (&self.edges, self.edges_count),
+                (&self.extra_edges, self.extra_count),
+            ] {
+                if let Some(edges) = edges {
+                    pass.set_pipeline(&self.lines);
+                    pass.set_vertex_buffer(0, edges.slice(..));
+                    pass.draw(vertices.clone(), 0..count);
+                }
             }
+            self.draw_instanced_edges(pass, instanced);
         }
-        self.draw_instanced_edges(pass, &self.inst_lines);
         for (edges, count) in [
             (&self.edges, self.edges_count),
             (&self.extra_edges, self.extra_count),
@@ -1903,10 +2165,23 @@ impl Viewport {
             (r.start..split, split..r.end)
         });
         draw_faces(pass, first);
-        if !wireframe {
-            self.draw_instanced_faces(pass, &self.inst_translucent, range);
+        // Sorted with the instances' translucent triangles: the instances' opaque ones
+        // first (X-ray), then everything translucent back to front.
+        let sorted = xray || style.transparency == Transparency::Nicer;
+        match self.blend.as_ref().filter(|_| sorted && !wireframe) {
+            Some(blend) => {
+                if xray {
+                    self.draw_instanced_faces(pass, &self.inst_translucent, |f| f.opaque.clone());
+                }
+                self.draw_blend(pass, blend);
+            }
+            None => {
+                if !wireframe {
+                    self.draw_instanced_faces(pass, &self.inst_translucent, range);
+                }
+                draw_faces(pass, then);
+            }
         }
-        draw_faces(pass, then);
         let preview = self.preview.as_ref().filter(|_| !wireframe);
         if let Some(p) = preview.filter(|p| !range(p).is_empty()) {
             pass.set_pipeline(&self.faces_translucent);

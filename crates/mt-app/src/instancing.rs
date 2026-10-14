@@ -20,11 +20,13 @@
 //! Drawn flattened instead (each instance copied into the scene's buffers):
 //! definitions placed once, instances on the path to the open context (their
 //! contents are edited in place), hidden instances (View > Hidden Objects), "Shadows
-//! face sun" components and what they contain, and meshes with a translucent
-//! triangle (translucent triangles are sorted back to front one by one across the
-//! whole model). Edges stay flattened with Jitter or edges colored by axis, and for
-//! meshes with few edges. While Move, Rotate or Scale runs or a placement is
-//! selected, `live_view` draws its edges flattened.
+//! face sun" components and what they contain, and meshes with a face drawn as
+//! hidden geometry (the mesh of its triangles is drawn in world space with each
+//! placement's edges). Translucent triangles are instanced
+//! too: the viewport sorts them back to front together with the flattened ones
+//! (`mt_render::Viewport::set_instance_meshes`). Edges stay flattened when colored
+//! by axis, and for meshes with few edges. While Move, Rotate or Scale runs or a
+//! placement is selected, `live_view` draws its edges flattened.
 
 use std::ops::Range;
 
@@ -99,7 +101,9 @@ impl LocalTri {
         (verts, order.map(|k| world[k]))
     }
 
-    fn opaque(&self) -> bool {
+    /// Drawn without blending (both sides' alpha 1).
+    #[cfg(test)]
+    pub fn opaque(&self) -> bool {
         self.verts[0].front[3] >= 1.0 && self.verts[0].back[3] >= 1.0
     }
 }
@@ -293,7 +297,8 @@ pub struct Key {
 #[derive(Clone, Copy)]
 pub enum Made {
     Mesh(u32),
-    /// Drawn flattened (translucent, or nothing to draw).
+    /// Drawn flattened (hidden faces shown as hidden geometry, or no faces and too
+    /// few edges to instance).
     Flat,
 }
 
@@ -302,7 +307,7 @@ pub struct Builder {
     /// Times each definition is placed in the model (counted up to 3).
     pub reach: FxMap<DefinitionId, u32>,
     pub made: FxMap<Key, Made>,
-    /// Edges can be instanced (not colored by axis, no jitter).
+    /// Edges can be instanced (not colored by axis).
     pub edges: bool,
     /// Edges' world segments can be made from their mesh (their colors do not depend
     /// on the transform: not colored by axis).
@@ -316,7 +321,7 @@ impl Builder {
         Self {
             reach: reach(model),
             made: FxMap::default(),
-            edges: !by_axis && !model.style.edge_look.jitter,
+            edges: !by_axis,
             lazy_edges: !by_axis,
         }
     }
@@ -350,6 +355,9 @@ pub struct Build {
     pub tris: Vec<LocalTri>,
     pub edges: Vec<Segment>,
     pub local_edges: Vec<LocalEdge>,
+    /// Some face is drawn as hidden geometry: the mesh of its triangles is drawn as
+    /// world edges of the placement, so the placement is drawn flattened.
+    pub hidden_faces: bool,
 }
 
 impl Build {
@@ -368,9 +376,7 @@ impl Build {
         out: &mut crate::document::SceneBuild,
     ) {
         let edges_instanced = builder.edges && self.edges.len() >= MIN_INSTANCED_EDGES;
-        let flat =
-            self.tris.iter().any(|t| !t.opaque()) || (self.tris.is_empty() && !edges_instanced);
-        if flat {
+        if self.hidden_faces || (self.tris.is_empty() && !edges_instanced) {
             builder.made.insert(key, Made::Flat);
             let normal_xf = DMat3::from_mat4(xf).inverse().transpose();
             for t in &self.tris {
@@ -853,7 +859,8 @@ mod tests {
     use crate::selection::Selection;
 
     /// Boxes placed with a variety of transforms, materials and tags, a group with a
-    /// translucent material, nested components and a box of the root's own.
+    /// translucent material, nested components (with a hidden face) and a box of the
+    /// root's own.
     fn model() -> mt_kernel::Model {
         let mut model = mt_kernel::Model::default();
         for (name, color, opacity) in [("Red", [200, 0, 0], 1.0), ("Glass", [0, 0, 200], 0.5)] {
@@ -874,6 +881,10 @@ mod tests {
         let leaf = model.definitions.insert(definition("Leaf", ents, false));
         let mut ents = mt_kernel::Entities::default();
         add_box(&mut ents, DVec3::Z * 20.0, DVec3::new(5.0, 5.0, 2.0));
+        // A hidden face: drawn as hidden geometry (translucent, with the mesh of its
+        // triangles) when that is shown.
+        let f = ents.faces.keys().next().unwrap();
+        ents.faces[f].attrs.hidden = true;
         for k in 0..3 {
             let xf = DMat4::from_translation(DVec3::X * (12.0 * k as f64));
             ents.instances.push(instance(leaf, xf));
@@ -941,12 +952,31 @@ mod tests {
                     "{name}"
                 );
             }
-            // Something is instanced, and the translucent glass boxes are not.
+            // Something is instanced, the translucent glass boxes too.
             assert!(!scene.instancing.placements.is_empty(), "{name}");
-            let glass = scene.vertices.iter().any(|v| v.front[3] < 1.0);
+            let translucent = |v: &FaceVertex| v.front[3] < 1.0;
+            assert_eq!(
+                scene.vertices.iter().any(translucent),
+                doc.model.style.hidden_geometry,
+                "{name}"
+            );
+            assert!(
+                bytemuck::cast_slice::<_, u8>(scene.edges())
+                    == bytemuck::cast_slice::<_, u8>(flat.edges()),
+                "{name}"
+            );
+            let glass =
+                (scene.instancing.meshes.iter()).any(|m| m.vertices.iter().any(translucent));
             assert_eq!(glass, !doc.model.color_by_tag, "{name}");
-            // The flattened edges and the placements' edges are all the edges.
+            assert_eq!(
+                flat.vertices.iter().any(translucent),
+                !doc.model.color_by_tag || doc.model.style.hidden_geometry,
+                "{name}"
+            );
+            // The flattened edges and the placements' edges are all the edges, and
+            // edges are instanced with Jitter too.
             let (edges, instanced) = scene.flat_edges();
+            assert!(!instanced.is_empty(), "{name}");
             let n: usize = (instanced.iter())
                 .map(|&j| scene.instancing.placements[j].edges.len())
                 .sum();

@@ -336,6 +336,31 @@ impl FaceBuffers {
         true
     }
 
+    /// The translucent triangles (their indices) and their centroids, in the order
+    /// last sorted by [`FaceBuffers::sort_translucent`].
+    pub(crate) fn translucent_tris(&self) -> &[([u32; 3], Vec3)] {
+        &self.translucent_tris
+    }
+
+    /// Writes the translucent range in the order `order` gives (indices into
+    /// [`FaceBuffers::translucent_tris`], each once): the model's translucent
+    /// triangles sorted together with other ones (`Viewport`'s instances).
+    pub(crate) fn write_translucent(&mut self, queue: &wgpu::Queue, order: &[u32]) {
+        debug_assert_eq!(order.len(), self.translucent_tris.len());
+        let sorted: Vec<u32> = (order.iter())
+            .flat_map(|&t| self.translucent_tris[t as usize].0)
+            .collect();
+        if !sorted.is_empty() {
+            queue.write_buffer(
+                &self.indices,
+                u64::from(self.translucent.start) * 4,
+                bytemuck::cast_slice(&sorted),
+            );
+        }
+        // A later sort of these alone writes its order again.
+        self.sorted_for = None;
+    }
+
     /// Reorders the translucent triangles back to front for a camera at `eye` looking
     /// along `forward` (perspective: by centroid distance from the eye; parallel: by
     /// centroid depth along `forward`). Per-triangle centroid sorting, so intersecting

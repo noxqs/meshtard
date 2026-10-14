@@ -510,9 +510,15 @@ fn back_line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
     return line_vertex(vi, s, true);
 }
 
-// A pseudo-random number in 0..1 from a segment and a seed (Jitter).
+// A pseudo-random number in 0..1 from a segment and a seed (Jitter). The ends are
+// snapped to a quarter-unit grid first, so an instanced edge (placed on the GPU)
+// jitters like the same edge placed on the CPU, whose ends differ in the last bits.
+// The grid's cells are offset so that round coordinates (whole, half, eighth units)
+// fall inside cells, not on their borders.
 fn hash(s: Segment, seed: f32) -> f32 {
-    let k = dot(s.a + s.b * 1.37, vec3<f32>(12.9898, 78.233, 37.719)) + seed * 19.19;
+    let a = floor(s.a * 4.0 + 0.3063) * 0.25;
+    let b = floor(s.b * 4.0 + 0.3063) * 0.25;
+    let k = dot(a + b * 1.37, vec3<f32>(12.9898, 78.233, 37.719)) + seed * 19.19;
     return fract(sin(k) * 43758.5453);
 }
 
@@ -727,11 +733,17 @@ fn inst_segment(s: Segment, i: Inst) -> Segment {
     return o;
 }
 
-// Instanced edges: the transform repeats for the 6 vertices of each segment's quad
-// (one stroke: no Jitter).
+// Instanced edges: the transform repeats for the 6 vertices of each segment's quad.
 @vertex
 fn inst_line_vs(@builtin(vertex_index) vi: u32, s: Segment, i: Inst) -> LineOut {
     return line_vertex(vi % 6u, inst_segment(s, i), false);
+}
+
+// Jitter's second stroke of instanced edges, drawn as a second pass over the same
+// vertices (vertices 6..11 of `line_vertex`).
+@vertex
+fn inst_jitter_line_vs(@builtin(vertex_index) vi: u32, s: Segment, i: Inst) -> LineOut {
+    return line_vertex(6u + vi % 6u, inst_segment(s, i), false);
 }
 
 @vertex

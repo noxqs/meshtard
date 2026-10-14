@@ -27,7 +27,7 @@ use crate::selection::{Mode, Selection};
 const VIEWPORT: [u32; 2] = [1280, 800];
 
 /// A face from vertex ids (edges reused when present), normal by Newell's method.
-fn polygon(ents: &mut Entities, vs: &[VertexId]) {
+fn polygon(ents: &mut Entities, vs: &[VertexId]) -> mt_kernel::FaceId {
     let mut coedges = Vec::new();
     let mut normal = DVec3::ZERO;
     for k in 0..vs.len() {
@@ -49,7 +49,7 @@ fn polygon(ents: &mut Entities, vs: &[VertexId]) {
         Vec::new(),
         normal.normalize(),
         FaceAttrs::default(),
-    );
+    )
 }
 
 /// A box of size `s` at `o`.
@@ -138,6 +138,45 @@ pub(crate) fn instances(count: usize) -> Model {
             .root
             .instances
             .push(instance(d, DMat4::from_translation(t)));
+    }
+    model
+}
+
+/// `count` instances of one window component in a square layout: a frame of four
+/// boxes around a pane in a translucent material (glazing, railings, curtain walls).
+pub(crate) fn windows(count: usize) -> Model {
+    let mut model = Model::default();
+    model.materials.push(mt_kernel::Material {
+        name: "Glass".into(),
+        color: [120, 170, 220],
+        opacity: 0.35,
+        texture: None,
+    });
+    let mut ents = Entities::default();
+    for (o, s) in [
+        (DVec3::ZERO, DVec3::new(30.0, 4.0, 3.0)),
+        (DVec3::new(0.0, 0.0, 37.0), DVec3::new(30.0, 4.0, 3.0)),
+        (DVec3::new(0.0, 0.0, 3.0), DVec3::new(3.0, 4.0, 34.0)),
+        (DVec3::new(27.0, 0.0, 3.0), DVec3::new(3.0, 4.0, 34.0)),
+    ] {
+        add_box(&mut ents, o, s);
+    }
+    let pane: Vec<VertexId> = [[3.0, 3.0], [27.0, 3.0], [27.0, 37.0], [3.0, 37.0]]
+        .into_iter()
+        .map(|[x, z]| ents.add_vertex(DVec3::new(x, 2.0, z)))
+        .collect();
+    let f = polygon(&mut ents, &pane);
+    ents.faces[f].attrs.material = Some(0);
+    ents.faces[f].attrs.back_material = Some(0);
+    let d = model.definitions.insert(definition("Window", ents, false));
+    let side = (count as f64).sqrt().ceil() as usize;
+    for k in 0..count {
+        let t = DVec3::new((k % side) as f64 * 40.0, (k / side) as f64 * 40.0, 0.0);
+        let r = DMat4::from_rotation_z(0.3 * (k % 7) as f64);
+        model
+            .root
+            .instances
+            .push(instance(d, DMat4::from_translation(t) * r));
     }
     model
 }
@@ -290,7 +329,16 @@ fn gpu_bytes(scene: &Scene) -> usize {
         .sum();
     // One transform per face instance, six per edge instance.
     let instances = 64 * (scene.instancing.placements.len() + 6 * instanced.len());
-    size_of_val(&scene.vertices[..])
+    // The translucent triangles of each placement, sorted with the model's: three
+    // indices each.
+    let translucent: Vec<usize> = (scene.instancing.meshes.iter())
+        .map(|m| m.tris.iter().filter(|t| !t.opaque()).count())
+        .collect();
+    let sorted: usize = (scene.instancing.placements.iter())
+        .map(|p| 12 * translucent[p.mesh as usize])
+        .sum();
+    sorted
+        + size_of_val(&scene.vertices[..])
         + size_of_val(&scene.indices[..])
         + size_of_val(&edges[..])
         + meshes
@@ -791,7 +839,7 @@ fn bench_large_models() {
     }
     let mut report = Report::default();
     type Make = fn() -> Model;
-    let synthetic: [(&str, Make); 4] = [
+    let synthetic: [(&str, Make); 5] = [
         // MESHTARD_BENCH_GRID=n changes the grid's size (577: a million edges).
         ("grid 1M edges", || {
             let n = std::env::var("MESHTARD_BENCH_GRID").ok();
@@ -800,6 +848,7 @@ fn bench_large_models() {
         ("instances 10k", || instances(10_000)),
         ("groups 5k", || groups(5_000)),
         ("nested 4^6", || nested(6, 4)),
+        ("windows 5k", || windows(5_000)),
     ];
     for (name, make) in synthetic {
         if !wanted(name) {

@@ -1008,7 +1008,7 @@ pub(crate) mod tests {
     }
 
     /// A grid spanning many chunks at the root, a box component placed several times
-    /// (instanced; one in a translucent material, drawn flattened), groups of their
+    /// (instanced; one in a translucent material), groups of their
     /// own and nested components.
     pub(crate) fn model() -> Document {
         use crate::bench::{add_box, definition, instance};

@@ -1974,7 +1974,7 @@ fn differing(a: &image::RgbaImage, b: &image::RgbaImage, by: u8) -> usize {
 
 /// Instanced meshes draw what the same meshes copied into the model's buffers draw,
 /// in every face style, with shadows, the section plane, X-ray, ambient occlusion,
-/// profiles, back edges and fog.
+/// profiles, back edges, fog and Jitter.
 #[test]
 fn instanced_meshes_draw_like_flattened_ones() {
     let Some((device, queue)) = device() else {
@@ -2003,8 +2003,12 @@ fn instanced_meshes_draw_like_flattened_ones() {
     };
     let instances: Vec<(u32, glam::Mat4)> = transforms.iter().map(|m| (0, *m)).collect();
     type Setup = fn(&mut Style, &mut Viewport);
-    let cases: [(&str, Setup); 8] = [
+    let cases: [(&str, Setup); 9] = [
         ("shaded", |_, _| {}),
+        ("jitter_endpoints", |s, _| {
+            s.jitter = true;
+            s.endpoints = Some(6.0);
+        }),
         ("shadows_section", |_, vp| {
             vp.set_shadows(Some(sun_30()));
             vp.set_section(Some(SectionCut {
@@ -2083,6 +2087,147 @@ fn instanced_meshes_draw_like_flattened_ones() {
             name.starts_with("wire") || name == "hidden_line" || luma(&p) < 200 || p[0] > p[2],
             "{name}: box drawn, got {p:?}"
         );
+    }
+}
+
+/// The open box with translucent walls (the floor stays opaque): a mesh with both
+/// kinds of triangles.
+fn glass_box() -> (Vec<FaceVertex>, Vec<u32>, Vec<Segment>) {
+    let (mut vertices, indices, edges) = open_box();
+    for t in indices.chunks(3) {
+        let n = vertices[t[0] as usize].normal;
+        if n[2].abs() < 0.5 {
+            for &i in t {
+                vertices[i as usize].front = [0.9, 0.2, 0.1, 0.45];
+                vertices[i as usize].back = [0.1, 0.3, 0.9, 0.6];
+            }
+        }
+    }
+    (vertices, indices, edges)
+}
+
+/// Instanced meshes with translucent triangles draw what the same meshes copied
+/// into the model's buffers draw: their translucent triangles sorted back to front
+/// together with the model's (a translucent wall crossing the instances), with
+/// Nicer transparency (perspective and parallel), X-ray, transparency off and
+/// Jitter.
+#[test]
+fn instanced_translucent_meshes_draw_like_flattened_ones() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let mesh = glass_box();
+    let transforms = instance_transforms();
+    let flat = flattened(&mesh, &transforms);
+    // The model's own faces: an opaque floor and a translucent green wall crossing
+    // the instances, drawn before them in model order.
+    let gray = [0.8, 0.8, 0.8, 1.0];
+    let green = [0.2, 0.8, 0.3, 0.5];
+    let (mut model_v, mut model_i) =
+        quads_mesh(&[flat_quad(-200.0, -150.0, 200.0, 150.0, -1.0)], gray, gray);
+    let wall = (
+        DVec3::new(1.0, -0.3, 0.0).normalize(),
+        [
+            DVec3::new(-30.0, -150.0, 0.0),
+            DVec3::new(15.0, 0.0, 0.0),
+            DVec3::new(15.0, 0.0, 70.0),
+            DVec3::new(-30.0, -150.0, 70.0),
+        ],
+    );
+    let wall2 = (wall.0, wall.1.map(|p| p + DVec3::new(45.0, 150.0, 0.0)));
+    let (wall_v, wall_i) = quads_mesh(&[wall, wall2], green, green);
+    let base = model_v.len() as u32;
+    model_v.extend(wall_v);
+    model_i.extend(wall_i.iter().map(|i| i + base));
+    let mut all_v = model_v.clone();
+    all_v.extend(&flat.0);
+    let mut all_i = model_i.clone();
+    all_i.extend(flat.1.iter().map(|i| i + model_v.len() as u32));
+
+    let perspective = Camera {
+        eye: DVec3::new(-260.0, -380.0, 300.0),
+        target: DVec3::new(0.0, 0.0, 20.0),
+        fov_deg: 35.0,
+        perspective: true,
+        two_point: false,
+    };
+    let parallel = Camera {
+        perspective: false,
+        eye: DVec3::new(300.0, -250.0, 220.0),
+        ..perspective.clone()
+    };
+    let instances: Vec<(u32, glam::Mat4)> = transforms.iter().map(|m| (0, *m)).collect();
+    type Setup = fn(&mut Style, &mut Viewport);
+    let cases: [(&str, bool, Setup); 6] = [
+        ("nicer", true, |_, _| {}),
+        ("nicer_parallel", false, |_, _| {}),
+        ("xray", true, |_, vp| {
+            vp.set_face_style(FaceStyle::Shaded, true)
+        }),
+        ("xray_faster_parallel", false, |s, vp| {
+            s.transparency = mt_render::Transparency::Faster;
+            vp.set_face_style(FaceStyle::Shaded, true);
+        }),
+        ("transparency_off", true, |s, _| {
+            s.transparency = mt_render::Transparency::Off;
+        }),
+        ("jitter_shadows", true, |s, vp| {
+            s.jitter = true;
+            vp.set_shadows(Some(sun_30()));
+        }),
+    ];
+    for (name, persp, setup) in cases {
+        let camera = if persp { &perspective } else { &parallel };
+        let mut images = Vec::new();
+        for instanced in [false, true] {
+            let mut style = plain_style();
+            let mut viewport = Viewport::new(&device, style.clone());
+            setup(&mut style, &mut viewport);
+            viewport.set_style(&device, style);
+            if instanced {
+                viewport.set_faces(&device, &model_v, &model_i);
+                viewport.set_instance_meshes(
+                    &device,
+                    &[mt_render::InstanceMesh {
+                        vertices: &mesh.0,
+                        indices: &mesh.1,
+                        edges: &mesh.2,
+                    }],
+                );
+                viewport.set_face_instances(&device, &instances);
+                viewport.set_edge_instances(&device, &instances);
+            } else {
+                viewport.set_faces(&device, &all_v, &all_i);
+                viewport.set_edges(&device, &flat.2);
+            }
+            let tag = if instanced { "instanced" } else { "flattened" };
+            let file = format!("instancing_glass_{name}_{tag}");
+            images.push(render(&device, &queue, &mut viewport, camera, &file));
+            // A second frame from another view sorts again: still the same.
+            if instanced {
+                let other = Camera {
+                    eye: DVec3::new(250.0, 300.0, 200.0),
+                    ..camera.clone()
+                };
+                render(
+                    &device,
+                    &queue,
+                    &mut viewport,
+                    &other,
+                    &format!("{file}_other"),
+                );
+                images.push(render(&device, &queue, &mut viewport, camera, &file));
+            }
+        }
+        for img in &images[1..] {
+            let (n, total) = (differing(&images[0], img, 24), images[0].len() / 4);
+            eprintln!("glass {name}: {n} of {total} pixels differ");
+            assert!(n * 1000 <= total, "glass {name}: {n} pixels differ");
+        }
+        // The glass walls are there, tinted by what is behind them.
+        let p = pixel_at(&images[1], camera, DVec3::new(-90.0 + 20.0, -60.0, 30.0));
+        assert!(p != image::Rgba([255, 255, 255, 255]), "{name}: {p:?}");
     }
 }
 

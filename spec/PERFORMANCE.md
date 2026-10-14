@@ -30,6 +30,7 @@ GPU, Mesa's software rasterizer (lavapipe / llvmpipe) works.
 | instances 10k | 120,000 | 120,000 | 10,000 instances of one box component (furniture, fasteners, trees). |
 | groups 5k | 60,000 | 60,000 | 5,000 groups, each with its own definition (an imported model). |
 | nested 4^6 | 49,152 | 49,152 | Components nested 6 deep, 4 per level: 4,096 boxes from 7 definitions. |
+| windows 5k | 240,000 | 250,000 | 5,000 instances of a window component: a frame of four boxes around a translucent pane (glazing, railings). |
 | coedge_orientation_regression.skp | 86,161 | 174,634 | Real SketchUp file (FIAT 850 car), `tests/corpus/openskp`. |
 | legacy_v2014_synthetic.skp | 44 | 22 | Small file: the fixed cost of each stage. |
 | gondola_v20.skp | 18,275 | 53,269 | Real SketchUp file, `tests/corpus/openskp`. |
@@ -365,11 +366,11 @@ bound by vertex and fragment work, shows no change.
    open context (their contents are edited in place and selectable), hidden instances
    drawn by View > Hidden Objects, "Shadows face sun" components and everything in
    them (their shadow casters are turned vertices of the flat buffer), and meshes with
-   a translucent triangle (translucent triangles are sorted one by one across the
-   whole model; hidden faces drawn by View > Hidden Geometry are translucent too).
-   Edges stay flattened with Jitter (a second stroke the instanced edge draw does not
-   make) or edges colored by axis (their color depends on the world direction), and
-   for meshes with fewer than 8 edges (an instance of the edges costs 6 transforms).
+   a face drawn by View > Hidden Geometry (the mesh of its triangles is drawn as
+   world edges of each placement). Translucent meshes were flattened too until
+   LEFTOVERS 26 (see "Translucent meshes and Jitter" below). Edges stay flattened
+   when colored by axis (their color depends on the world direction), and for meshes
+   with fewer than 8 edges (an instance of the edges costs 6 transforms).
 3. **Exactness.** `Scene::tri_vertices` (and `flattened_vertices`, used by the
    checksum) gives any instanced triangle's vertices exactly as flattening made them,
    from the double-precision positions and the same normal and winding computation,
@@ -385,17 +386,77 @@ bound by vertex and fragment work, shows no change.
    transform repeated for their 6 quad vertices, so they go through the same line
    shader (profiles from the transformed normals, depth cue, fog, back edges, section
    clipping). Shadows, the section plane, ambient occlusion, X-ray (instanced faces
-   between the model's opaque and its sorted translucent ones, as in model order), fog
+   after the model's opaque ones, then every translucent triangle sorted), fog
    and the face styles apply alike; bounds (shadow fit, depth cue and fog range) come
    from each mesh's distinct points transformed per instance (box corners for meshes
    over 256 points). The headless test `instanced_meshes_draw_like_flattened_ones`
    renders five instances (moved, turned, unevenly scaled, mirrored, tilted) both ways
-   in eight styles: at most 13 of 256,000 pixels differ (rounding along edges).
+   in nine styles: at most 13 of 256,000 pixels differ (rounding along edges).
 5. **The app.** `App::rebuild` uploads the meshes and all placements; Move, Rotate and
    Scale (and the grips' transparent instance) leave the moving placements out of the
    instance list and draw them as preview faces (`live_view::kept_indices` returns the
    kept placements); the highlight draws selected and moving placements' edges
    flattened (with their selection color) and the rest instanced.
+
+### Translucent meshes and Jitter (LEFTOVERS 26)
+
+Meshes with translucent triangles (glass) are now instanced, and
+so are edges with Jitter on.
+
+**Translucent triangles.** With Nicer transparency and in X-ray the flattened
+renderer sorts every translucent triangle back to front by its centroid, across the
+whole model. The instanced ones now take part in that same sort
+(`mt_render::viewport::Blend`): when a frame's view changed (or the faces or
+instances did), the model's translucent triangles and each instance's (its mesh's
+centroids placed by the instance's transform) are sorted together; each instance's
+translucent triangles are written, in that order, into a stretch of one index buffer
+of their own (three indices per triangle and instance, into the mesh's vertices), and
+the sorted list is drawn as runs of consecutive triangles from the same source: the
+model's buffer, or one instance (`draw_indexed` with that instance as the only one).
+Instances that do not overlap in depth make one run each; interleaved ones are split
+into as many runs as needed, so the order is exactly the flattened one. With Faster
+transparency the instances' translucent triangles are drawn unsorted before the
+model's, and with transparency off with the opaque ones. Shadows draw them as before.
+
+**Jitter.** The instanced edges draw Jitter's second stroke with a second pipeline
+over the same vertices (`inst_jitter_line_vs`, vertices 6..11 of the line shader), so
+the instance buffer does not grow. The flattened edges now draw every edge's first
+stroke, then every second one (as the instanced ones do), and the jitter's random
+offsets are taken from the segment's ends snapped to an offset quarter-unit grid, so
+an edge placed on the GPU (single precision) jitters like the same edge placed on the
+CPU (whose ends differ in their last bits).
+
+**Results.** The benchmark gained "windows 5k": 5,000 instances (turned seven ways) of
+one window component, a frame of four boxes around a pane in a material at 35%
+opacity (240,000 edges, 250,000 triangles). Same machine as above (llvmpipe), release
+build, run right before and right after the change; scene and hover checksums equal.
+
+| stage | windows 5k |
+|---|---:|
+| GPU buffers | 88.2 MB → 2.4 MB (37x; of which 0.12 MB of sorted instance indices) |
+| scene memory | 122.0 MB → 17.2 MB (7.1x) |
+| GPU upload | 124 ms → 4.7 ms (26x) |
+| scene build | 103 ms → 20 ms (5.2x) |
+| pick index (BVH) | 59 ms → 2.6 ms |
+| rebuild after move | 121 ms → 10 ms (12x) |
+| move preview (1/10) | 46 ms → 15 ms (3.1x) |
+| rebuild after move (1/10), full / kept | 397 / 91 ms → 42 / 29 ms |
+| frame (1280 x 800) | 493 ms → 407 ms (~, llvmpipe) |
+
+The sort itself is as costly as the flattened one (every translucent triangle, when
+the view changes) plus the per-instance index upload (12 bytes per translucent
+triangle and instance).
+
+Tests: `instanced_translucent_meshes_draw_like_flattened_ones` (headless: the
+five instances of a box with translucent walls and an opaque floor, a translucent
+wall of the model's own crossing them, both ways with Nicer transparency in
+perspective and parallel, X-ray, X-ray with Faster, transparency off, Jitter with
+shadows; and the instanced viewport drawn again after a frame from another view:
+at most 6 of 256,000 pixels differ, 4 with Jitter), Jitter with endpoints added to
+`instanced_meshes_draw_like_flattened_ones` (3 pixels), and
+`instancing::tests::instanced_scene_flattens_to_the_flattened_one` (glass boxes
+instanced, a hidden face, every edge equal to the flattened scene's, edges instanced
+with Jitter).
 
 ## Third round: undo steps below the collection level
 
@@ -803,8 +864,8 @@ Measured but not changed here, biggest first:
   when any of them changed (instances 10k: ~1 to 2 ms per step and per undo).
 - **What rebuilds still redo** (see "Fifth round"). Groups and components drawn
   flattened (placed once, on the open context's path, hidden, "Shadows face sun",
-  translucent) are drawn again when their transform changes: the scene is in world
-  space. Any change to materials, tags, the style, the open context or (with
+  with a face shown as hidden geometry) are drawn again when their transform
+  changes: the scene is in world space. Any change to materials, tags, the style, the open context or (with
   face-camera components) the camera draws everything again. Every rebuild still
   recomputes the instance bounds (instances 10k: ~6 ms), the section cut, the
   triangle containers of the snap geometry and the placements' top-level indexes
@@ -822,8 +883,8 @@ Measured but not changed here, biggest first:
   the vertex de-duplication across instances (its order decides ties). Section cuts
   make the full world triangle list. The owners, materials and containers are still
   stored per triangle and edge (instances 10k: ~5 MB). Selected and moving instances
-  draw their edges flattened, rebuilt with the highlight. Translucent meshes are
-  flattened (one-by-one sorting).
+  draw their edges flattened, rebuilt with the highlight. Translucent triangles of
+  many interleaved instances sort into many small draws (one per run).
 - **The highlight of large selections** (grid, Select All: ~0.4 s): more than 4,096
   selected or moving entities (and an eighth of the edges) are drawn as one new buffer
   made from every edge, as before; selecting few is now independent of the model's
