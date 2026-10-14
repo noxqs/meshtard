@@ -360,13 +360,88 @@ pub struct Geometry {
     /// Culling index over `edges` and `vertices` for large geometry, built on first
     /// use (`cull`); ignored when their lengths no longer match.
     index: std::sync::OnceLock<GeomIndex>,
+    /// Blocks of an earlier geometry's index this one's keeps ([`Geometry::keep_index`]).
+    seed: Option<Seed>,
 }
 
-/// See [`Geometry::index`].
-#[derive(Debug, Clone)]
+/// Items per block of the culling index: blocks over items that did not change are
+/// kept from one geometry to the next ([`Geometry::keep_index`]).
+pub const INDEX_BLOCK: usize = 1 << 14;
+
+/// See [`Geometry::index`]: indexes over blocks of [`INDEX_BLOCK`] items.
+#[derive(Debug, Clone, Default)]
 struct GeomIndex {
-    edges: cull::BoxIndex,
-    vertices: cull::BoxIndex,
+    edges: Vec<std::sync::Arc<cull::BoxIndex>>,
+    vertices: Vec<std::sync::Arc<cull::BoxIndex>>,
+}
+
+/// A geometry's culling index, taken for a later geometry ([`Geometry::take_index`]).
+#[derive(Debug, Default)]
+pub struct IndexBlocks(GeomIndex);
+
+/// The blocks a geometry keeps (`None`: made anew).
+#[derive(Debug, Clone, Default)]
+struct Seed {
+    edges: Vec<Option<std::sync::Arc<cull::BoxIndex>>>,
+    vertices: Vec<Option<std::sync::Arc<cull::BoxIndex>>>,
+}
+
+/// Items `k * INDEX_BLOCK..` of `len`.
+fn block_range(k: usize, len: usize) -> std::ops::Range<usize> {
+    k * INDEX_BLOCK..((k + 1) * INDEX_BLOCK).min(len)
+}
+
+/// Indexes over the blocks of `items`: `seed`'s where it has one, the others made
+/// with `make` (on several threads when there are several).
+fn index_blocks<T: Sync>(
+    items: &[T],
+    seed: &[Option<std::sync::Arc<cull::BoxIndex>>],
+    make: impl Fn(&[T]) -> cull::BoxIndex + Sync,
+) -> Vec<std::sync::Arc<cull::BoxIndex>> {
+    let n = items.len().div_ceil(INDEX_BLOCK);
+    let mut out: Vec<Option<std::sync::Arc<cull::BoxIndex>>> =
+        (0..n).map(|k| seed.get(k).cloned().flatten()).collect();
+    let todo: Vec<usize> = (0..n).filter(|&k| out[k].is_none()).collect();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |t| t.get())
+        .min(todo.len())
+        .max(1);
+    let made: Vec<(usize, cull::BoxIndex)> = std::thread::scope(|s| {
+        let make = &make;
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let todo = &todo;
+                s.spawn(move || {
+                    (todo.iter().skip(t).step_by(threads))
+                        .map(|&k| (k, make(&items[block_range(k, items.len())])))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        (handles.into_iter())
+            .flat_map(|h| h.join().expect("index thread"))
+            .collect()
+    });
+    for (k, b) in made {
+        out[k] = Some(std::sync::Arc::new(b));
+    }
+    out.into_iter().map(|b| b.expect("made")).collect()
+}
+
+/// Items near the cursor over all `blocks` (ascending), or `None` without a usable
+/// view.
+fn near_blocks(
+    blocks: &[std::sync::Arc<cull::BoxIndex>],
+    view: &Lens,
+    cursor: DVec2,
+    radius: f64,
+) -> Option<Vec<usize>> {
+    let pyramid = cull::Pyramid::new(view.camera, view.viewport, cursor, radius)?;
+    let mut out = Vec::new();
+    for (k, b) in blocks.iter().enumerate() {
+        out.extend((b.near_in(&pyramid, 0.0).into_iter()).map(|i| k * INDEX_BLOCK + i));
+    }
+    Some(out)
 }
 
 /// Below this many edges and vertices every one is tested (no index).
@@ -432,27 +507,62 @@ impl Geometry {
         if self.edges.len() + self.vertices.len() < INDEX_MIN {
             return None;
         }
-        let index = self.index.get_or_init(|| GeomIndex {
-            edges: cull::BoxIndex::segments(self.edges.iter().copied()),
-            vertices: cull::BoxIndex::points(self.vertices.iter().copied()),
+        let index = self.index.get_or_init(|| {
+            let seed = self.seed.clone().unwrap_or_default();
+            GeomIndex {
+                edges: index_blocks(&self.edges, &seed.edges, |s| {
+                    cull::BoxIndex::segments(s.iter().copied())
+                }),
+                vertices: index_blocks(&self.vertices, &seed.vertices, |s| {
+                    cull::BoxIndex::points(s.iter().copied())
+                }),
+            }
         });
-        (index.edges.len() == self.edges.len() && index.vertices.len() == self.vertices.len())
+        let len = |b: &[std::sync::Arc<cull::BoxIndex>]| b.iter().map(|x| x.len()).sum::<usize>();
+        (len(&index.edges) == self.edges.len() && len(&index.vertices) == self.vertices.len())
             .then_some(index)
+    }
+
+    /// Takes the culling index (if built), for a later geometry to keep what it can
+    /// ([`Geometry::keep_index`]).
+    pub fn take_index(&mut self) -> Option<IndexBlocks> {
+        self.index.take().map(IndexBlocks)
+    }
+
+    /// Keeps the blocks of `old` (an earlier geometry's index) over items this
+    /// geometry has the same: blocks of [`INDEX_BLOCK`] edges and of vertices for
+    /// which `same_edges` and `same_vertices` say so (given the block's range here).
+    pub fn keep_index(
+        &mut self,
+        old: IndexBlocks,
+        same_edges: impl Fn(std::ops::Range<usize>) -> bool,
+        same_vertices: impl Fn(std::ops::Range<usize>) -> bool,
+    ) {
+        let keep = |blocks: Vec<std::sync::Arc<cull::BoxIndex>>,
+                    len: usize,
+                    same: &dyn Fn(std::ops::Range<usize>) -> bool| {
+            (blocks.into_iter().enumerate())
+                .map(|(k, b)| {
+                    let r = block_range(k, len);
+                    (!r.is_empty() && b.len() == r.len() && same(r)).then_some(b)
+                })
+                .collect()
+        };
+        self.seed = Some(Seed {
+            edges: keep(old.0.edges, self.edges.len(), &same_edges),
+            vertices: keep(old.0.vertices, self.vertices.len(), &same_vertices),
+        });
     }
 
     /// Edges that may pass within `radius` pixels of `cursor` (a superset, in index
     /// order); `None` means all of them.
     fn edges_near(&self, view: &Lens, cursor: DVec2, radius: f64) -> Option<Vec<usize>> {
-        self.index()?
-            .edges
-            .near(view.camera, view.viewport, cursor, radius)
+        near_blocks(&self.index()?.edges, view, cursor, radius)
     }
 
     /// Like [`Geometry::edges_near`] for `vertices`.
     fn vertices_near(&self, view: &Lens, cursor: DVec2, radius: f64) -> Option<Vec<usize>> {
-        self.index()?
-            .vertices
-            .near(view.camera, view.viewport, cursor, radius)
+        near_blocks(&self.index()?.vertices, view, cursor, radius)
     }
 }
 
@@ -1547,8 +1657,8 @@ mod tests {
         let scan = indexed.clone();
         scan.index
             .set(GeomIndex {
-                edges: cull::BoxIndex::default(),
-                vertices: cull::BoxIndex::default(),
+                edges: vec![Default::default()],
+                vertices: vec![Default::default()],
             })
             .unwrap();
         assert!(scan.index().is_none());

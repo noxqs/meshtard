@@ -143,7 +143,7 @@ pub(crate) fn instances(count: usize) -> Model {
 }
 
 /// `count` groups, each with a box definition of its own (an imported model).
-fn groups(count: usize) -> Model {
+pub(crate) fn groups(count: usize) -> Model {
     let mut model = Model::default();
     let side = (count as f64).sqrt().ceil() as usize;
     for k in 0..count {
@@ -167,7 +167,7 @@ fn groups(count: usize) -> Model {
 
 /// Components nested `depth` deep, `breadth` instances per level, boxes at the
 /// leaves: `breadth^depth` drawn boxes.
-fn nested(depth: usize, breadth: usize) -> Model {
+pub(crate) fn nested(depth: usize, breadth: usize) -> Model {
     let mut model = Model::default();
     let mut ents = Entities::default();
     add_box(&mut ents, DVec3::ZERO, DVec3::splat(10.0));
@@ -297,12 +297,12 @@ fn gpu_bytes(scene: &Scene) -> usize {
         + instances
 }
 
-struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+pub(crate) struct Gpu {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
 }
 
-fn gpu() -> Option<Gpu> {
+pub(crate) fn gpu() -> Option<Gpu> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     eprintln!("bench: adapter {:?}", adapter.get_info().name);
@@ -529,6 +529,244 @@ fn run(name: &str, doc: Document, report: &mut Report, gpu: Option<&Gpu>, tmp: &
     report.time(name, "undo (small edit)", || {
         doc.undo();
     });
+
+    // `App::rebuild` after an edit and the highlight, everything made anew (as before
+    // rebuilds kept what did not change) and kept (`scene_cache`, `pick_index::Kept`,
+    // `snap::Kept`, `edge_view`).
+    let mut full = AppSide::new(gpu);
+    let mut kept = AppSide::new(gpu);
+    full.rebuild(&doc, gpu, false);
+    report.time(name, "first rebuild (kept)", || {
+        kept.rebuild(&doc, gpu, true)
+    });
+    assert_eq!(
+        checksum(&kept.scene),
+        checksum(&scene),
+        "{name}: kept scene"
+    );
+    // The kept pick index and snap geometry answer as the full ones.
+    let mut kept_answers = 0xcbf2_9ce4_8422_2325;
+    let kept_bvh = kept.bvh.as_deref().expect("built");
+    for c in &cursors {
+        let hit = crate::selection::pick(&kept.scene, kept_bvh, &camera, *c, px);
+        fnv(&mut kept_answers, format!("{hit:?}").as_bytes());
+    }
+    let mut engine = mt_infer::Engine::default();
+    for c in &cursors {
+        let i = engine.infer(&kept.geometry, kept_bvh, view, *c, None);
+        fnv(
+            &mut kept_answers,
+            format!("{:?} {:?} {:?}", i.point, i.kind, i.edge).as_bytes(),
+        );
+    }
+    eprintln!("bench: {name}: hover checksum (kept) {kept_answers:016x}");
+    assert_eq!(
+        kept_answers, answers,
+        "{name}: kept pick index and snap geometry"
+    );
+    let edits: [(&str, &[Owner]); 2] = [("small edit", &one), ("move (1/10)", &targets)];
+    for (edit, which) in edits {
+        doc.edit(|ents| {
+            crate::modify::apply(ents, which, xf, false);
+            true
+        });
+        for (way, keep) in [("full", false), ("kept", true)] {
+            let side = if keep { &mut kept } else { &mut full };
+            let stage = format!("rebuild after {edit} ({way})");
+            report.time(name, &stage, || side.rebuild(&doc, gpu, keep));
+            // The first mouse move after it builds the culling indexes (kept: from
+            // the last ones where the edges are the same).
+            let stage = format!("first hover after {edit} ({way})");
+            let hover = report.time(name, &stage, || side.hover(&camera, cursors[0], px));
+            if keep {
+                assert_eq!(hover, full.hover(&camera, cursors[0], px), "{name}: {edit}");
+            }
+        }
+        assert_eq!(
+            checksum(&kept.scene),
+            checksum(&full.scene),
+            "{name}: {edit}"
+        );
+        doc.undo();
+        for (way, keep) in [("full", false), ("kept", true)] {
+            let side = if keep { &mut kept } else { &mut full };
+            let stage = format!("rebuild after undo of {edit} ({way})");
+            report.time(name, &stage, || side.rebuild(&doc, gpu, keep));
+        }
+        assert_eq!(
+            checksum(&kept.scene),
+            checksum(&scene),
+            "{name}: undo {edit}"
+        );
+    }
+    let shows: [(&str, &[Owner]); 2] = [("highlight one", &one), ("highlight all", &all)];
+    for (stage, which) in shows {
+        let mut selection = Selection::default();
+        selection.apply(Mode::Replace, which.to_vec());
+        for (way, keep) in [("full", false), ("kept", true)] {
+            let side = if keep { &mut kept } else { &mut full };
+            let stage = format!("{stage} ({way})");
+            report.time(name, &stage, || side.show(&doc, &selection, gpu, keep));
+        }
+        kept.show(&doc, &Selection::default(), gpu, true);
+    }
+}
+
+/// The model-dependent part of `App::rebuild`, and the highlight, without the app.
+struct AppSide {
+    scene: Scene,
+    bvh: Option<Box<dyn mt_kernel::bvh::RayIndex>>,
+    geometry: mt_infer::Geometry,
+    inst_bounds: std::collections::HashMap<usize, (DVec3, DVec3)>,
+    pick: crate::pick_index::Kept,
+    snap: crate::snap::Kept,
+    gpu: crate::edge_view::GpuScene,
+    viewport: Option<mt_render::Viewport>,
+}
+
+impl AppSide {
+    fn new(gpu: Option<&Gpu>) -> Self {
+        let spec = mt_spec::Spec::builtin().unwrap();
+        Self {
+            scene: Scene::default(),
+            bvh: None,
+            geometry: Default::default(),
+            inst_bounds: Default::default(),
+            pick: Default::default(),
+            snap: Default::default(),
+            gpu: Default::default(),
+            viewport: gpu.map(|g| {
+                mt_render::Viewport::new(
+                    &g.device,
+                    mt_render::Style::from_spec(&spec.default_model),
+                )
+            }),
+        }
+    }
+
+    /// The scene, pick index, snap geometry, instance bounds and GPU buffers of `doc`
+    /// (`keep`: from the last ones), and the highlight without a selection.
+    fn rebuild(&mut self, doc: &Document, gpu: Option<&Gpu>, keep: bool) {
+        // MESHTARD_BENCH_STEPS=1 prints the time of each part.
+        let steps = std::env::var_os("MESHTARD_BENCH_STEPS").is_some();
+        let mut at = Instant::now();
+        let mut step = |what: &str| {
+            if steps {
+                eprintln!(
+                    "bench:   {what:<24} {:>10.3} ms",
+                    at.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            at = Instant::now();
+        };
+        if keep {
+            let prev = std::mem::take(&mut self.scene);
+            self.scene = doc.scene_from(Some(prev));
+            if steps {
+                let c = &self.scene.changes;
+                let n = |r: Vec<std::ops::Range<usize>>| r.iter().map(|r| r.len()).sum::<usize>();
+                eprintln!(
+                    "bench:   changed: {} of {} vertices, {} of {} edges, {} of {} stored triangles, meshes kept {}",
+                    n(c.vertices.changed(self.scene.vertices.len())),
+                    self.scene.vertices.len(),
+                    n(c.edges.changed(self.scene.edge_count())),
+                    self.scene.edge_count(),
+                    n(c.stored_tris.changed(self.scene.stored_tris().len())),
+                    self.scene.stored_tris().len(),
+                    c.meshes,
+                );
+            }
+            step("scene");
+            let none: Option<crate::pick_index::FlatIndex> = None;
+            self.bvh = Some(crate::pick_index::PickIndex::build_kept(
+                &self.scene,
+                &mut self.pick,
+                none,
+            ));
+            step("pick index");
+            let old = std::mem::take(&mut self.geometry);
+            self.geometry = crate::snap::geometry_kept(
+                &self.scene,
+                Some(doc),
+                DMat4::IDENTITY,
+                &mut self.snap,
+                old,
+            );
+            step("snap geometry");
+        } else {
+            self.scene = doc.scene();
+            self.bvh = Some(crate::pick_index::PickIndex::build(&self.scene, |t| {
+                Box::new(Bvh::build(t))
+            }));
+            self.geometry = crate::snap::geometry(&self.scene, Some(doc), DMat4::IDENTITY);
+        }
+        let ents = doc.active();
+        self.inst_bounds = crate::selection::instance_bounds(&self.scene, |i| {
+            (ents.instances.get(i)).map(|inst| doc.drawn_transform(inst.transform, inst))
+        });
+        step("instance bounds");
+        if let (Some(g), Some(vp)) = (gpu, &mut self.viewport) {
+            if keep {
+                self.gpu.upload(&self.scene, vp, &g.device, &g.queue);
+            } else {
+                crate::instancing::upload_faces(vp, &g.device, &self.scene);
+            }
+        }
+        step("upload");
+        self.show(doc, &Selection::default(), gpu, keep);
+        step("highlight");
+    }
+
+    /// What a hover at `cursor` picks and infers (the first one after a rebuild
+    /// builds the culling indexes).
+    fn hover(&self, camera: &mt_render::Camera, cursor: DVec2, px: DVec2) -> String {
+        let bvh = self.bvh.as_deref().expect("built");
+        let hit = crate::selection::pick(&self.scene, bvh, camera, cursor, px);
+        let view = mt_infer::View {
+            camera,
+            viewport: px,
+        };
+        let i = mt_infer::Engine::default().infer(&self.geometry, bvh, view, cursor, None);
+        format!("{hit:?} {:?} {:?} {:?}", i.point, i.kind, i.edge)
+    }
+
+    /// The highlight of `selection`: everything sent again, or (`keep`) only what
+    /// changed.
+    fn show(&mut self, doc: &Document, selection: &Selection, gpu: Option<&Gpu>, keep: bool) {
+        let stretch = crate::move_extra::Stretch::default();
+        let h = live_view::Highlight {
+            scene: &self.scene,
+            selection,
+            document: Some(doc),
+            stretch: &stretch,
+            box_only: false,
+            live: None,
+            ctx_xf: DMat4::IDENTITY,
+            inst_bounds: &self.inst_bounds,
+            ghost: None,
+            cut_lines: &[],
+        };
+        match (gpu, &mut self.viewport) {
+            (Some(g), Some(vp)) => {
+                if keep {
+                    self.gpu.show(&h, vp, &g.device, &g.queue);
+                } else {
+                    let (edges, faces, instanced) = h.build();
+                    let indices: Vec<u32> = (0..faces.len() as u32).collect();
+                    vp.set_selected_faces(&g.device, &faces, &indices);
+                    vp.set_edges(&g.device, &edges);
+                    vp.set_edge_instances(&g.device, &self.scene.gpu_instances(instanced));
+                }
+                g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            }
+            _ if keep => {
+                std::hint::black_box(h.build_sparse());
+            }
+            _ => {
+                std::hint::black_box(h.build());
+            }
+        }
+    }
 }
 
 fn wanted(name: &str) -> bool {

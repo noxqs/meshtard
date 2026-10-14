@@ -30,27 +30,42 @@ pub struct Highlight<'a> {
     pub cut_lines: &'a [Segment],
 }
 
-impl Highlight<'_> {
-    /// The edges to draw (model edges with selected ones colored, moved targets,
-    /// selection boxes, the ghost, guides and cut lines), the selected faces'
-    /// triangles (unindexed) and the placements whose edges are drawn instanced (their
-    /// edges left out of the first list: those neither selected nor moving).
-    pub fn build(&self) -> (Vec<Segment>, Vec<FaceVertex>, Vec<usize>) {
-        let scene = self.scene;
-        // Live targets: owner set, world-space transform, copy.
-        let live = self.live.map(|(t, xf, copy)| {
-            let set: FxSet<Owner> = t.iter().copied().collect();
-            (set, self.ctx_xf * *xf * self.ctx_xf.inverse(), *copy)
-        });
-        let moved = |o: &Option<Owner>| match (&live, o) {
-            (Some((set, xf, copy)), Some(o)) if set.contains(o) => Some((*xf, *copy)),
-            _ => None,
-        };
-        let tp = |xf: DMat4, p: [f32; 3]| -> [f32; 3] {
-            xf.transform_point3(glam::Vec3::from(p).as_dvec3())
-                .as_vec3()
-                .into()
-        };
+/// What the highlight draws for one scene and selection, worked out once
+/// ([`Highlight::prepare`]).
+struct Prepared<'a> {
+    /// Live targets: owner set, world-space transform, copy.
+    live: Option<(FxSet<Owner>, DMat4, bool)>,
+    sel_color: [f32; 4],
+    lock_color: [f32; 4],
+    /// The open context (locked instances are highlighted red).
+    active: Option<&'a mt_kernel::Entities>,
+    /// The stretch of a running operation.
+    stretching: bool,
+}
+
+/// The highlight as changes to the model's edges ([`Highlight::build_sparse`]).
+pub struct Sparse {
+    /// Model edges drawn otherwise than the scene has them: edge number and segment,
+    /// ascending (those of placements drawn instanced are never here).
+    pub edges: Vec<(usize, Segment)>,
+    /// Edges drawn after the model's: placements drawn instanced that are selected or
+    /// moving (flattened), moved copies, selection boxes, the ghost, guides and cut
+    /// lines.
+    pub extra: Vec<Segment>,
+    /// The selected faces' triangles (unindexed).
+    pub faces: Vec<FaceVertex>,
+    /// The placements whose edges are drawn instanced.
+    pub instanced: Vec<usize>,
+}
+
+fn tp(xf: DMat4, p: [f32; 3]) -> [f32; 3] {
+    xf.transform_point3(glam::Vec3::from(p).as_dvec3())
+        .as_vec3()
+        .into()
+}
+
+impl<'a> Highlight<'a> {
+    fn prepare(&self) -> Prepared<'a> {
         // Styles > Modeling colors.
         let (sel_color, lock_color) = self.document.map_or((crate::SELECTED, crate::LOCKED), |d| {
             let mc = &d.model.style.modeling_colors;
@@ -59,122 +74,108 @@ impl Highlight<'_> {
                 crate::style_view::rgba(mc.locked),
             )
         });
-        let mut edges = Vec::with_capacity(scene.edge_count());
-        let mut copies = Vec::new();
-        // Locked groups and components are highlighted red instead of blue (only
-        // instances lock; the active context is looked up once).
-        let active = self.document.map(Document::active);
-        let highlight = |o: &Option<Owner>| match (o, active) {
-            (Some(o @ Owner::Instance(_)), Some(ents))
-                if mt_kernel::visibility::is_locked(ents, o.item()) =>
-            {
-                lock_color
-            }
-            _ => sel_color,
-        };
-        // The stretch belongs to the live operation: without one it is stale.
-        let stretching = self.live.is_some() && !self.stretch.owners.is_empty();
-        // Compatibility > Bounding box only: selected groups and components show
-        // their box, not their edges.
-        let box_only = self.box_only;
-        let selected = |o: Owner| {
-            self.selection.contains(&o) && !(box_only && matches!(o, Owner::Instance(_)))
-        };
-        // Placements drawn instanced: left out here, except selected or moving ones.
-        let mut instanced = Vec::new();
-        let mut skip = Vec::new();
-        for (j, p) in scene.instancing.placements.iter().enumerate() {
-            let touched = p.owner.is_some_and(|o| {
-                selected(o)
-                    || moved(&Some(o)).is_some()
-                    || (stretching && self.stretch.contains(&o))
-            });
-            if p.edges_instanced(scene) && !touched {
-                instanced.push(j);
-                skip.push(p.edges.clone());
-            }
+        Prepared {
+            live: self.live.map(|(t, xf, copy)| {
+                let set: FxSet<Owner> = t.iter().copied().collect();
+                (set, self.ctx_xf * *xf * self.ctx_xf.inverse(), *copy)
+            }),
+            sel_color,
+            lock_color,
+            active: self.document.map(Document::active),
+            // The stretch belongs to the live operation: without one it is stale.
+            stretching: self.live.is_some() && !self.stretch.owners.is_empty(),
         }
-        let mut from = 0;
-        let runs = (skip.iter())
-            .map(|r| {
-                let run = from..r.start;
-                from = r.end;
-                run
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .chain(std::iter::once(from..scene.edge_count()));
-        let mut visit = |k: usize, mut seg: Segment| {
-            let owner = &scene.edge_owner[k];
-            let selected = owner.is_some_and(selected);
-            let color = if selected {
-                highlight(owner)
-            } else {
-                sel_color
-            };
-            if stretching
-                && let Some(o) = owner
-                && let (Some(a), Some(b)) = (self.stretch.map(o, seg.a), self.stretch.map(o, seg.b))
+    }
+
+    /// Where a moved owner goes (world-space transform) and whether it is copied.
+    fn moved(p: &Prepared, o: &Option<Owner>) -> Option<(DMat4, bool)> {
+        match (&p.live, o) {
+            (Some((set, xf, copy)), Some(o)) if set.contains(o) => Some((*xf, *copy)),
+            _ => None,
+        }
+    }
+
+    /// Selected and highlighted (Compatibility > Bounding box only: selected groups
+    /// and components show their box, not their edges).
+    fn selected(&self, o: Owner) -> bool {
+        self.selection.contains(&o) && !(self.box_only && matches!(o, Owner::Instance(_)))
+    }
+
+    /// Selected, moving or stretching: drawn otherwise than the scene has it.
+    fn touched(&self, p: &Prepared, o: Owner) -> bool {
+        self.selected(o)
+            || Self::moved(p, &Some(o)).is_some()
+            || (p.stretching && self.stretch.contains(&o))
+    }
+
+    /// Edge `k` (as the scene draws it: `seg`) as highlighted; a moved copy goes to
+    /// `copies`.
+    fn edge(&self, p: &Prepared, k: usize, mut seg: Segment, copies: &mut Vec<Segment>) -> Segment {
+        let owner = &self.scene.edge_owner[k];
+        let selected = owner.is_some_and(|o| self.selected(o));
+        let color = match owner {
+            // Locked groups and components are highlighted red instead of blue (only
+            // instances lock).
+            Some(o @ Owner::Instance(_))
+                if selected
+                    && p.active
+                        .is_some_and(|ents| mt_kernel::visibility::is_locked(ents, o.item())) =>
             {
-                (seg.a, seg.b) = (a, b);
+                p.lock_color
             }
-            match moved(owner) {
-                Some((xf, copy)) => {
-                    let mut c = seg;
-                    (c.a, c.b) = (tp(xf, c.a), tp(xf, c.b));
+            _ => p.sel_color,
+        };
+        if p.stretching
+            && let Some(o) = owner
+            && let (Some(a), Some(b)) = (self.stretch.map(o, seg.a), self.stretch.map(o, seg.b))
+        {
+            (seg.a, seg.b) = (a, b);
+        }
+        match Self::moved(p, owner) {
+            Some((xf, copy)) => {
+                let mut c = seg;
+                (c.a, c.b) = (tp(xf, c.a), tp(xf, c.b));
+                if selected {
+                    c.color = color;
+                }
+                if copy {
+                    copies.push(c);
                     if selected {
-                        c.color = color;
+                        seg.color = color;
                     }
-                    if copy {
-                        copies.push(c);
-                        if selected {
-                            seg.color = color;
-                        }
-                    } else {
-                        seg = c;
-                    }
+                } else {
+                    seg = c;
                 }
-                None if selected => seg.color = color,
-                None => {}
             }
-            edges.push(seg);
-        };
-        for run in runs {
-            scene.for_each_edge_in(run, &mut visit);
+            None if selected => seg.color = color,
+            None => {}
         }
-        edges.extend(copies);
-        // Selected faces' triangles. A face's triangles are consecutive: its owner is
-        // looked up once.
-        let mut selected = Vec::new();
-        let mut last: Option<(Option<Owner>, bool)> = None;
-        for (t, owner) in scene.tri_owner.iter().enumerate() {
-            let hit = match last {
-                Some((o, hit)) if o == *owner => hit,
-                _ => {
-                    let hit =
-                        matches!(owner, Some(o @ Owner::Face(_)) if self.selection.contains(o));
-                    last = Some((*owner, hit));
-                    hit
-                }
-            };
-            if hit {
-                selected.push(t);
+        seg
+    }
+
+    /// The drawn vertices of selected triangle `t`.
+    fn face(&self, p: &Prepared, t: usize, out: &mut Vec<FaceVertex>) {
+        let owner = self.scene.tri_owner[t].expect("a selected face");
+        let xf = Self::moved(p, &Some(owner)).map(|(xf, _)| xf);
+        for mut v in self.scene.tri_vertices(t) {
+            if let Some(xf) = xf {
+                v.position = tp(xf, v.position);
             }
-        }
-        let mut vertices: Vec<FaceVertex> = Vec::with_capacity(3 * selected.len());
-        for t in selected {
-            let owner = scene.tri_owner[t].expect("a selected face");
-            let xf = moved(&Some(owner)).map(|(xf, _)| xf);
-            for mut v in scene.tri_vertices(t) {
-                if let Some(xf) = xf {
-                    v.position = tp(xf, v.position);
-                }
-                if stretching {
-                    v.position = self.stretch.map(&owner, v.position).unwrap_or(v.position);
-                }
-                vertices.push(v);
+            if p.stretching {
+                v.position = self.stretch.map(&owner, v.position).unwrap_or(v.position);
             }
+            out.push(v);
         }
+    }
+
+    /// Whether triangle `t` is of a selected face.
+    fn face_selected(&self, t: usize) -> bool {
+        matches!(self.scene.tri_owner[t], Some(o @ Owner::Face(_)) if self.selection.contains(&o))
+    }
+
+    /// The edges drawn after the model's that do not depend on it: selection boxes,
+    /// the ghost, guides and cut lines.
+    fn overlay(&self, p: &Prepared, edges: &mut Vec<Segment>) {
         // Selected components and groups show their bounding box in their own axes.
         if let Some(doc) = self.document {
             let ents = doc.active();
@@ -186,11 +187,15 @@ impl Highlight<'_> {
                     continue;
                 };
                 let mut xf = doc.drawn_transform(self.ctx_xf * inst.transform, inst);
-                if let Some((m, false)) = moved(&Some(*o)) {
+                if let Some((m, false)) = Self::moved(p, &Some(*o)) {
                     xf = m * xf;
                 }
                 let b = selection::OrientedBox::from_aabb(*min, *max).transformed(xf);
-                let color = if inst.locked { lock_color } else { sel_color };
+                let color = if inst.locked {
+                    p.lock_color
+                } else {
+                    p.sel_color
+                };
                 for [a, c] in b.edges() {
                     let f = |p: DVec3| p.as_vec3().to_array();
                     edges.push(Segment::line(f(a), f(c), color, [1.0, 0.0]));
@@ -203,9 +208,209 @@ impl Highlight<'_> {
                 edges.push(s);
             });
         }
-        edges.extend(scene.guides.iter().copied());
+        edges.extend(self.scene.guides.iter().copied());
         edges.extend(self.cut_lines.iter().copied());
+    }
+
+    /// The placements drawn instanced (neither selected nor moving), and the edge
+    /// ranges of those that are but whose edges are otherwise drawn instanced.
+    fn placements(&self, p: &Prepared) -> (Vec<usize>, Vec<std::ops::Range<usize>>) {
+        let scene = self.scene;
+        let (mut instanced, mut touched) = (Vec::new(), Vec::new());
+        for (j, x) in scene.instancing.placements.iter().enumerate() {
+            if !x.edges_instanced(scene) {
+                continue;
+            }
+            if x.owner.is_some_and(|o| self.touched(p, o)) {
+                touched.push(x.edges.clone());
+            } else {
+                instanced.push(j);
+            }
+        }
+        (instanced, touched)
+    }
+
+    /// The edges to draw (model edges with selected ones colored, moved targets,
+    /// selection boxes, the ghost, guides and cut lines), the selected faces'
+    /// triangles (unindexed) and the placements whose edges are drawn instanced (their
+    /// edges left out of the first list: those neither selected nor moving). Looks
+    /// at every edge and triangle: the app draws [`Highlight::build_sparse`] unless
+    /// much is selected or moving.
+    pub fn build(&self) -> (Vec<Segment>, Vec<FaceVertex>, Vec<usize>) {
+        let scene = self.scene;
+        let p = self.prepare();
+        let mut edges = Vec::with_capacity(scene.edge_count());
+        let mut copies = Vec::new();
+        // Placements drawn instanced: left out here, except selected or moving ones.
+        let (instanced, _) = self.placements(&p);
+        let skip: Vec<std::ops::Range<usize>> = (instanced.iter())
+            .map(|&j| scene.instancing.placements[j].edges.clone())
+            .collect();
+        let mut from = 0;
+        let runs = (skip.iter())
+            .map(|r| {
+                let run = from..r.start;
+                from = r.end;
+                run
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(std::iter::once(from..scene.edge_count()));
+        for run in runs {
+            scene.for_each_edge_in(run, |k, seg| edges.push(self.edge(&p, k, seg, &mut copies)));
+        }
+        edges.extend(copies);
+        // Selected faces' triangles. A face's triangles are consecutive: its owner is
+        // looked up once.
+        let mut vertices = Vec::new();
+        let mut last: Option<(Option<Owner>, bool)> = None;
+        for (t, owner) in scene.tri_owner.iter().enumerate() {
+            let hit = match last {
+                Some((o, hit)) if o == *owner => hit,
+                _ => {
+                    let hit = self.face_selected(t);
+                    last = Some((*owner, hit));
+                    hit
+                }
+            };
+            if hit {
+                self.face(&p, t, &mut vertices);
+            }
+        }
+        self.overlay(&p, &mut edges);
         (edges, vertices, instanced)
+    }
+
+    /// [`Highlight::build`] as changes to the scene's edges, looking only at the
+    /// edges and triangles of the selected, moving and stretching entities (found
+    /// with `Scene::context`): the model's edges with `edges` applied, then `extra`,
+    /// are what `build` draws (the selected or moving placements' edges, which `build`
+    /// draws in place, come first in `extra`).
+    pub fn build_sparse(&self) -> Sparse {
+        let scene = self.scene;
+        let p = self.prepare();
+        let (instanced, touched) = self.placements(&p);
+        // Where the entities that are drawn otherwise are.
+        let mut owners: Vec<Owner> = self.selection.items().to_vec();
+        if let Some((set, _, _)) = &p.live {
+            owners.extend(set.iter().copied());
+        }
+        if p.stretching {
+            owners.extend(self.stretch.owners.keys().copied());
+        }
+        let (mut edge_ranges, tri_ranges) = scene.context_ranges(&owners);
+        edge_ranges.extend(touched.iter().cloned());
+        let edge_ranges = merged(edge_ranges);
+        let mut edges = Vec::new();
+        let mut placed = Vec::new();
+        let mut copies = Vec::new();
+        let mut t = 0;
+        for r in edge_ranges {
+            scene.for_each_edge_in(r, |k, seg| {
+                while touched.get(t).is_some_and(|x| x.end <= k) {
+                    t += 1;
+                }
+                if touched.get(t).is_some_and(|x| x.contains(&k)) {
+                    placed.push(self.edge(&p, k, seg, &mut copies));
+                } else if scene.edge_owner[k].is_some_and(|o| self.touched(&p, o)) {
+                    edges.push((k, self.edge(&p, k, seg, &mut copies)));
+                }
+            });
+        }
+        let mut faces = Vec::new();
+        for r in merged(tri_ranges) {
+            for t in r {
+                if self.face_selected(t) {
+                    self.face(&p, t, &mut faces);
+                }
+            }
+        }
+        let mut extra = placed;
+        extra.extend(copies);
+        self.overlay(&p, &mut extra);
+        Sparse {
+            edges,
+            extra,
+            faces,
+            instanced,
+        }
+    }
+}
+
+/// `ranges` sorted, overlapping and touching ones joined.
+fn merged(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    ranges.retain(|r| !r.is_empty());
+    ranges.sort_unstable_by_key(|r| r.start);
+    let mut out: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match out.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+impl Scene {
+    /// Ranges of edges and of triangles that hold every edge of `owners` and every
+    /// triangle of its faces (with others), from `Scene::context`; everything when the
+    /// scene was not built by `Document`.
+    pub(crate) fn context_ranges(
+        &self,
+        owners: &[Owner],
+    ) -> (Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>) {
+        use mt_kernel::slot_store::SlotStore;
+        let c = &self.context;
+        if !c.known {
+            let all = |n: usize| std::iter::once(0..n).collect();
+            return (all(self.edge_count()), all(self.tri_count()));
+        }
+        let mut edge_chunks = vec![false; c.edge_chunks.len()];
+        let mut face_chunks = vec![false; c.face_chunks.len()];
+        let mut instances = FxSet::default();
+        let mut tail = false;
+        for o in owners {
+            match *o {
+                Owner::Edge(e) => {
+                    let k = SlotStore::<mt_kernel::EdgeId, ()>::chunk_of(e);
+                    if let Some(x) = edge_chunks.get_mut(k) {
+                        *x = true;
+                    }
+                }
+                Owner::Face(f) => {
+                    let k = SlotStore::<mt_kernel::FaceId, ()>::chunk_of(f);
+                    if let Some(x) = face_chunks.get_mut(k) {
+                        *x = true;
+                    }
+                }
+                Owner::Instance(i) => {
+                    instances.insert(i);
+                }
+                Owner::Section(_) | Owner::Dimension(_) | Owner::Text(_) => tail = true,
+            }
+        }
+        let mut edges = Vec::new();
+        let mut tris = Vec::new();
+        for (k, r) in c.edge_chunks.iter().enumerate() {
+            if edge_chunks[k] {
+                edges.push(r.clone());
+            }
+        }
+        for (k, (e, t)) in c.face_chunks.iter().enumerate() {
+            if face_chunks[k] {
+                edges.push(e.clone());
+                tris.push(t.clone());
+            }
+        }
+        for (i, e, _) in &c.instances {
+            if instances.contains(i) {
+                edges.push(e.clone());
+            }
+        }
+        if tail {
+            edges.push(c.tail.0..self.edge_count());
+        }
+        (edges, tris)
     }
 }
 
@@ -270,6 +475,125 @@ pub fn all_owners(scene: &Scene) -> Vec<Owner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::Mode;
+
+    fn bytes<T: bytemuck::Pod>(v: &[T]) -> &[u8] {
+        bytemuck::cast_slice(v)
+    }
+
+    /// `build_sparse`'s changes to the model's edges, with its extra edges, give what
+    /// `build` draws, for `sel` selected and `live` running in `doc`.
+    fn sparse_matches_full(
+        doc: &Document,
+        sel: &[Owner],
+        live: Option<(Vec<Owner>, DMat4, bool)>,
+        what: &str,
+    ) {
+        let scene = doc.scene();
+        let mut selection = Selection::default();
+        selection.apply(Mode::Replace, sel.to_vec());
+        let ctx_xf = doc.context_transform();
+        let stretch = crate::move_extra::live_stretch(Some(doc), &live, ctx_xf);
+        let ents = doc.active();
+        let inst_bounds = crate::selection::instance_bounds(&scene, |i| {
+            (ents.instances.get(i)).map(|inst| doc.drawn_transform(ctx_xf * inst.transform, inst))
+        });
+        let h = Highlight {
+            scene: &scene,
+            selection: &selection,
+            document: Some(doc),
+            stretch: &stretch,
+            box_only: false,
+            live: live.as_ref(),
+            ctx_xf,
+            inst_bounds: &inst_bounds,
+            ghost: None,
+            cut_lines: &[],
+        };
+        let (full, faces, instanced) = h.build();
+        let sparse = h.build_sparse();
+        assert_eq!(instanced, sparse.instanced, "{what}");
+        assert!(bytes(&faces) == bytes(&sparse.faces), "{what}: faces");
+        // The full list again, from the sparse one.
+        let placed: Vec<(std::ops::Range<usize>, bool)> = (scene.instancing.placements.iter())
+            .enumerate()
+            .filter(|(_, p)| p.edges_instanced(&scene))
+            .map(|(j, p)| (p.edges.clone(), !instanced.contains(&j)))
+            .collect();
+        let mut changed = sparse.edges.iter().peekable();
+        let mut extra = sparse.extra.iter();
+        let mut out = Vec::new();
+        for e in 0..scene.edge_count() {
+            match placed.iter().find(|(r, _)| r.contains(&e)) {
+                Some((_, false)) => {}
+                Some((_, true)) => out.push(*extra.next().expect("a placement's edge")),
+                None => match changed.next_if(|(k, _)| *k == e) {
+                    Some((_, s)) => out.push(*s),
+                    None => out.push(scene.edge(e)),
+                },
+            }
+        }
+        assert!(changed.next().is_none(), "{what}: every change in order");
+        out.extend(extra.copied());
+        assert_eq!(out.len(), full.len(), "{what}");
+        assert!(bytes(&out) == bytes(&full), "{what}: edges");
+    }
+
+    /// The highlight that looks only at the selected and moving entities draws what
+    /// the one looking at every edge draws: no selection, single entities of every
+    /// kind (an instanced placement, a locked one, a hidden face), everything, moves
+    /// with and without a copy and with stretching, inside an open group.
+    #[test]
+    fn sparse_highlight_draws_what_the_full_one_draws() {
+        let mut doc = crate::scene_cache::tests::model();
+        doc.model.style.hidden_geometry = true;
+        let f = doc.active().faces.keys().nth(40).unwrap();
+        doc.hide(&[Owner::Face(f)]);
+        doc.lock(&[Owner::Instance(3)], true);
+        let e = doc.active().edges.keys().nth(100).unwrap();
+        let g = doc.active().faces.keys().nth(300).unwrap();
+        let all = all_owners(&doc.scene());
+        let mv = DMat4::from_translation(DVec3::new(3.0, 1.0, 2.0));
+        type Case = (&'static str, Vec<Owner>, Option<(Vec<Owner>, DMat4, bool)>);
+        let cases: Vec<Case> = vec![
+            ("nothing", vec![], None),
+            ("an edge", vec![Owner::Edge(e)], None),
+            ("a face", vec![Owner::Face(g)], None),
+            ("a hidden face", vec![Owner::Face(f)], None),
+            ("an instanced placement", vec![Owner::Instance(0)], None),
+            ("a locked one", vec![Owner::Instance(3)], None),
+            ("a group", vec![Owner::Instance(8)], None),
+            ("everything", all.clone(), None),
+            (
+                "move a face",
+                vec![Owner::Face(g)],
+                Some((vec![Owner::Face(g)], mv, false)),
+            ),
+            (
+                "copy an edge",
+                vec![],
+                Some((vec![Owner::Edge(e)], mv, true)),
+            ),
+            (
+                "move a placement",
+                vec![Owner::Instance(0)],
+                Some((vec![Owner::Instance(0), Owner::Instance(5)], mv, false)),
+            ),
+            (
+                "move everything",
+                all.clone(),
+                Some((all.clone(), mv, false)),
+            ),
+        ];
+        for (name, sel, live) in &cases {
+            sparse_matches_full(&doc, sel, live.clone(), name);
+        }
+        assert!(doc.open_instance(8));
+        let e = doc.active().edges.keys().next().unwrap();
+        let all = all_owners(&doc.scene());
+        sparse_matches_full(&doc, &[Owner::Edge(e)], None, "in a group");
+        sparse_matches_full(&doc, &all, Some((all.clone(), mv, true)), "copy in a group");
+    }
 
     /// The edges `Highlight` draws, as endpoint pairs.
     fn drawn(

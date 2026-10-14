@@ -42,13 +42,14 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 # Key slots of the kernel's entity ids (dense sets in Edit > Select All).
 slotmap = "1"
+# Comparing GPU vertices and segments byte for byte (`edge_view`).
+bytemuck.workspace = true
 
 [dev-dependencies]
 # Mutation fuzzing of the .style and .mtx readers (src/fuzz_tests.rs).
 mt-fuzz = { path = "../mt-fuzz" }
-# The large-model benchmark (`src/bench.rs`): a headless wgpu device and scene checksums.
+# The large-model benchmark (`src/bench.rs`): a headless wgpu device.
 pollster.workspace = true
-bytemuck.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }

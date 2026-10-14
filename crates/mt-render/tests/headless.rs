@@ -2135,3 +2135,84 @@ fn instance_lists_choose_what_is_drawn() {
         pixel_at(&img, &camera, DVec3::new(150.0, 100.0, 0.0))
     );
 }
+
+/// Faces and edges rewritten in part (`Viewport::update_faces`, `write_edges`, extra
+/// edges) draw exactly what setting them anew draws: moved and recolored vertices,
+/// a triangle turning translucent, a subset of indices, edges split between the model
+/// buffer and the extra one.
+#[test]
+fn partial_updates_draw_like_full_ones() {
+    let Some((device, queue)) = device() else {
+        eprintln!("SKIPPED: no wgpu adapter");
+        return;
+    };
+    let (v, i, edges) = flattened(&open_box(), &instance_transforms());
+    // Unindexed: triangle t is vertices 3 t..3 t + 3, as the app's scene has them.
+    let v1: Vec<FaceVertex> = i.iter().map(|&k| v[k as usize]).collect();
+    let seq: Vec<u32> = (0..v1.len() as u32).collect();
+    let mut v2 = v1.clone();
+    for p in &mut v2[30..60] {
+        p.position[2] += 15.0;
+        p.front = [0.1, 0.8, 0.2, 1.0];
+    }
+    let mut v3 = v2.clone();
+    for p in &mut v3[90..96] {
+        p.front[3] = 0.4;
+    }
+    let mut e2 = edges.clone();
+    for s in &mut e2[10..20] {
+        s.a[2] += 15.0;
+        s.color = [0.0, 0.0, 1.0, 1.0];
+    }
+    let camera = Camera {
+        eye: DVec3::new(-260.0, -380.0, 300.0),
+        target: DVec3::new(0.0, 0.0, 20.0),
+        fov_deg: 35.0,
+        perspective: true,
+        two_point: false,
+    };
+    let subset: Vec<u32> = (0..v1.len() as u32).filter(|k| k / 3 % 4 != 1).collect();
+    type Case<'a> = (
+        &'a str,
+        &'a [FaceVertex],
+        &'a [u32],
+        &'a [std::ops::Range<usize>],
+    );
+    let moved: Vec<std::ops::Range<usize>> = std::iter::once(30..60).collect();
+    let both = vec![30..60, 90..96];
+    let all: Vec<std::ops::Range<usize>> = std::iter::once(0..v1.len()).collect();
+    let cases: [Case; 4] = [
+        ("moved", &v2, &seq, &moved),
+        ("translucent", &v3, &seq, &both),
+        ("subset", &v1, &subset, &[]),
+        ("all back", &v1, &seq, &all),
+    ];
+    let base = edges.len() - 8;
+    for (name, verts, indices, changed) in cases {
+        let mut full = Viewport::new(&device, plain_style());
+        full.set_faces(&device, verts, indices);
+        full.set_edges(&device, &e2);
+        let mut part = Viewport::new(&device, plain_style());
+        part.set_faces(&device, &v1, &seq);
+        part.set_edges(&device, &edges[..base]);
+        part.update_faces(&device, &queue, verts, indices, changed);
+        part.write_edges(&queue, 10, &e2[10..20]);
+        part.set_edge_bounds(mt_render::model_edge_bounds(&e2[..base]));
+        part.set_extra_edges(&device, &e2[base..]);
+        let a = render(
+            &device,
+            &queue,
+            &mut full,
+            &camera,
+            &format!("partial_{name}_full"),
+        );
+        let b = render(
+            &device,
+            &queue,
+            &mut part,
+            &camera,
+            &format!("partial_{name}_part"),
+        );
+        assert_eq!(differing(&a, &b, 0), 0, "{name}");
+    }
+}

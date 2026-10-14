@@ -9,9 +9,11 @@
 //! (`Scene::tri`, `Scene::edge`), so the answers are those of the flattened scene.
 //! Geometry outside placements keeps a plain index over its stored world lists.
 
+use std::sync::Arc;
+
 use glam::{DMat3, DMat4, DVec2, DVec3};
 use mt_infer::cull::{BoxIndex, Pyramid, ray_meets_box};
-use mt_kernel::bvh::{Bvh, Hit, RayIndex, ray_triangle};
+use mt_kernel::bvh::{Bvh, Hit, RayIndex, ray_box, ray_triangle, search_limit};
 use mt_render::Camera;
 
 use crate::document::Scene;
@@ -94,37 +96,173 @@ pub struct PickIndex {
     /// The triangle number of each stored triangle.
     flat_ids: Vec<u32>,
     /// Per mesh: its triangles in its coordinates, and their faces' normals.
-    meshes: Vec<(Bvh, Vec<DVec3>)>,
+    meshes: Vec<MeshIndex>,
     /// The placements with triangles, in triangle order.
     places: Vec<Place>,
     /// Over `places`' world boxes.
     top: BoxIndex,
 }
 
+/// Stored triangles per block of [`Blocks`].
+const BLOCK: usize = 1 << 14;
+
+/// A ray index over a scene's stored triangles in blocks of [`BLOCK`], each with a
+/// [`Bvh`] of its own, kept from one build to the next while their triangles are the
+/// same (spec/PERFORMANCE.md, "Fifth round"). Its answers are a single
+/// `Bvh`'s: the nearest hit, and among equally near ones the lowest-numbered.
+pub struct Blocks {
+    blocks: Vec<Arc<Bvh>>,
+}
+
+impl RayIndex for Blocks {
+    fn ray(&self, origin: DVec3, dir: DVec3) -> Option<Hit> {
+        let inv_dir = DVec3::ONE / dir;
+        let mut best: Option<Hit> = None;
+        for (k, b) in self.blocks.iter().enumerate() {
+            let Some((min, max)) = b.bounds() else {
+                continue;
+            };
+            if ray_box(origin, inv_dir, search_limit(best), min, max).is_none() {
+                continue;
+            }
+            if let Some(h) = b.ray(origin, dir) {
+                let i = k * BLOCK + h.triangle;
+                if Hit::nearer(h.t, i, best) {
+                    best = Some(Hit {
+                        t: h.t,
+                        triangle: i,
+                    });
+                }
+            }
+        }
+        best
+    }
+
+    fn triangle(&self, i: usize) -> [DVec3; 3] {
+        self.blocks[i / BLOCK].triangle(i % BLOCK)
+    }
+}
+
+/// Builds one index over all the stored triangles (`PickIndex::build_kept`).
+#[cfg(test)]
+pub type FlatIndex = fn(Vec<[DVec3; 3]>) -> Box<dyn RayIndex>;
+
+/// A mesh's triangles in its coordinates and their faces' normals.
+type MeshIndex = Arc<(Bvh, Vec<DVec3>)>;
+
+fn mesh_index(m: &crate::instancing::Mesh) -> MeshIndex {
+    Arc::new((
+        Bvh::build(m.tris.iter().map(|t| t.local).collect()),
+        m.tris.iter().map(|t| t.normal).collect(),
+    ))
+}
+
+/// What [`PickIndex::build_kept`] keeps for the next build: the blocks of stored
+/// triangles, the meshes' indexes, and the scene they are of.
+#[derive(Default)]
+pub struct Kept {
+    build: u64,
+    blocks: Vec<Arc<Bvh>>,
+    meshes: Vec<MeshIndex>,
+}
+
+/// `f` over `jobs`, on as many threads as there are cores when there are several.
+pub fn parallel<T: Send, R: Send>(jobs: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if jobs.len() < 2 || threads < 2 {
+        return jobs.into_iter().map(f).collect();
+    }
+    let per = jobs.len().div_ceil(threads);
+    let mut groups: Vec<Vec<T>> = Vec::new();
+    for (k, j) in jobs.into_iter().enumerate() {
+        if k % per == 0 {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().expect("just pushed").push(j);
+    }
+    std::thread::scope(|s| {
+        let f = &f;
+        let handles: Vec<_> = (groups.into_iter())
+            .map(|g| s.spawn(move || g.into_iter().map(f).collect::<Vec<R>>()))
+            .collect();
+        (handles.into_iter())
+            .flat_map(|h| h.join().expect("worker thread"))
+            .collect()
+    })
+}
+
 impl PickIndex {
     /// The pick index of `scene`; `flat` builds the index over the triangles not
-    /// instanced (on the GPU for large models). A scene without placements gets that
-    /// index alone.
+    /// instanced. A scene without placements gets that index alone. The app uses
+    /// [`PickIndex::build_kept`]; tests and the benchmark compare it with this.
+    #[cfg(test)]
     pub fn build(
         scene: &Scene,
         flat: impl FnOnce(Vec<[DVec3; 3]>) -> Box<dyn RayIndex>,
     ) -> Box<dyn RayIndex> {
+        let meshes = || scene.instancing.meshes.iter().map(mesh_index).collect();
+        Self::with(scene, |t| flat(t.to_vec()), meshes)
+    }
+
+    /// [`PickIndex::build`] with the triangles not instanced in [`Blocks`] (built on
+    /// several threads), keeping in `kept` what the next build can reuse: the blocks
+    /// the scene's changes (`Scene::changes`) left as they were, and the meshes'
+    /// indexes while the meshes are the same. `flat`, when given, builds one index
+    /// over all the stored triangles instead (on the GPU).
+    pub fn build_kept(
+        scene: &Scene,
+        kept: &mut Kept,
+        flat: Option<impl FnOnce(Vec<[DVec3; 3]>) -> Box<dyn RayIndex>>,
+    ) -> Box<dyn RayIndex> {
+        let same = kept.build != 0 && scene.changes.from == Some(kept.build);
+        let meshes: Vec<MeshIndex> = if same && scene.changes.meshes {
+            std::mem::take(&mut kept.meshes)
+        } else {
+            scene.instancing.meshes.iter().map(mesh_index).collect()
+        };
+        kept.meshes = meshes.clone();
+        kept.build = scene.build;
+        let old = std::mem::take(&mut kept.blocks);
+        if let Some(flat) = flat {
+            return Self::with(scene, |t| flat(t.to_vec()), || meshes);
+        }
+        let tris = scene.stored_tris();
+        let n = tris.len().div_ceil(BLOCK);
+        let range = |k: usize| k * BLOCK..((k + 1) * BLOCK).min(tris.len());
+        let reuse = |k: usize| {
+            (old.get(k))
+                .filter(|b| same && b.len() == range(k).len())
+                .filter(|_| scene.changes.stored_tris.covers(range(k)))
+                .cloned()
+        };
+        let mut blocks: Vec<Option<Arc<Bvh>>> = (0..n).map(reuse).collect();
+        let todo: Vec<usize> = (0..n).filter(|&k| blocks[k].is_none()).collect();
+        let made = parallel(todo.clone(), |k| {
+            Arc::new(Bvh::build(tris[range(k)].to_vec()))
+        });
+        for (k, b) in todo.into_iter().zip(made) {
+            blocks[k] = Some(b);
+        }
+        let blocks: Vec<Arc<Bvh>> = blocks.into_iter().map(|b| b.expect("built")).collect();
+        kept.blocks = blocks.clone();
+        Self::with(scene, |_| Box::new(Blocks { blocks }), || meshes)
+    }
+
+    /// The index of `scene` with `flat` over its stored triangles.
+    fn with(
+        scene: &Scene,
+        flat: impl FnOnce(&[[DVec3; 3]]) -> Box<dyn RayIndex>,
+        meshes: impl FnOnce() -> Vec<MeshIndex>,
+    ) -> Box<dyn RayIndex> {
         let inst = &scene.instancing;
         if inst.placements.is_empty() {
-            return flat(scene.stored_tris().to_vec());
+            return flat(scene.stored_tris());
         }
         let flat_ids = scene
             .flat_tris()
             .map(|(t, _)| u32::try_from(t).expect("fewer than 2^32 triangles"))
             .collect();
-        let meshes: Vec<(Bvh, Vec<DVec3>)> = (inst.meshes.iter())
-            .map(|m| {
-                (
-                    Bvh::build(m.tris.iter().map(|t| t.local).collect()),
-                    m.tris.iter().map(|t| t.normal).collect(),
-                )
-            })
-            .collect();
+        let meshes = meshes();
         let mut flat_before = 0;
         let mut next = 0;
         let mut places = Vec::new();
@@ -156,7 +294,7 @@ impl PickIndex {
         }
         let top = BoxIndex::boxes(places.iter().map(|p| (p.min, p.max)));
         Box::new(Self {
-            flat: flat(scene.stored_tris().to_vec()),
+            flat: flat(scene.stored_tris()),
             flat_ids,
             meshes,
             places,
@@ -166,7 +304,7 @@ impl PickIndex {
 
     /// World triangle `k` of place `p`, as the scene build makes it.
     fn placed(&self, p: &Place, k: usize) -> [DVec3; 3] {
-        let (bvh, normals) = &self.meshes[p.mesh as usize];
+        let (bvh, normals) = &*self.meshes[p.mesh as usize];
         placed_tri(
             &bvh.triangle(k),
             &p.transform,
@@ -234,8 +372,8 @@ impl RayIndex for PickIndex {
 pub struct EdgeIndex {
     /// Edges indexed (the scene's count when built).
     len: usize,
-    /// Over the stored edges, with the edge number of each.
-    flat: BoxIndex,
+    /// Over blocks of [`EDGE_BLOCK`] stored edges, with the edge number of each.
+    flat: Vec<Arc<BoxIndex>>,
     flat_ids: Vec<u32>,
     /// Over the world boxes of `lazy`'s placements.
     top: BoxIndex,
@@ -246,11 +384,50 @@ pub struct EdgeIndex {
     meshes: Vec<Option<BoxIndex>>,
 }
 
+/// Stored edges per block of an [`EdgeIndex`].
+const EDGE_BLOCK: usize = 1 << 14;
+
+/// The blocks of a scene's [`EdgeIndex`] over its stored edges, handed to the scene
+/// built from it (`Scene::edge_seed`): those over unchanged edges are kept.
+pub struct EdgeSeed {
+    /// The scene they are of.
+    build: u64,
+    blocks: Vec<Arc<BoxIndex>>,
+}
+
 impl EdgeIndex {
+    /// Its blocks over the stored edges of scene `build`, for the next scene's index.
+    pub fn seed(self, build: u64) -> EdgeSeed {
+        EdgeSeed {
+            build,
+            blocks: self.flat,
+        }
+    }
+
     pub fn build(scene: &Scene) -> Self {
         let v3 = |p: [f32; 3]| glam::Vec3::from(p).as_dvec3();
         let stored = scene.stored_edges();
-        let flat = BoxIndex::segments(stored.iter().map(|s| [v3(s.a), v3(s.b)]));
+        // Blocks of the previous scene's index over edges still the same are kept; the
+        // others are made (on several threads).
+        let seed = (scene.edge_seed.as_ref()).filter(|s| scene.changes.from == Some(s.build));
+        let range = |k: usize| k * EDGE_BLOCK..((k + 1) * EDGE_BLOCK).min(stored.len());
+        let mut flat: Vec<Option<Arc<BoxIndex>>> = (0..stored.len().div_ceil(EDGE_BLOCK))
+            .map(|k| {
+                let s = seed?.blocks.get(k)?;
+                (s.len() == range(k).len() && scene.changes.stored_edges.covers(range(k)))
+                    .then(|| s.clone())
+            })
+            .collect();
+        let todo: Vec<usize> = (0..flat.len()).filter(|&k| flat[k].is_none()).collect();
+        let made = parallel(todo.clone(), |k| {
+            Arc::new(BoxIndex::segments(
+                stored[range(k)].iter().map(|s| [v3(s.a), v3(s.b)]),
+            ))
+        });
+        for (k, b) in todo.into_iter().zip(made) {
+            flat[k] = Some(b);
+        }
+        let flat = flat.into_iter().map(|b| b.expect("made")).collect();
         let inst = &scene.instancing;
         let mut flat_ids = Vec::with_capacity(stored.len());
         let mut e = 0;
@@ -306,9 +483,11 @@ impl EdgeIndex {
         radius: f64,
     ) -> Option<Vec<usize>> {
         let pyramid = Pyramid::new(camera, viewport, cursor, radius)?;
-        let mut out: Vec<usize> = (self.flat.near_in(&pyramid, 0.0).into_iter())
-            .map(|i| self.flat_ids[i] as usize)
-            .collect();
+        let mut out: Vec<usize> = Vec::new();
+        for (k, block) in self.flat.iter().enumerate() {
+            let ids = &self.flat_ids[k * EDGE_BLOCK..];
+            out.extend((block.near_in(&pyramid, 0.0).into_iter()).map(|i| ids[i] as usize));
+        }
         let round = ROUND * pyramid.scale();
         for k in self.top.near_in(&pyramid, 0.0) {
             let (j, inverse, pad) = self.lazy[k];
@@ -522,6 +701,90 @@ mod tests {
                 hits += usize::from(hit.is_some());
             }
             assert!(hits > 300, "{name}: {hits} random hits");
+        }
+    }
+
+    /// The pick index in blocks, kept between builds, answers as one `Bvh` over all
+    /// the triangles does: before and after edits (blocks kept and made again), with
+    /// placements and without.
+    #[test]
+    fn kept_blocks_pick_as_one_index() {
+        let mut doc = Document::untitled();
+        doc.model = grid(150);
+        let mut kept = Kept::default();
+        let mut scene = doc.scene_from(None);
+        let none: Option<FlatIndex> = None;
+        let mut seed = 11u64;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for round in 0..4 {
+            let blocks = PickIndex::build_kept(&scene, &mut kept, none);
+            let one = Bvh::build(scene.triangles().to_vec());
+            assert!(scene.stored_tris().len() > 2 * BLOCK);
+            let mut hits = 0;
+            for _ in 0..4000 {
+                let o = DVec3::new(rnd() * 1500.0, rnd() * 1500.0, 40.0 + rnd() * 400.0);
+                let to = DVec3::new(rnd() * 1500.0, rnd() * 1500.0, 0.0);
+                let d = (to - o).normalize();
+                let hit = blocks.ray(o, d);
+                assert_eq!(hit, one.ray(o, d), "round {round}: {o} {d}");
+                if let Some(h) = hit {
+                    assert_eq!(blocks.triangle(h.triangle), one.triangle(h.triangle));
+                    hits += 1;
+                }
+            }
+            assert!(hits > 3000, "{hits}");
+            // Picking (edges by the culling index, kept in part from the last scene's)
+            // gives what a scene built anew gives.
+            let fresh = doc.scene();
+            let fresh_index = Bvh::build(fresh.stored_tris().to_vec());
+            let camera = Camera {
+                eye: DVec3::new(-200.0, -300.0, 700.0),
+                target: DVec3::new(700.0, 700.0, 0.0),
+                fov_deg: 35.0,
+                perspective: true,
+                two_point: false,
+            };
+            let px = DVec2::new(800.0, 600.0);
+            for k in 0..60 {
+                let c = DVec2::new((k % 10) as f64 * 80.0 + 3.0, (k / 10) as f64 * 100.0 + 5.0);
+                let a = crate::selection::pick(&scene, &*blocks, &camera, c, px);
+                let b = crate::selection::pick(&fresh, &fresh_index, &camera, c, px);
+                assert_eq!(a, b, "round {round}: {c}");
+            }
+            // Rays straight down on the grid's vertices: ties between triangles.
+            for k in 0..500 {
+                let p = DVec3::new((k % 150) as f64 * 10.0, (k * 7 % 150) as f64 * 10.0, 100.0);
+                assert_eq!(blocks.ray(p, DVec3::NEG_Z), one.ray(p, DVec3::NEG_Z));
+            }
+            // An edit: some blocks are kept, the changed ones made again.
+            let faces: Vec<crate::document::Owner> = (doc.active().faces.keys())
+                .skip(round * 9000)
+                .take(1 + round * 200)
+                .map(crate::document::Owner::Face)
+                .collect();
+            doc.edit(|e| {
+                let xf = DMat4::from_translation(DVec3::new(0.0, 0.0, 5.0 + round as f64));
+                crate::modify::apply(e, &faces, xf, false);
+                true
+            });
+            scene = doc.scene_from(Some(scene));
+        }
+        // With placements: the flat part in blocks too.
+        let mut doc = Document::untitled();
+        doc.model = model();
+        let scene = doc.scene_from(None);
+        let two = PickIndex::build_kept(&scene, &mut Kept::default(), none);
+        let one = Bvh::build(scene.triangles().to_vec());
+        for k in 0..2000 {
+            let o = DVec3::new(rnd() * 200.0 - 50.0, rnd() * 200.0 - 50.0, 150.0);
+            let to = DVec3::new(rnd() * 120.0, rnd() * 120.0 - 40.0, 0.0);
+            let d = (to - o).normalize();
+            assert_eq!(two.ray(o, d), one.ray(o, d), "{k}");
         }
     }
 }

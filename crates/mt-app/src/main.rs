@@ -18,6 +18,7 @@ mod context_extra;
 mod context_menu;
 mod cursor;
 mod document;
+mod edge_view;
 mod entity_info;
 mod environments;
 mod errors;
@@ -60,6 +61,7 @@ mod print;
 mod report;
 mod sandbox;
 mod sandbox_tools;
+mod scene_cache;
 mod search;
 mod section_export;
 mod selection;
@@ -442,6 +444,13 @@ struct App {
     scene: Scene,
     /// Pick index of `scene.triangles`; GPU-built for large models with `cuda`.
     bvh: Box<dyn RayIndex>,
+    /// What the next rebuild keeps of the pick index, the snap geometry and the GPU
+    /// buffers (spec/PERFORMANCE.md, "Fifth round").
+    pick_kept: pick_index::Kept,
+    snap_kept: snap::Kept,
+    gpu: edge_view::GpuScene,
+    /// For writing parts of the GPU buffers.
+    queue: wgpu::Queue,
     accel: mt_cuda::Accel,
     selection: Selection,
     /// Where a selection box drag started, in viewport pixels.
@@ -610,6 +619,10 @@ impl App {
             document: None,
             scene: Scene::default(),
             bvh: Box::new(Bvh::default()),
+            pick_kept: Default::default(),
+            snap_kept: Default::default(),
+            gpu: Default::default(),
+            queue: render_state.queue.clone(),
             accel: {
                 let accel = mt_cuda::Accel::new();
                 log::info!(
@@ -690,22 +703,20 @@ impl App {
     /// Rebuilds the drawn scene and pick index after the model changed.
     fn rebuild(&mut self, device: &wgpu::Device) {
         self.sync_facing();
-        self.scene = self
-            .document
-            .as_ref()
-            .map(Document::scene)
-            .unwrap_or_default();
+        // Built from the last scene: only what changed is drawn again (`scene_cache`).
+        let prev = std::mem::take(&mut self.scene);
+        self.scene = match &self.document {
+            Some(doc) => doc.scene_from(Some(prev)),
+            None => Scene::default(),
+        };
         let start = std::time::Instant::now();
-        // Instanced triangles are picked from their meshes (`pick_index`).
+        // Instanced triangles are picked from their meshes (`pick_index`); the others
+        // by blocks kept while unchanged, or by one GPU-built index.
         let gpu = self.accel.is_gpu() && self.scene.stored_tris().len() >= GPU_MIN_TRIANGLES;
         let accel = &self.accel;
-        self.bvh = pick_index::PickIndex::build(&self.scene, |triangles| {
-            if gpu {
-                Box::new(accel.build_bvh(triangles))
-            } else {
-                Box::new(Bvh::build(triangles))
-            }
-        });
+        let flat = gpu
+            .then_some(|triangles| -> Box<dyn RayIndex> { Box::new(accel.build_bvh(triangles)) });
+        self.bvh = pick_index::PickIndex::build_kept(&self.scene, &mut self.pick_kept, flat);
         log::debug!(
             "pick index: {} triangles on the {} in {:?}",
             self.scene.tri_count(),
@@ -716,7 +727,14 @@ impl App {
             .document
             .as_ref()
             .map_or(glam::DMat4::IDENTITY, Document::context_transform);
-        self.geometry = snap::geometry(&self.scene, self.document.as_ref(), self.ctx_xf);
+        let old = std::mem::take(&mut self.geometry);
+        self.geometry = snap::geometry_kept(
+            &self.scene,
+            self.document.as_ref(),
+            self.ctx_xf,
+            &mut self.snap_kept,
+            old,
+        );
         self.engine.geometry_changed();
         self.apply_shadows();
         self.cut_lines.clear();
@@ -786,7 +804,7 @@ impl App {
             model_axes::apply(&doc.model, &mut style, &mut self.engine);
             self.viewport.set_style(device, style);
         }
-        instancing::upload_faces(&mut self.viewport, device, &self.scene);
+        (self.gpu).upload(&self.scene, &mut self.viewport, device, &self.queue);
         let casters = self.scene.shadow_casters();
         let caster_indices: &[u32] = if casters.is_some() {
             &self.scene.indices
@@ -866,7 +884,7 @@ impl App {
     /// the component's axes, as SketchUp does). Targets drawn live by a modify tool
     /// (`self.live`) are drawn at their transformed position.
     fn update_highlight(&mut self, device: &wgpu::Device) {
-        let (edges, vertices, instanced) = live_view::Highlight {
+        let highlight = live_view::Highlight {
             scene: &self.scene,
             selection: &self.selection,
             document: self.document.as_ref(),
@@ -877,14 +895,9 @@ impl App {
             inst_bounds: &self.inst_bounds,
             ghost: self.ghost.as_ref().zip(self.ghost_xf),
             cut_lines: &self.cut_lines,
-        }
-        .build();
-        let indices: Vec<u32> = (0..vertices.len() as u32).collect();
-        self.viewport
-            .set_selected_faces(device, &vertices, &indices);
-        self.viewport.set_edges(device, &edges);
-        let instances = self.scene.gpu_instances(instanced);
-        self.viewport.set_edge_instances(device, &instances);
+        };
+        // Only the edges drawn otherwise than before are sent (`edge_view`).
+        (self.gpu).show(&highlight, &mut self.viewport, device, &self.queue);
     }
 
     /// Draws the targets of Move, Rotate or Scale at the transformed position while
@@ -913,14 +926,25 @@ impl App {
                 Some(targets) => {
                     let (indices, placements) =
                         live_view::kept_indices(&self.scene, targets, &stretch);
-                    self.viewport
-                        .set_faces(device, &self.scene.vertices, &indices);
+                    // The vertices are on the GPU: only the indices change.
+                    (self.viewport).update_faces(
+                        device,
+                        &self.queue,
+                        &self.scene.vertices,
+                        &indices,
+                        &[],
+                    );
                     let instances = self.scene.gpu_instances(placements);
                     self.viewport.set_face_instances(device, &instances);
                 }
                 None => {
-                    self.viewport
-                        .set_faces(device, &self.scene.vertices, &self.scene.indices);
+                    (self.viewport).update_faces(
+                        device,
+                        &self.queue,
+                        &self.scene.vertices,
+                        &self.scene.indices,
+                        &[],
+                    );
                     let all = self
                         .scene
                         .gpu_instances(0..self.scene.instancing.placements.len());
