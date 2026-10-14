@@ -38,7 +38,7 @@ Waiting:
 23. [ ] On the user's Linux machine with the NVIDIA card: CUDA for intersection, Solid Tools, triangulation and BVH builds (mt-cuda; Remote Control session or test commands). L
 
 Open:
-24. [ ] Texts and dimensions inside groups and components saved in .skp (the writer can already put them in definitions; the kernel export only writes root ones). S
+24. [x] Texts and dimensions inside groups and components saved in .skp (the writer can already put them in definitions; the kernel export only writes root ones). S Done: `export::write_body` writes every entity list's dimensions and texts (root, groups, components, nested), with their tags; the writer gained `DefinitionBuilder::add_dimension_on` and screen texts (`add_screen_text_on`, laid out like the screen text in `legacy_v7_synthetic.skp`, which now saves again instead of being dropped). Import already placed them per definition. `annotations_in_definitions_round_trip` (component used four times, a group in a group, leader and screen texts, tags) checks this reader and OpenSKP's (`read_definition_annotations.py`). Left: hidden texts and dimensions reopen shown (the writer takes no hidden flag for them), as at the root.
 25. [ ] Faster rebuilds: colours, texture coordinates, pick index, snap geometry and GPU upload are still redone in full after each edit; the selection highlight re-uploads every edge. M
 26. [ ] Instancing leftovers: translucent meshes, Jitter's second stroke on instanced edges. S
 27. [ ] IFC leftovers (item 15): openings in elements made of mapped items or open shells, extrusion/revolution/offset surfaces in advanced breps, export of edges, textures, spaces and openings. M

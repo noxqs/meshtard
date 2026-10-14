@@ -1159,6 +1159,10 @@ fn annotation_tags_round_trip() {
     d.add_face(&Face::new(QUAD)).unwrap();
     d.add_text_on("inner", [0.0; 3], DEFAULT_LEADER, Some(notes))
         .unwrap();
+    d.add_screen_text_on("screen", [0.25, 0.5], Some(notes))
+        .unwrap();
+    d.add_dimension_on([0.0; 3], [0.0, 0.0, 30.0], -4.0, Some(dims))
+        .unwrap();
     let label = d.finish().unwrap();
     b.add_text("plain", [0.0; 3], DEFAULT_LEADER).unwrap();
     b.add_text_on("tagged", [10.0, 0.0, 0.0], DEFAULT_LEADER, Some(notes))
@@ -1193,6 +1197,15 @@ fn annotation_tags_round_trip() {
     assert_eq!(m.root.dimensions, m.dimensions);
     let def = m.definitions.values().find(|d| d.name == "Label").unwrap();
     assert_eq!(def.texts[0].layer, "Notes");
+    assert_eq!(def.texts[1].text, "screen");
+    assert_eq!(def.texts[1].screen_position, Some([0.25, 0.5]));
+    assert_eq!(def.texts[1].layer, "Notes");
+    let dim = &def.dimensions[0];
+    assert_eq!(
+        (dim.a, dim.b, dim.offset),
+        (Some([0.0; 3]), Some([0.0, 0.0, 30.0]), -4.0)
+    );
+    assert_eq!(dim.layer, "Dims");
 
     // OpenSKP's archive resolves the same drawbase ids to the same layers.
     let script =
@@ -1208,13 +1221,18 @@ fn annotation_tags_round_trip() {
         pairs("text"),
         [
             ("inner".into(), n("Notes")),
+            ("screen".into(), n("Notes")),
             ("plain".into(), None),
             ("tagged".into(), n("Notes")),
         ]
     );
     assert_eq!(
         pairs("dimension"),
-        [(String::new(), None), (String::new(), n("Dims"))]
+        [
+            (String::new(), n("Dims")),
+            (String::new(), None),
+            (String::new(), n("Dims"))
+        ]
     );
 }
 

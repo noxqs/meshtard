@@ -13,14 +13,15 @@
 //! polylines as true curve entities, solid and PNG/JPEG-textured materials,
 //! layers, component definitions with instances (nestable inside other
 //! definitions), groups, images, guides, section planes, leader texts and free
-//! linear dimensions. Vertices and edges are shared wherever coordinates are
+//! linear dimensions (at the root and inside definitions). Vertices and edges are shared wherever coordinates are
 //! exactly equal. Coordinates are in inches. Files open in the standard "Iso"
 //! view.
 //!
 //! Extensions beyond OpenSKP: plain edges with flags, face colors, style items
 //! ([`SkpBuilder::set_style_item`]) and named options such as units
 //! ([`SkpBuilder::set_named_option`]) patched into the scaffold in place, image
-//! instances of ordinary definitions, and group instances of shared definitions.
+//! instances of ordinary definitions, group instances of shared definitions,
+//! screen texts, and dimensions, guides and section planes inside definitions.
 //!
 //! # Ordering
 //!
@@ -1494,6 +1495,27 @@ impl SkpBuilder {
         Ok(())
     }
 
+    fn screen_text_op(
+        &mut self,
+        s: Section,
+        body: &mut Body,
+        text: &str,
+        screen: [f64; 2],
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
+        check_string(text)?;
+        check_points(&[[screen[0], screen[1], 0.0]])?;
+        let layer = self.layer_slot(layer)?;
+        if s == Section::Root {
+            self.ensure_geometry_writer()?;
+        }
+        let mut font = self.font_slot;
+        self.writer(s).screen_text(text, screen, layer, &mut font)?;
+        self.font_slot = font;
+        body.new_entities += 1;
+        Ok(())
+    }
+
     fn construction_point_op(
         &mut self,
         s: Section,
@@ -1672,18 +1694,32 @@ impl SkpBuilder {
         offset: f64,
         layer: Option<LayerId>,
     ) -> Result<(), WriteError> {
+        self.with_root(|s, b| s.dimension_op(Section::Root, b, p1, p2, offset, layer))?;
+        self.root_items += 1;
+        Ok(())
+    }
+
+    fn dimension_op(
+        &mut self,
+        s: Section,
+        body: &mut Body,
+        p1: Point3,
+        p2: Point3,
+        offset: f64,
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
         check_points(&[p1, p2, [offset; 3]])?;
         let layer = self.layer_slot(layer)?;
-        self.ensure_geometry_writer()?;
+        if s == Section::Root {
+            self.ensure_geometry_writer()?;
+        }
         if p1 == p2 {
             return Err(invalid("dimension endpoints coincide"));
         }
         let mut font = self.font_slot;
-        self.writer(Section::Root)
-            .dimension(p1, p2, offset, layer, &mut font)?;
+        self.writer(s).dimension(p1, p2, offset, layer, &mut font)?;
         self.font_slot = font;
-        self.body.new_entities += 1;
-        self.root_items += 1;
+        body.new_entities += 1;
         Ok(())
     }
 
@@ -1707,6 +1743,19 @@ impl SkpBuilder {
         layer: Option<LayerId>,
     ) -> Result<(), WriteError> {
         self.with_root(|s, b| s.text_op(Section::Root, b, text, point, leader, layer))?;
+        self.root_items += 1;
+        Ok(())
+    }
+
+    /// A screen text fixed in the view at `screen` (fractions of the view's width
+    /// and height, top left 0, 0), on a layer (`None` = Layer0).
+    pub fn add_screen_text_on(
+        &mut self,
+        text: &str,
+        screen: [f64; 2],
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
+        self.with_root(|s, b| s.screen_text_op(Section::Root, b, text, screen, layer))?;
         self.root_items += 1;
         Ok(())
     }
@@ -2114,6 +2163,35 @@ impl DefinitionBuilder<'_> {
             leader,
             layer,
         )
+    }
+
+    /// A screen text inside the definition (see [`SkpBuilder::add_screen_text_on`]).
+    pub fn add_screen_text_on(
+        &mut self,
+        text: &str,
+        screen: [f64; 2],
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
+        self.skp
+            .screen_text_op(Section::Definition, &mut self.body, text, screen, layer)
+    }
+
+    /// A free linear dimension inside the definition, in its coordinates (see
+    /// [`SkpBuilder::add_dimension`]).
+    pub fn add_dimension(&mut self, p1: Point3, p2: Point3, offset: f64) -> Result<(), WriteError> {
+        self.add_dimension_on(p1, p2, offset, None)
+    }
+
+    /// [`add_dimension`](Self::add_dimension) on a layer (`None` = Layer0).
+    pub fn add_dimension_on(
+        &mut self,
+        p1: Point3,
+        p2: Point3,
+        offset: f64,
+        layer: Option<LayerId>,
+    ) -> Result<(), WriteError> {
+        self.skp
+            .dimension_op(Section::Definition, &mut self.body, p1, p2, offset, layer)
     }
 
     pub fn add_construction_point(&mut self, position: Point3) -> Result<(), WriteError> {

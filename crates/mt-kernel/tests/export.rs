@@ -976,3 +976,274 @@ fn saved_view_round_trip() {
         .unwrap();
     assert!(c.parallel);
 }
+
+/// An instance of `def` at `at`.
+fn place(def: mt_kernel::DefinitionId, at: DVec3) -> mt_kernel::Instance {
+    mt_kernel::Instance {
+        definition: def,
+        transform: DMat4::from_translation(at),
+        name: String::new(),
+        hidden: false,
+        locked: false,
+        layer: None,
+        material: None,
+        attrs: Default::default(),
+    }
+}
+
+/// The texts and dimensions OpenSKP's Python reader decodes in each entity list of
+/// `bytes` (`crates/mt-skp/tests/oracle/read_definition_annotations.py`), or `None`
+/// without `python3` and `openskp`.
+fn oracle_annotations(name: &str, bytes: &[u8]) -> Option<serde_json::Value> {
+    use std::process::Command;
+    let ok = Command::new("python3")
+        .args(["-I", "-c", "import openskp"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("SKIPPED: python3 with openskp not available (see tools/README.md)");
+        return None;
+    }
+    let file = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.skp"));
+    std::fs::write(&file, bytes).unwrap();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../mt-skp/tests/oracle/read_definition_annotations.py");
+    let out = Command::new("python3")
+        .arg("-I")
+        .arg(script)
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(serde_json::from_slice(&out.stdout).unwrap())
+}
+
+/// Texts (leader and screen) and dimensions inside groups and components are saved
+/// in their definitions, with their tags, and reopen there: a component placed four
+/// times (three at the root, one inside a group), a group nested in another group,
+/// and the root's own. Checked with this reader and OpenSKP's.
+#[test]
+fn annotations_in_definitions_round_trip() {
+    use mt_kernel::annotation::{Dimension, Text};
+    let mut m = Model::default();
+    for name in ["Notes", "Dims"] {
+        m.layers.push(Layer {
+            name: name.into(),
+            ..Layer::default()
+        });
+    }
+    let tagged = |mut t: Text, l| {
+        t.layer = Some(l);
+        t
+    };
+    // The component: a leader text on Notes, a screen text, a dimension on Dims and
+    // an untagged one.
+    let mut label = Entities::new();
+    square(&mut label, DVec3::ZERO, 10.0);
+    label.texts = vec![
+        tagged(
+            Text::leader(
+                DVec3::new(5.0, 5.0, 0.0),
+                DVec3::new(4.0, 2.0, 8.0),
+                "Label".into(),
+            ),
+            1,
+        ),
+        Text::screen(0.25, 0.75, "Screen in component".into()),
+    ];
+    label.dimensions = vec![
+        Dimension {
+            layer: Some(2),
+            ..Dimension::linear(DVec3::ZERO, DVec3::X * 10.0, DVec3::Y * -3.0)
+        },
+        Dimension::linear(DVec3::ZERO, DVec3::Y * 10.0, DVec3::X * 2.5),
+    ];
+    let label = m.definitions.insert(mt_kernel::Definition {
+        name: "Label".into(),
+        entities: label,
+        ..Default::default()
+    });
+    // A group in a group, each with its own text and dimension; the outer one also
+    // holds the component.
+    let mut inner = Entities::new();
+    square(&mut inner, DVec3::new(0.0, 0.0, 5.0), 4.0);
+    inner.texts = vec![tagged(
+        Text::leader(
+            DVec3::new(2.0, 2.0, 5.0),
+            DVec3::new(0.0, 0.0, 6.0),
+            "Deep".into(),
+        ),
+        1,
+    )];
+    inner.dimensions = vec![Dimension::linear(
+        DVec3::new(0.0, 0.0, 5.0),
+        DVec3::new(4.0, 0.0, 5.0),
+        DVec3::Y * 1.5,
+    )];
+    let inner = m.definitions.insert(mt_kernel::Definition {
+        name: "Inner".into(),
+        entities: inner,
+        is_group: true,
+        ..Default::default()
+    });
+    let mut outer = Entities::new();
+    square(&mut outer, DVec3::ZERO, 20.0);
+    outer.instances = vec![
+        place(inner, DVec3::new(1.0, 1.0, 0.0)),
+        place(label, DVec3::Z * 30.0),
+    ];
+    outer.texts = vec![Text::screen(0.5, 0.125, "Screen in group".into())];
+    outer.dimensions = vec![Dimension {
+        layer: Some(2),
+        ..Dimension::linear(DVec3::ZERO, DVec3::X * 20.0, DVec3::Y * 4.0)
+    }];
+    let outer = m.definitions.insert(mt_kernel::Definition {
+        name: "Outer".into(),
+        entities: outer,
+        is_group: true,
+        ..Default::default()
+    });
+    m.root.instances = vec![
+        place(label, DVec3::ZERO),
+        place(label, DVec3::X * 50.0),
+        place(label, DVec3::Y * 50.0),
+        place(outer, DVec3::X * -100.0),
+    ];
+    m.root.texts = vec![Text::leader(DVec3::ZERO, DVec3::Z, "Root".into())];
+    add_line(&mut m.root, DVec3::ZERO, DVec3::X * 10.0);
+
+    let bytes = export::to_skp(&m).unwrap();
+    let r = import::from_skp(&mt_skp::parse(&bytes).unwrap());
+    let def = |name: &str| {
+        let (id, d) = r
+            .definitions
+            .iter()
+            .find(|(_, d)| d.name == name)
+            .unwrap_or_else(|| panic!("{name} reopened"));
+        (id, &d.entities)
+    };
+    let layer = |l: Option<usize>| l.map(|i| r.layers[i].name.as_str());
+    for name in ["Label", "Inner", "Outer"] {
+        let src = m.definitions.values().find(|d| d.name == name).unwrap();
+        let (_, e) = def(name);
+        // Exactly the texts saved (points, leaders, screen positions), tags by name.
+        let texts = |t: &[Text], m: &Model| -> Vec<_> {
+            t.iter()
+                .map(|t| {
+                    let l = t.layer.map(|i| m.layers[i].name.clone());
+                    (t.text.clone(), t.point, t.leader, t.screen, l)
+                })
+                .collect()
+        };
+        assert_eq!(
+            texts(&e.texts, &r),
+            texts(&src.entities.texts, &m),
+            "{name}"
+        );
+        assert_eq!(e.dimensions.len(), src.entities.dimensions.len(), "{name}");
+        for (a, b) in e.dimensions.iter().zip(&src.entities.dimensions) {
+            assert_eq!((a.a, a.b), (b.a, b.b), "{name}");
+            assert!((a.offset - b.offset).length() < 1e-9, "{name}: {a:?}");
+            assert_eq!(
+                layer(a.layer),
+                b.layer.map(|i| m.layers[i].name.as_str()),
+                "{name}"
+            );
+        }
+    }
+    // Nothing moved to the root, and the component is still shared four times.
+    assert_eq!(r.root.texts.len(), 1);
+    assert!(r.root.dimensions.is_empty());
+    let (label_id, _) = def("Label");
+    let (outer_id, _) = def("Outer");
+    let (inner_id, _) = def("Inner");
+    let uses = r
+        .definitions
+        .values()
+        .map(|d| &d.entities)
+        .chain([&r.root])
+        .flat_map(|e| &e.instances)
+        .filter(|i| i.definition == label_id)
+        .count();
+    assert_eq!(uses, 4);
+    assert!(r.definitions[outer_id].is_group && r.definitions[inner_id].is_group);
+    assert!(
+        r.definitions[outer_id]
+            .entities
+            .instances
+            .iter()
+            .any(|i| i.definition == inner_id)
+    );
+
+    // OpenSKP decodes the same texts and dimensions in the same definitions.
+    let Some(j) = oracle_annotations("annotations_in_definitions", &bytes) else {
+        return;
+    };
+    let p = |v: DVec3| serde_json::json!([v.x, v.y, v.z]);
+    for (name, src) in [("Label", label), ("Inner", inner), ("Outer", outer)] {
+        let e = &m.definitions[src].entities;
+        let texts: Vec<_> = e
+            .texts
+            .iter()
+            .map(|t| {
+                let (point, lp) = if t.screen {
+                    (serde_json::Value::Null, serde_json::Value::Null)
+                } else {
+                    (p(t.point), p(t.point + t.leader))
+                };
+                serde_json::json!([t.text, t.layer.map(|i| &m.layers[i].name), point, lp])
+            })
+            .collect();
+        assert_eq!(
+            j["definitions"][name]["text"],
+            serde_json::json!(texts),
+            "{name}"
+        );
+        let dims: Vec<_> = e
+            .dimensions
+            .iter()
+            .map(|d| {
+                let offset = mt_kernel::annotation::saved_offset(d).unwrap();
+                serde_json::json!([p(d.a), p(d.b), offset, d.layer.map(|i| &m.layers[i].name)])
+            })
+            .collect();
+        assert_eq!(
+            j["definitions"][name]["dimension"],
+            serde_json::json!(dims),
+            "{name}"
+        );
+    }
+    assert_eq!(j["root"]["text"].as_array().unwrap().len(), 1);
+    assert_eq!(j["root"]["dimension"], serde_json::json!([]));
+}
+
+/// A SketchUp-saved screen text (`legacy_v7_synthetic.skp`) is saved again as a
+/// screen text at the same place, and OpenSKP reads the saved file.
+#[test]
+fn corpus_screen_text_round_trips() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/openskp/legacy_v7_synthetic.skp");
+    let Ok(data) = std::fs::read(path) else {
+        return;
+    };
+    let m = import::from_skp(&mt_skp::parse(&data).unwrap());
+    let t = &m.root.texts[0];
+    assert!(t.screen && t.point.x == 0.01 && t.point.y == 0.8, "{t:?}");
+    let bytes = export::to_skp(&m).unwrap();
+    let src = mt_skp::parse(&bytes).unwrap();
+    let saved = &src.root.texts[0];
+    assert_eq!(saved.screen_position, Some([0.01, 0.8]));
+    assert_eq!(saved.text, t.text);
+    assert_eq!(import::from_skp(&src).root.texts, m.root.texts);
+    let Some(j) = oracle_annotations("corpus_screen_text", &bytes) else {
+        return;
+    };
+    assert_eq!(
+        j["root"]["text"],
+        serde_json::json!([[t.text, null, null, null]])
+    );
+}

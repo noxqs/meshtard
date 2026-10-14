@@ -17,6 +17,7 @@ mt-skp.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+serde_json = "1"
 
 [lints]
 workspace = true

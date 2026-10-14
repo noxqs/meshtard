@@ -762,6 +762,33 @@ impl ArchiveWriter {
         Ok(())
     }
 
+    /// A screen text at `screen` (fractions of the view's width and height, top
+    /// left 0, 0), on layer slot `layer`. Laid out like the screen text of a
+    /// SketchUp-saved file (`legacy_v7_synthetic.skp`): no anchor (connection
+    /// type 0), zero point and label, no leader (type 0).
+    pub fn screen_text(
+        &mut self,
+        text: &str,
+        screen: [f64; 2],
+        layer: u32,
+        font_slot: &mut Option<u32>,
+    ) -> Result<(), WriteError> {
+        self.new_object("CText", 9);
+        self.preamble();
+        self.drawbase(0, layer, false, EdgeFlags::default());
+        self.font(font_slot);
+        self.f64s(&screen);
+        self.u32(0); // no connection
+        self.u32(4);
+        self.zeros(24 + 12 + 24 + 16);
+        self.f64(1.0);
+        self.u32(0); // leader type: none
+        self.raw(&TEXT_DELIM);
+        self.string(text)?;
+        self.zeros(5);
+        Ok(())
+    }
+
     pub fn construction_point(&mut self, p: Point3) {
         self.new_object("CConstructionPoint", 0);
         self.preamble();

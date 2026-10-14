@@ -1754,6 +1754,7 @@ dependencies = [
  "image",
  "mt-skp",
  "proptest",
+ "serde_json",
  "slotmap",
  "zip",
 ]

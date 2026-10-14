@@ -3,12 +3,13 @@
 //! What is written: materials (color, opacity, PNG/JPEG textures), tags, component and
 //! group definitions with their instances (nested too), faces with holes, front/back
 //! materials, positioned textures (as three pins), tags and hidden state, every edge
-//! with its soft/smooth/hidden flags, curves, guides, section planes, dimensions and
-//! leader texts (root only; see `annotation::write_root` for what of them is lost).
+//! with its soft/smooth/hidden flags, curves, guides, section planes, dimensions,
+//! leader and screen texts with their tags (see `annotation::saved_offset` for what
+//! of dimensions is lost; hidden texts and dimensions are saved shown).
 //!
 //! Also written: edge tags, arcs and circles as arc curves (`CArcCurve`, through the
-//! model's own vertices), guides and section planes inside definitions, and the saved
-//! view ([`to_skp_view`]).
+//! model's own vertices), guides, section planes, texts and dimensions inside
+//! definitions (groups and components), and the saved view ([`to_skp_view`]).
 //!
 //! Known gaps (format support missing in the writer, see `mt_skp::write`):
 //! - Style settings are saved as the style items whose meaning is known (see
@@ -249,7 +250,6 @@ pub fn write_model(b: &mut SkpBuilder, model: &Model) -> Result<(), WriteError> 
     let root = &model.root;
     b.begin_root()?;
     write_body(&mut RootSink(b), model, root, &maps, &written)?;
-    crate::annotation::write_root(b, root, |l| maps.layer(l))?;
     Ok(())
 }
 
@@ -333,12 +333,47 @@ trait Sink {
     fn guide_line(&mut self, line: w::GuideLine) -> Result<(), WriteError>;
     fn guide_point(&mut self, p: DVec3) -> Result<(), WriteError>;
     fn section_plane(&mut self, point: DVec3, normal: DVec3) -> Result<(), WriteError>;
+    fn dimension(
+        &mut self,
+        a: DVec3,
+        b: DVec3,
+        offset: f64,
+        layer: Option<w::LayerId>,
+    ) -> Result<(), WriteError>;
+    fn text(
+        &mut self,
+        t: &crate::annotation::Text,
+        layer: Option<w::LayerId>,
+    ) -> Result<(), WriteError>;
 }
 
 struct RootSink<'a>(&'a mut SkpBuilder);
 struct DefSink<'a, 'b>(&'a mut w::DefinitionBuilder<'b>);
 
 impl Sink for RootSink<'_> {
+    fn dimension(
+        &mut self,
+        a: DVec3,
+        b: DVec3,
+        offset: f64,
+        layer: Option<w::LayerId>,
+    ) -> Result<(), WriteError> {
+        self.0
+            .add_dimension_on(a.to_array(), b.to_array(), offset, layer)
+    }
+    fn text(
+        &mut self,
+        t: &crate::annotation::Text,
+        layer: Option<w::LayerId>,
+    ) -> Result<(), WriteError> {
+        if t.screen {
+            self.0
+                .add_screen_text_on(&t.text, [t.point.x, t.point.y], layer)
+        } else {
+            self.0
+                .add_text_on(&t.text, t.point.to_array(), t.leader.to_array(), layer)
+        }
+    }
     fn guide_line(&mut self, line: w::GuideLine) -> Result<(), WriteError> {
         self.0.add_construction_line(line)
     }
@@ -376,6 +411,29 @@ impl Sink for RootSink<'_> {
 }
 
 impl Sink for DefSink<'_, '_> {
+    fn dimension(
+        &mut self,
+        a: DVec3,
+        b: DVec3,
+        offset: f64,
+        layer: Option<w::LayerId>,
+    ) -> Result<(), WriteError> {
+        self.0
+            .add_dimension_on(a.to_array(), b.to_array(), offset, layer)
+    }
+    fn text(
+        &mut self,
+        t: &crate::annotation::Text,
+        layer: Option<w::LayerId>,
+    ) -> Result<(), WriteError> {
+        if t.screen {
+            self.0
+                .add_screen_text_on(&t.text, [t.point.x, t.point.y], layer)
+        } else {
+            self.0
+                .add_text_on(&t.text, t.point.to_array(), t.leader.to_array(), layer)
+        }
+    }
     fn guide_line(&mut self, line: w::GuideLine) -> Result<(), WriteError> {
         self.0.add_construction_line(line)
     }
@@ -497,6 +555,14 @@ fn write_body(
     }
     for s in &ents.section_planes {
         sink.section_plane(s.point, s.normal)?;
+    }
+    for d in &ents.dimensions {
+        if let Some(offset) = crate::annotation::saved_offset(d) {
+            sink.dimension(d.a, d.b, offset, maps.layer(d.layer))?;
+        }
+    }
+    for t in &ents.texts {
+        sink.text(t, maps.layer(t.layer))?;
     }
     Ok(())
 }
