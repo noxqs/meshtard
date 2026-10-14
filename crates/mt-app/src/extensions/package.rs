@@ -182,11 +182,17 @@ fn collect(
     Ok(())
 }
 
-/// Zips an extension folder into `.mtx` bytes (tests and `build_extension_dist`). Deterministic (fixed dates, sorted
-/// names), so the same folder always gives the same SHA-256.
+/// Zips an extension folder into `.mtx` bytes (tests and `build_extension_dist`).
+/// Deterministic (fixed dates, sorted names), so the same folder always gives the
+/// same SHA-256.
 #[cfg(test)]
 pub(crate) fn pack(dir: &Path) -> Result<Vec<u8>, String> {
-    let pkg = Package::from_folder(dir)?;
+    pack_files(&Package::from_folder(dir)?.files)
+}
+
+/// Zips package files into `.mtx` bytes, deterministically (`meshtard
+/// --extension-sign` rewrites a package with its signature this way).
+pub(crate) fn pack_files(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, String> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -194,7 +200,7 @@ pub(crate) fn pack(dir: &Path) -> Result<Vec<u8>, String> {
         .unix_permissions(0o644)
         // The host OS byte would differ on Windows and change the checksum.
         .system(zip::System::Unix);
-    for (name, data) in &pkg.files {
+    for (name, data) in files {
         zip.start_file(name.as_str(), opts)
             .map_err(|e| e.to_string())?;
         std::io::Write::write_all(&mut zip, data).map_err(|e| e.to_string())?;
@@ -216,8 +222,11 @@ pub(crate) fn extension_data_dir(id: &str) -> Option<PathBuf> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ExtState {
     pub enabled: bool,
-    /// Sensitive permissions the user approved at install.
+    /// Sensitive permissions the user approved (at install or later in the
+    /// Extension Manager).
     pub approved: Vec<Permission>,
+    /// Declared permissions the user took back in the Extension Manager.
+    pub revoked: Vec<Permission>,
 }
 
 /// `<config>/meshtard/extensions.toml`.
@@ -226,6 +235,12 @@ pub(crate) struct Config {
     pub extensions: BTreeMap<String, ExtState>,
     /// Extension Warehouse catalog URL (empty: the default).
     pub catalog_url: String,
+    /// Keys whose signatures are trusted, added by the user: name -> hex public key
+    /// (the built-in keys are in `signing::BUILTIN_KEYS`).
+    pub trusted_keys: BTreeMap<String, String>,
+    /// Check the Warehouse catalog for updates of installed extensions at startup
+    /// (off by default: no network access unless the user turns it on).
+    pub check_updates: bool,
 }
 
 impl Config {
@@ -242,23 +257,40 @@ impl Config {
         if let Some(u) = t.get("catalog_url").and_then(|v| v.as_str()) {
             c.catalog_url = u.to_owned();
         }
+        c.check_updates = t
+            .get("check_updates")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if let Some(keys) = t.get("trusted_keys").and_then(|v| v.as_table()) {
+            for (name, v) in keys {
+                match v.as_str().map(super::signing::parse_public_key) {
+                    Some(Ok(_)) => {
+                        c.trusted_keys
+                            .insert(name.clone(), v.as_str().unwrap_or_default().to_owned());
+                    }
+                    _ => log::warn!("extensions.toml: ignoring the bad trusted key `{name}`"),
+                }
+            }
+        }
         if let Some(exts) = t.get("extension").and_then(|v| v.as_table()) {
             for (id, v) in exts {
                 let Some(v) = v.as_table() else { continue };
-                let approved = v
-                    .get("approved")
-                    .and_then(|a| a.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|p| p.as_str().and_then(Permission::from_key))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let perms = |key: &str| -> Vec<Permission> {
+                    v.get(key)
+                        .and_then(|a| a.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|p| p.as_str().and_then(Permission::from_key))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
                 c.extensions.insert(
                     id.clone(),
                     ExtState {
                         enabled: v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
-                        approved,
+                        approved: perms("approved"),
+                        revoked: perms("revoked"),
                     },
                 );
             }
@@ -271,16 +303,26 @@ impl Config {
         if !self.catalog_url.is_empty() {
             t.insert("catalog_url".into(), self.catalog_url.clone().into());
         }
+        if self.check_updates {
+            t.insert("check_updates".into(), true.into());
+        }
+        if !self.trusted_keys.is_empty() {
+            let keys: toml::Table = (self.trusted_keys.iter())
+                .map(|(k, v)| (k.clone(), toml::Value::from(v.clone())))
+                .collect();
+            t.insert("trusted_keys".into(), toml::Value::Table(keys));
+        }
         let mut exts = toml::Table::new();
+        let list = |p: &[Permission]| -> toml::Value {
+            toml::Value::Array(p.iter().map(|p| p.key().to_owned().into()).collect())
+        };
         for (id, s) in &self.extensions {
             let mut e = toml::Table::new();
             e.insert("enabled".into(), s.enabled.into());
-            let approved: Vec<toml::Value> = s
-                .approved
-                .iter()
-                .map(|p| p.key().to_owned().into())
-                .collect();
-            e.insert("approved".into(), toml::Value::Array(approved));
+            e.insert("approved".into(), list(&s.approved));
+            if !s.revoked.is_empty() {
+                e.insert("revoked".into(), list(&s.revoked));
+            }
             exts.insert(id.clone(), toml::Value::Table(e));
         }
         t.insert("extension".into(), toml::Value::Table(exts));
@@ -402,8 +444,18 @@ pub(crate) mod tests {
             ExtState {
                 enabled: false,
                 approved: vec![Permission::Net],
+                revoked: vec![Permission::UiToolbar],
             },
         );
+        c.check_updates = true;
+        let key = super::super::signing::test_key().verifying_key().to_bytes();
+        c.trusted_keys.insert(
+            "Someone".into(),
+            super::super::signing::public_key_hex(&key),
+        );
         assert_eq!(Config::from_toml(&c.to_toml()), c);
+        // A bad key is dropped, not trusted.
+        let bad = "[trusted_keys]\nx = \"zz\"\n";
+        assert!(Config::from_toml(bad).trusted_keys.is_empty());
     }
 }

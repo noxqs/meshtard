@@ -40,6 +40,10 @@ serde_json = "1"
 rhai = "1.23"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+# Signed extension packages and catalogs (ed25519; BSD-3-Clause, pure Rust) and the
+# random seed of `meshtard --extension-keygen`.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize"] }
+getrandom = "0.3"
 # Key slots of the kernel's entity ids (dense sets in Edit > Select All).
 slotmap = "1"
 # Comparing GPU vertices and segments byte for byte (`edge_view`).

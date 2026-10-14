@@ -268,8 +268,46 @@ impl App {
             path: matches!(self.tool, Tool::Modify("tool.follow_me"))
                 && modify.is_some_and(|t| t.anchor().is_some()),
         };
+        // An extension's click tool with its own cursor image (`[cursors]` in
+        // extension.toml or `cursor` in `register_tool`).
+        if nav.is_none()
+            && let Tool::Draw(id) = self.tool
+            && let Some((tex, hotspot)) = self.extensions.ui.cursors.get(id)
+        {
+            paint_image_cursor(ui.ctx(), pos, tex, *hotspot);
+            return;
+        }
         mt_ui::cursors::show(ui.ctx(), pos, cursor_for(self.tool, mods, state));
     }
+}
+
+/// Paints an image cursor with its hotspot (image pixels) at `pointer`, at the
+/// scale of the built-in cursors (32 image pixels = `mt_ui::cursors::SIZE` points).
+fn paint_image_cursor(
+    ctx: &egui::Context,
+    pointer: egui::Pos2,
+    tex: &egui::TextureHandle,
+    hotspot: [u32; 2],
+) {
+    ctx.set_cursor_icon(egui::CursorIcon::None);
+    let s = mt_ui::cursors::SIZE / 32.0;
+    let ppp = ctx.pixels_per_point().max(0.01);
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let origin = egui::pos2(
+        snap(pointer.x - hotspot[0] as f32 * s),
+        snap(pointer.y - hotspot[1] as f32 * s),
+    );
+    let size = tex.size_vec2() * s;
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("mt_ext_tool_cursor"),
+    ));
+    painter.image(
+        tex.id(),
+        egui::Rect::from_min_size(origin, size),
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
 }
 
 #[cfg(test)]

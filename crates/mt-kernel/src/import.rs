@@ -469,7 +469,10 @@ fn entities(d: &skp::Definition, maps: &Maps) -> Entities {
             locked: false,
             layer: layer(&i.layer),
             material: material(i.material_id),
-            attrs: Default::default(),
+            attrs: crate::InstanceAttrs {
+                dictionaries: i.attribute_dictionaries.clone(),
+                ..Default::default()
+            },
         });
     }
     ents.texts = texts(d, maps);

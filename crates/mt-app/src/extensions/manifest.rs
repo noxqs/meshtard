@@ -1,6 +1,8 @@
 //! `extension.toml`: what an extension is, which scripts it runs and what it may do.
 //! See `spec/EXTENSIONS.md`.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 /// What a script may do. Anything not listed is refused at run time.
@@ -88,6 +90,50 @@ struct RawManifest {
     icon: Option<String>,
     #[serde(default)]
     homepage: String,
+    /// Mouse cursors of the extension's click tools, by tool id.
+    #[serde(default)]
+    cursors: BTreeMap<String, RawCursor>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawCursor {
+    image: String,
+    #[serde(default)]
+    hotspot: [i64; 2],
+}
+
+/// A click tool's mouse cursor: a PNG in the extension and the pixel of it that is
+/// the pointer's position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolCursor {
+    pub image: String,
+    pub hotspot: [u32; 2],
+}
+
+/// Largest cursor image (pixels each way).
+pub(crate) const MAX_CURSOR: u32 = 64;
+
+impl ToolCursor {
+    /// A checked cursor: a `.png` inside the extension, the hotspot inside
+    /// [`MAX_CURSOR`].
+    pub(crate) fn new(image: &str, hotspot: [i64; 2]) -> Result<Self, String> {
+        if !crate::library::safe_relative(image) || !image.ends_with(".png") {
+            return Err(format!(
+                "cursor `{image}` must be a .png file inside the extension"
+            ));
+        }
+        let max = i64::from(MAX_CURSOR);
+        if hotspot.iter().any(|v| !(0..max).contains(v)) {
+            return Err(format!(
+                "cursor `{image}`: the hotspot must be 0-{} pixels each way",
+                MAX_CURSOR - 1
+            ));
+        }
+        Ok(Self {
+            image: image.to_owned(),
+            hotspot: hotspot.map(|v| v as u32),
+        })
+    }
 }
 
 /// A checked `extension.toml`.
@@ -104,6 +150,8 @@ pub(crate) struct Manifest {
     pub scripts: Vec<String>,
     pub icon: Option<String>,
     pub homepage: String,
+    /// `[cursors]`: tool id -> its cursor.
+    pub cursors: BTreeMap<String, ToolCursor>,
 }
 
 /// The running app's version (`min_meshtard` is compared with it).
@@ -169,6 +217,12 @@ impl Manifest {
                 "extension.toml: icon `{icon}` must be a .png file inside the extension"
             ));
         }
+        let mut cursors = BTreeMap::new();
+        for (tool, c) in &raw.cursors {
+            let cursor =
+                ToolCursor::new(&c.image, c.hotspot).map_err(|e| format!("extension.toml: {e}"))?;
+            cursors.insert(tool.clone(), cursor);
+        }
         Ok(Self {
             id: raw.id,
             name,
@@ -181,6 +235,7 @@ impl Manifest {
             scripts,
             icon: raw.icon,
             homepage: raw.homepage,
+            cursors,
         })
     }
 
@@ -259,6 +314,17 @@ permissions = ["model.write", "model.read", "ui.menu", "ui.menu"]
         assert!(bad("license", "scripts = [\"../evil.rhai\"]\nlicense").contains("script"));
         assert!(bad("license", "icon = \"/etc/x.png\"\nlicense").contains("icon"));
         assert!(Manifest::parse("name = \"x\"").is_err());
+        let cursor = |c: &str| Manifest::parse(&format!("{GOOD}\n[cursors]\nmark = {c}\n"));
+        assert!(
+            cursor("{ image = \"../c.png\" }")
+                .unwrap_err()
+                .contains("cursor")
+        );
+        assert!(cursor("{ image = \"c.svg\" }").is_err());
+        assert!(cursor("{ image = \"c.png\", hotspot = [64, 0] }").is_err());
+        assert!(cursor("{ image = \"c.png\", hotspot = [-1, 0] }").is_err());
+        let m = cursor("{ image = \"c.png\", hotspot = [3, 30] }").unwrap();
+        assert_eq!(m.cursors["mark"].hotspot, [3, 30]);
     }
 
     #[test]

@@ -2,11 +2,12 @@
 //! and SHA-256 checksums (`extensions/catalog.json` in the Meshtard repository by
 //! default). Package URLs may be relative to the catalog's URL. A download is
 //! installed only when its SHA-256 matches the catalog and its manifest matches the
-//! entry.
+//! entry. A catalog may be signed by `<catalog URL>.sig` (see [`super::signing`]).
 
 use sha2::{Digest, Sha256};
 
 use super::manifest::{Permission, parse_version, valid_id};
+use super::signing::{self, SigStatus, TrustedKey};
 
 /// The default catalog: the repository's `extensions/catalog.json` on its default
 /// branch (`HEAD` on raw.githubusercontent.com).
@@ -107,6 +108,40 @@ pub(crate) fn verify(entry: &Entry, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Installed extensions with a newer version in the catalog: (entry index, the
+/// installed version).
+pub(crate) fn updates(entries: &[Entry], installed: &[(String, String)]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let Some((_, have)) = installed.iter().find(|(id, _)| *id == e.id) else {
+            continue;
+        };
+        if let (Some(new), Some(old)) = (parse_version(&e.version), parse_version(have))
+            && new > old
+        {
+            out.push((i, have.clone()));
+        }
+    }
+    out
+}
+
+/// Fetches and parses a catalog and checks its signature (`<url>.sig`; none, or
+/// one that cannot be fetched, is "unsigned"). A broken signature is an error.
+pub(crate) fn fetch_catalog(
+    url: &str,
+    trusted: &[TrustedKey],
+) -> Result<(Catalog, SigStatus), String> {
+    let bytes = fetch(url)?;
+    let catalog = Catalog::parse(&String::from_utf8_lossy(&bytes))?;
+    let sig = fetch(&format!("{url}.sig")).ok();
+    match signing::verify_catalog(&bytes, sig.as_deref(), trusted) {
+        SigStatus::Invalid(e) => Err(format!(
+            "the catalog's signature is invalid ({e}); not used"
+        )),
+        s => Ok((catalog, s)),
+    }
+}
+
 /// `url` resolved against the catalog's URL (`https://`, `file://` or a local path).
 pub(crate) fn resolve(base: &str, url: &str) -> String {
     if url.contains("://") || url.starts_with('/') {
@@ -173,6 +208,49 @@ mod tests {
         let ok = catalog(&"0".repeat(64));
         assert!(Catalog::parse(&ok.replace("\"format\": 1", "\"format\": 2")).is_err());
         assert!(Catalog::parse(&ok.replace("model.read", "root")).is_err());
+    }
+
+    #[test]
+    fn finds_updates() {
+        let c = Catalog::parse(&catalog(&"0".repeat(64))).unwrap();
+        let have = |v: &str| vec![("a.b".to_owned(), v.to_owned())];
+        assert_eq!(
+            updates(&c.extensions, &have("0.9")),
+            [(0, "0.9".to_owned())]
+        );
+        assert!(updates(&c.extensions, &have("1.0.0")).is_empty());
+        assert!(updates(&c.extensions, &have("1.2")).is_empty());
+        assert!(updates(&c.extensions, &[]).is_empty());
+    }
+
+    #[test]
+    fn signed_catalog_files() {
+        let dir = super::super::package::tests::scratch("signed_catalog");
+        let text = catalog(&"0".repeat(64));
+        let path = dir.join("catalog.json");
+        std::fs::write(&path, &text).unwrap();
+        let url = format!("file://{}", path.display());
+        let key = signing::test_key();
+        let trusted = [TrustedKey {
+            name: "T".into(),
+            key: key.verifying_key().to_bytes(),
+            builtin: false,
+        }];
+        assert_eq!(
+            fetch_catalog(&url, &trusted).unwrap().1,
+            SigStatus::Unsigned
+        );
+        let sig = signing::sign_catalog(text.as_bytes(), &key, "");
+        std::fs::write(dir.join("catalog.json.sig"), &sig).unwrap();
+        assert!(fetch_catalog(&url, &trusted).unwrap().1.trusted());
+        assert!(!fetch_catalog(&url, &[]).unwrap().1.trusted());
+        // Changed after signing: refused.
+        std::fs::write(&path, text.replace("\"A\"", "\"B\"")).unwrap();
+        assert!(
+            fetch_catalog(&url, &trusted)
+                .unwrap_err()
+                .contains("signature")
+        );
     }
 
     #[test]

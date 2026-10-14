@@ -1,6 +1,7 @@
 //! The extension windows and the app glue: Extension Manager, Extension Warehouse,
-//! the install prompt (permissions), Window > Extension Console, script input
-//! dialogs and messages; running commands, click tools and observers each frame.
+//! the install prompt (permissions, signature), Window > Extension Console, script
+//! input dialogs and messages; running commands, click tools (with their cursors) and
+//! observers each frame; the opt-in update check at startup.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use super::catalog::{self, Catalog, Entry};
 use super::manifest::Permission;
 use super::package::{self, Package};
 use super::runtime::{Field, FieldKind, Outcome};
+use super::signing::{self, SigStatus};
 use super::{Extensions, intern};
 use crate::App;
 use crate::nav::Tool;
@@ -29,12 +31,24 @@ pub(crate) struct UiState {
     /// Toolbar icons by command id, and the commands they were made for.
     icons: HashMap<String, egui::TextureHandle>,
     icons_for: Option<String>,
+    /// Click tool cursors by command id: the image, its hotspot (pixels).
+    pub cursors: HashMap<String, (egui::TextureHandle, [u32; 2])>,
     history_pos: Option<usize>,
+    /// Extension Manager > Trusted keys: the key being added.
+    new_key_name: String,
+    new_key_hex: String,
+    key_error: Option<String>,
+    /// The startup update check (Extension Manager > "Check for updates when
+    /// Meshtard starts").
+    update_check: Option<Receiver<CatalogResult>>,
 }
 
+/// A fetched catalog and its signature status.
+pub(crate) type CatalogResult = Result<(Catalog, SigStatus), String>;
+
 pub(crate) enum CatalogState {
-    Loading(Receiver<Result<Catalog, String>>),
-    Ready(Catalog),
+    Loading(Receiver<CatalogResult>),
+    Ready(Catalog, SigStatus),
     Failed(String),
 }
 
@@ -59,29 +73,102 @@ pub(crate) struct InstallPrompt {
     pub allow: Vec<(Permission, bool)>,
     /// The version installed now, if any.
     pub replaces: Option<String>,
+    /// The package's own signature (never `Invalid`: those are refused before).
+    pub signature: SigStatus,
+    /// Downloaded from a catalog signed by this trusted key, with its SHA-256
+    /// checked: the catalog vouches for it.
+    pub vouched_by: Option<String>,
+    /// The installed version was signed by a trusted key and this one is not signed
+    /// by the same key.
+    pub signer_changed: Option<String>,
 }
 
 impl InstallPrompt {
-    pub(crate) fn new(pkg: Package, source: String, ext: &Extensions) -> Self {
+    /// The prompt for `pkg`; an error when its signature is broken.
+    pub(crate) fn new(
+        pkg: Package,
+        source: String,
+        ext: &Extensions,
+        vouched_by: Option<String>,
+    ) -> Result<Self, String> {
+        let signature = ext.check_signature(&pkg)?;
+        let installed = ext
+            .installed
+            .iter()
+            .find(|i| i.manifest.as_ref().is_ok_and(|m| m.id == pkg.manifest.id));
+        let replaces = installed
+            .and_then(|i| i.manifest.as_ref().ok())
+            .map(|m| m.version.clone());
+        // An update keeps what the user approved before ticked (they can untick it);
+        // a permission new in this version starts off.
+        let before = (ext.config.extensions.get(&pkg.manifest.id))
+            .filter(|_| replaces.is_some())
+            .map(|s| s.approved.clone())
+            .unwrap_or_default();
         let allow = pkg
             .manifest
             .sensitive()
             .into_iter()
-            .map(|p| (p, false))
+            .map(|p| (p, before.contains(&p)))
             .collect();
-        let replaces = ext
-            .installed
-            .iter()
-            .filter_map(|i| i.manifest.as_ref().ok())
-            .find(|m| m.id == pkg.manifest.id)
-            .map(|m| m.version.clone());
-        Self {
+        let signer_changed = match installed.map(|i| &i.signature) {
+            Some(old @ SigStatus::Trusted { signer }) if *old != signature => Some(signer.clone()),
+            _ => None,
+        };
+        Ok(Self {
             pkg,
             source,
             allow,
             replaces,
-        }
+            signature,
+            vouched_by,
+            signer_changed,
+        })
     }
+
+    /// Signed by a trusted key, or vouched for by a signed catalog.
+    pub(crate) fn trusted(&self) -> bool {
+        self.signature.trusted() || self.vouched_by.is_some()
+    }
+}
+
+const RED: egui::Color32 = egui::Color32::from_rgb(196, 43, 28);
+const AMBER: egui::Color32 = egui::Color32::from_rgb(190, 120, 0);
+const GREEN: egui::Color32 = egui::Color32::from_rgb(40, 140, 60);
+
+/// A signature status in its color.
+fn signature_label(ui: &mut egui::Ui, s: &SigStatus) {
+    let color = match s {
+        SigStatus::Trusted { .. } => GREEN,
+        SigStatus::Invalid(_) => RED,
+        SigStatus::Unsigned | SigStatus::UnknownKey { .. } => AMBER,
+    };
+    ui.colored_label(color, s.describe());
+}
+
+/// A click tool's cursor image: a PNG of at most `MAX_CURSOR` pixels each way with
+/// the hotspot inside it.
+pub(crate) fn load_cursor(
+    path: &std::path::Path,
+    cursor: &super::manifest::ToolCursor,
+) -> Result<egui::ColorImage, String> {
+    let max = super::manifest::MAX_CURSOR;
+    let img = mt_kernel::images::open(path)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 || w > max || h > max {
+        return Err(format!(
+            "the image is {w} x {h} pixels; at most {max} x {max}"
+        ));
+    }
+    if cursor.hotspot[0] >= w || cursor.hotspot[1] >= h {
+        return Err("the hotspot is outside the image".into());
+    }
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [w as usize, h as usize],
+        img.as_raw(),
+    ))
 }
 
 /// The text a field shows (lengths in the model's units).
@@ -147,6 +234,16 @@ impl App {
         self.extensions.ui.catalog_url = self.extensions.config.catalog_url.clone();
         self.extensions.load_all();
         self.sync_extensions();
+        // Opt-in: the only network access extensions make on their own.
+        if self.extensions.config.check_updates && !self.extensions.installed.is_empty() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let url = self.extensions.catalog_url();
+            let trusted = self.extensions.trusted_keys();
+            std::thread::spawn(move || {
+                let _ = tx.send(catalog::fetch_catalog(&url, &trusted));
+            });
+            self.extensions.ui.update_check = Some(rx);
+        }
         // The extension toolbar's saved place (it did not exist when the saved
         // layout was first applied).
         if let (Some(shell), Some(layout)) =
@@ -283,6 +380,7 @@ impl App {
         if !self.extensions.http.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        self.poll_update_check(ctx);
         self.extension_icons(ctx);
         self.extension_errors();
         self.extension_manager_ui(ctx);
@@ -334,7 +432,74 @@ impl App {
             shell.set_custom_icons(icons.iter().map(|(k, v)| (k.clone(), v.id())).collect());
         }
         self.extensions.ui.icons = icons;
+        // Click tool cursors.
+        let mut cursors = HashMap::new();
+        for id in self.extensions.command_ids() {
+            let Some((path, cursor)) = self.extensions.tool_cursor(&id) else {
+                continue;
+            };
+            let ext = super::runtime::split_command_id(&id).map_or("", |(e, _)| e);
+            match load_cursor(&path, &cursor) {
+                Ok(color) => {
+                    let tex = ctx.load_texture(
+                        format!("mt_ext_cursor_{id}"),
+                        color,
+                        egui::TextureOptions::NEAREST,
+                    );
+                    cursors.insert(id, (tex, cursor.hotspot));
+                }
+                Err(e) => {
+                    self.extensions
+                        .log_line(ext, &format!("cursor {}: {e}", cursor.image), true);
+                }
+            }
+        }
+        self.extensions.ui.cursors = cursors;
         self.extensions.ui.icons_for = Some(ids);
+    }
+
+    /// The startup update check's answer: a message when installed extensions have
+    /// newer versions.
+    fn poll_update_check(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.extensions.ui.update_check else {
+            return;
+        };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                return;
+            }
+            Err(_) => {
+                self.extensions.ui.update_check = None;
+                return;
+            }
+        };
+        self.extensions.ui.update_check = None;
+        match r {
+            Ok((cat, _)) => {
+                let ups = catalog::updates(&cat.extensions, &self.extensions.installed_versions());
+                if !ups.is_empty() {
+                    let names: Vec<String> = ups
+                        .iter()
+                        .map(|(i, old)| {
+                            let e = &cat.extensions[*i];
+                            format!("{} {old} -> {}", e.name, e.version)
+                        })
+                        .collect();
+                    self.extensions.messages.push((
+                        "Extension Warehouse".into(),
+                        format!(
+                            "Updates are available:\n{}\n\nOpen Extensions > Extension Warehouse to update.",
+                            names.join("\n")
+                        ),
+                    ));
+                }
+            }
+            Err(e) => self
+                .extensions
+                .log_line("meshtard", &format!("update check: {e}"), true),
+        }
     }
 
     /// Script errors go to the app's error dialog, one at a time.
@@ -538,6 +703,10 @@ impl App {
             console: bool,
             reload: bool,
             save_url: bool,
+            permission: Option<(String, Permission, bool)>,
+            add_key: bool,
+            remove_key: Option<String>,
+            check_updates: Option<bool>,
         }
         let mut act = Act::default();
         let ext = &mut self.extensions;
@@ -579,9 +748,13 @@ impl App {
                                         n.to_string_lossy().into_owned()
                                     }),
                                 };
+                                let label = if item.signature.trusted() {
+                                    label
+                                } else {
+                                    format!("{label}  (unsigned)")
+                                };
                                 let label = if item.error.is_some() {
-                                    egui::RichText::new(format!("{label}  (error)"))
-                                        .color(egui::Color32::from_rgb(196, 43, 28))
+                                    egui::RichText::new(format!("{label}  (error)")).color(RED)
                                 } else {
                                     egui::RichText::new(label)
                                 };
@@ -619,18 +792,25 @@ impl App {
                                 ui.label("Folder");
                                 ui.label(item.dir.display().to_string());
                                 ui.end_row();
+                                ui.label("Signature");
+                                signature_label(ui, &item.signature);
+                                ui.end_row();
                             });
-                            ui.label("Permissions:");
-                            let approved = ext
-                                .config
-                                .extensions
-                                .get(&m.id)
-                                .map(|s| s.approved.clone())
-                                .unwrap_or_default();
+                            if let SigStatus::UnknownKey { key, .. } = &item.signature
+                                && ui
+                                    .small_button("Trust this key...")
+                                    .on_hover_text("Fills in the key under Trusted keys below")
+                                    .clicked()
+                            {
+                                ext.ui.new_key_hex = key.clone();
+                            }
+                            ui.label("Permissions (untick to take one back; it applies at once):");
                             for p in &m.permissions {
-                                let granted = !p.sensitive() || approved.contains(p);
-                                let mark = if granted { "granted" } else { "not approved" };
-                                ui.label(format!("  {} - {} ({mark})", p.key(), p.describe()));
+                                let mut on = ext.is_granted(&m.id, *p);
+                                let text = format!("{} - {}", p.key(), p.describe());
+                                if ui.checkbox(&mut on, text).changed() {
+                                    act.permission = Some((m.id.clone(), *p, on));
+                                }
                             }
                             if m.permissions.is_empty() {
                                 ui.weak("  none");
@@ -641,7 +821,7 @@ impl App {
                         }
                     }
                     if let Some(e) = &item.error {
-                        ui.colored_label(egui::Color32::from_rgb(196, 43, 28), e);
+                        ui.colored_label(RED, e);
                     }
                     if ui.button("Uninstall").clicked() {
                         act.uninstall = Some((
@@ -661,6 +841,53 @@ impl App {
                     act.save_url = ui.button("Save").clicked();
                 });
                 ui.weak("Empty: the Meshtard repository's catalog. file:// URLs and local paths work too.");
+                let mut check = ext.config.check_updates;
+                if ui
+                    .checkbox(&mut check, "Check for updates when Meshtard starts")
+                    .on_hover_text("Reads the Warehouse catalog at startup (off: no network access until you open the Warehouse)")
+                    .changed()
+                {
+                    act.check_updates = Some(check);
+                }
+                ui.separator();
+                egui::CollapsingHeader::new("Trusted keys")
+                    .id_salt("mt_ext_keys")
+                    .show(ui, |ui| {
+                        ui.weak("Packages and catalogs signed by these keys show as signed; others ask before installing.");
+                        let keys = ext.trusted_keys();
+                        if keys.is_empty() {
+                            ui.weak("No trusted keys. (The built-in Meshtard key is a placeholder in this build.)");
+                        }
+                        for k in keys {
+                            ui.horizontal(|ui| {
+                                ui.label(&k.name);
+                                ui.monospace(signing::fingerprint(&k.key))
+                                    .on_hover_text(signing::public_key_hex(&k.key));
+                                if k.builtin {
+                                    ui.weak("built in");
+                                } else if ui.small_button("Remove").clicked() {
+                                    act.remove_key = Some(k.name.clone());
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut ext.ui.new_key_name)
+                                    .hint_text("Name")
+                                    .desired_width(110.0),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut ext.ui.new_key_hex)
+                                    .hint_text("Public key (64 hex digits)")
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(300.0),
+                            );
+                            act.add_key = ui.button("Add").clicked();
+                        });
+                        if let Some(e) = &ext.ui.key_error {
+                            ui.colored_label(RED, e);
+                        }
+                    });
             });
         if r.closed {
             self.extensions.ui.manager_open = false;
@@ -681,6 +908,33 @@ impl App {
             self.extensions.load_all();
             changed = true;
         }
+        if let Some((id, p, on)) = act.permission {
+            self.extensions.set_permission(&id, p, on);
+            changed = true;
+        }
+        if act.add_key {
+            let (name, hex) = (
+                self.extensions.ui.new_key_name.clone(),
+                self.extensions.ui.new_key_hex.clone(),
+            );
+            match self.extensions.add_trusted_key(&name, &hex) {
+                Ok(()) => {
+                    self.extensions.ui.new_key_name.clear();
+                    self.extensions.ui.new_key_hex.clear();
+                    self.extensions.ui.key_error = None;
+                }
+                Err(e) => self.extensions.ui.key_error = Some(e),
+            }
+            changed = true;
+        }
+        if let Some(name) = act.remove_key {
+            self.extensions.remove_trusted_key(&name);
+            changed = true;
+        }
+        if let Some(on) = act.check_updates {
+            self.extensions.config.check_updates = on;
+            self.extensions.config.save();
+        }
         if act.save_url {
             self.extensions.config.catalog_url = self.extensions.ui.catalog_url.trim().to_owned();
             self.extensions.config.save();
@@ -699,11 +953,11 @@ impl App {
             None
         };
         if let Some(path) = picked {
-            match Package::read(&path) {
-                Ok(pkg) => {
-                    let p = InstallPrompt::new(pkg, path.display().to_string(), &self.extensions);
-                    self.extensions.ui.install = Some(p);
-                }
+            let prompt = Package::read(&path).and_then(|pkg| {
+                InstallPrompt::new(pkg, path.display().to_string(), &self.extensions, None)
+            });
+            match prompt {
+                Ok(p) => self.extensions.ui.install = Some(p),
                 Err(e) => self
                     .extensions
                     .errors
@@ -728,16 +982,13 @@ impl App {
     }
 
     pub(crate) fn open_warehouse(&mut self, ctx: &egui::Context) {
-        let url = match self.extensions.config.catalog_url.trim() {
-            "" => catalog::DEFAULT_CATALOG.to_owned(),
-            u => u.to_owned(),
-        };
+        let url = self.extensions.catalog_url();
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx2 = ctx.clone();
         let u = url.clone();
+        let trusted = self.extensions.trusted_keys();
         std::thread::spawn(move || {
-            let r = catalog::fetch(&u).and_then(|b| Catalog::parse(&String::from_utf8_lossy(&b)));
-            let _ = tx.send(r);
+            let _ = tx.send(catalog::fetch_catalog(&u, &trusted));
             ctx2.request_repaint();
         });
         self.extensions.ui.warehouse = Some(Warehouse {
@@ -751,6 +1002,7 @@ impl App {
     }
 
     fn warehouse_ui(&mut self, ctx: &egui::Context) {
+        let installed = self.extensions.installed_versions();
         let Some(w) = self.extensions.ui.warehouse.as_mut() else {
             return;
         };
@@ -758,7 +1010,7 @@ impl App {
             && let Ok(r) = rx.try_recv()
         {
             w.state = match r {
-                Ok(c) => CatalogState::Ready(c),
+                Ok((c, s)) => CatalogState::Ready(c, s),
                 Err(e) => CatalogState::Failed(e),
             };
         }
@@ -782,12 +1034,19 @@ impl App {
             });
             match checked {
                 Ok(pkg) => {
+                    let vouched = match &w.state {
+                        CatalogState::Ready(_, SigStatus::Trusted { signer }) => {
+                            Some(signer.clone())
+                        }
+                        _ => None,
+                    };
                     prompt = Some((
                         pkg,
                         format!(
                             "{} (SHA-256 verified)",
                             catalog::resolve(&w.url, &entry.url)
                         ),
+                        vouched,
                     ));
                 }
                 Err(e) => w.error = Some(e),
@@ -812,7 +1071,33 @@ impl App {
                         ui.label("Set another catalog URL in the Extension Manager.");
                         retry = ui.button("Retry").clicked();
                     }
-                    CatalogState::Ready(c) => {
+                    CatalogState::Ready(c, sig) => {
+                        ui.horizontal(|ui| {
+                            ui.label("Catalog:");
+                            signature_label(ui, sig);
+                        });
+                        // Update notifications: installed extensions with a newer
+                        // version in the catalog.
+                        let ups = catalog::updates(&c.extensions, &installed);
+                        if !ups.is_empty() {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.strong(format!("Updates available ({})", ups.len()));
+                                for (i, old) in &ups {
+                                    let e = &c.extensions[*i];
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("{}  {old} -> {}", e.name, e.version));
+                                        let busy = w.download.is_some();
+                                        if ui
+                                            .add_enabled(!busy, egui::Button::new("Update..."))
+                                            .clicked()
+                                        {
+                                            w.selected = Some(*i);
+                                            install = Some(e.clone());
+                                        }
+                                    });
+                                }
+                            });
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Search:");
                             ui.add(egui::TextEdit::singleline(&mut w.query).desired_width(300.0));
@@ -825,7 +1110,16 @@ impl App {
                             .show(ui, |ui| {
                                 for i in shown {
                                     let e = &c.extensions[i];
-                                    let text = format!("{}  {}  - {}", e.name, e.version, e.author);
+                                    let have = installed.iter().find(|(id, _)| *id == e.id);
+                                    let mark = match have {
+                                        Some((_, v)) if ups.iter().any(|(k, _)| *k == i) => {
+                                            format!("  (installed {v}: update)")
+                                        }
+                                        Some(_) => "  (installed)".to_owned(),
+                                        None => String::new(),
+                                    };
+                                    let text =
+                                        format!("{}  {}  - {}{mark}", e.name, e.version, e.author);
                                     if ui.selectable_label(w.selected == Some(i), text).clicked() {
                                         w.selected = Some(i);
                                     }
@@ -852,12 +1146,20 @@ impl App {
                                         ui.end_row();
                                     }
                                 });
+                            let have = installed.iter().find(|(id, _)| *id == e.id);
+                            let label = match have {
+                                Some(_) if ups.iter().any(|(k, _)| Some(*k) == w.selected) => {
+                                    "Update..."
+                                }
+                                Some(_) => "Reinstall...",
+                                None => "Install...",
+                            };
                             if w.download.is_some() {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
                                     ui.label("Downloading...");
                                 });
-                            } else if ui.button("Install...").clicked() {
+                            } else if ui.button(label).clicked() {
                                 install = Some(e.clone());
                             }
                         }
@@ -885,8 +1187,15 @@ impl App {
         if retry {
             self.open_warehouse(ctx);
         }
-        if let Some((pkg, source)) = prompt {
-            self.extensions.ui.install = Some(InstallPrompt::new(pkg, source, &self.extensions));
+        if let Some((pkg, source, vouched)) = prompt {
+            match InstallPrompt::new(pkg, source, &self.extensions, vouched) {
+                Ok(p) => self.extensions.ui.install = Some(p),
+                Err(e) => {
+                    if let Some(w) = self.extensions.ui.warehouse.as_mut() {
+                        w.error = Some(e);
+                    }
+                }
+            }
         }
     }
 
@@ -912,6 +1221,30 @@ impl App {
                 if let Some(v) = &p.replaces {
                     ui.label(format!("Replaces the installed version {v}."));
                 }
+                ui.horizontal(|ui| {
+                    ui.label("Signature:");
+                    signature_label(ui, &p.signature);
+                });
+                if let Some(by) = &p.vouched_by
+                    && !p.signature.trusted()
+                {
+                    ui.colored_label(
+                        GREEN,
+                        format!("Listed in a catalog signed by {by} (checksum verified)."),
+                    );
+                }
+                if let Some(old) = &p.signer_changed {
+                    ui.colored_label(
+                        RED,
+                        format!("The installed version was signed by {old}; this one is not."),
+                    );
+                }
+                if !p.trusted() {
+                    ui.colored_label(
+                        AMBER,
+                        "This extension is not signed by a key you trust: Meshtard cannot tell who made it or whether it was changed. Install it only if you trust where it came from.",
+                    );
+                }
                 ui.add_space(6.0);
                 ui.label("This extension asks to:");
                 for perm in &m.permissions {
@@ -932,7 +1265,14 @@ impl App {
                     ui.weak("  nothing (no permissions)");
                 }
                 ui.weak("Extensions run sandboxed Rhai scripts; internet and file access only when allowed here.");
-                mt_ui::dialog::buttons(ui, &["Install", "Cancel"], Some(0))
+                let install = if p.trusted() {
+                    "Install"
+                } else {
+                    "Install Anyway"
+                };
+                // Unsigned: no default button (Enter does not install it).
+                let default = p.trusted().then_some(0);
+                mt_ui::dialog::buttons(ui, &[install, "Cancel"], default)
             });
         let install = r.inner == Some(0);
         if r.closed || r.inner.is_some() {

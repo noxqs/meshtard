@@ -371,6 +371,22 @@ fn main() -> eframe::Result {
         println!("meshtard {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // Extension signing tools (`--extension-keygen`, `--extension-sign`,
+    // `--extension-sign-catalog`; spec/EXTENSIONS.md "Signatures").
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if let Some(r) = extensions::signing::cli(&args) {
+        match r {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
     env_logger::init();
     let spec = match std::env::var_os("MESHTARD_SPEC_DIR") {
         Some(dir) => Spec::load_dir(dir.as_ref()),
