@@ -9,7 +9,8 @@
 //!
 //! Also written: edge tags, arcs and circles as arc curves (`CArcCurve`, through the
 //! model's own vertices), guides, section planes, texts and dimensions inside
-//! definitions (groups and components), and the saved view ([`to_skp_view`]).
+//! definitions (groups and components), the saved view ([`to_skp_view`]) and the
+//! attribute dictionaries of groups and components (`InstanceAttrs::dictionaries`).
 //!
 //! Known gaps (format support missing in the writer, see `mt_skp::write`):
 //! - Style settings are saved as the style items whose meaning is known (see
@@ -313,9 +314,34 @@ fn placement(inst: &Instance, maps: &Maps) -> Placement {
         rotation: None,
         material: maps.material(inst.material),
         layer: maps.layer(inst.layer),
-        attributes: Vec::new(),
+        attributes: attribute_dicts(&inst.attrs.dictionaries),
         hidden: inst.hidden,
     }
+}
+
+/// An instance's attribute dictionaries for the writer.
+fn attribute_dicts(dicts: &mt_skp::AttrDicts) -> Vec<w::AttributeDict> {
+    fn value(v: &mt_skp::AttrValue) -> w::AttributeValue {
+        use mt_skp::AttrValue as A;
+        use w::AttributeValue as V;
+        match v {
+            A::Null => V::Null,
+            A::String(s) => V::String(s.clone()),
+            A::Integer(n) => i32::try_from(*n).map_or(V::Double(*n as f64), V::Int),
+            A::Float(x) => V::Double(*x),
+            A::Vec(p) => V::Point3d(*p),
+            A::Array(items) => V::Array(items.iter().map(value).collect()),
+            A::Boolean(b) => V::Bool(*b),
+            A::Length(x) => V::Length(*x),
+        }
+    }
+    dicts
+        .iter()
+        .map(|(name, entries)| w::AttributeDict {
+            name: name.clone(),
+            entries: entries.iter().map(|(k, v)| (k.clone(), value(v))).collect(),
+        })
+        .collect()
 }
 
 /// Where a body (root or definition contents) goes.

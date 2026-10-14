@@ -149,8 +149,8 @@ impl Default for ShadowFlags {
 }
 
 /// Per-instance data shown in Entity Info that most code never touches: shadow
-/// toggles and the instance half of the Advanced Attributes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// toggles, the instance half of the Advanced Attributes and attribute dictionaries.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct InstanceAttrs {
     pub shadows: ShadowFlags,
     /// Advanced Attributes "Status" and "Owner" (stored on the instance; which of the
@@ -161,6 +161,10 @@ pub struct InstanceAttrs {
     /// Placed glued to a face (a component whose definition glues); context menu
     /// Unglue clears it. Not saved in .skp.
     pub glued: bool,
+    /// SketchUp's attribute dictionaries on the instance (name -> key -> typed value):
+    /// read from and written to .skp, set by extensions (`set_attribute`). Copies of
+    /// the instance get them too.
+    pub dictionaries: mt_skp::AttrDicts,
 }
 
 #[derive(Debug, Clone, PartialEq)]

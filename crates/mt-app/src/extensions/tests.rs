@@ -101,8 +101,11 @@ fn net_and_file_need_approval() {
     let out = ext.run_command("ext:test.sensitive:go", None, &[]).unwrap();
     assert!(out.error.unwrap().contains("`file` was not granted"));
     let m = &ext.scripts[0].manifest;
-    let granted = runtime::granted(m, &[Permission::Net]);
+    let granted = runtime::granted(m, &[Permission::Net], &[]);
     assert!(granted.contains(&Permission::Net) && !granted.contains(&Permission::File));
+    // Revoked: gone even when approved.
+    let granted = runtime::granted(m, &[Permission::Net], &[Permission::Net]);
+    assert!(!granted.contains(&Permission::Net));
 }
 
 #[test]
@@ -418,11 +421,16 @@ fn selection_info_example_runs_headless() {
     );
 }
 
-/// The catalog and `.mtx` files committed under `extensions/` match the examples.
+/// The catalog and `.mtx` files committed under `extensions/` match the examples
+/// (apart from a `signature.json`, which must then be valid, by any key).
 #[test]
 fn committed_dist_matches_examples() {
     let text = std::fs::read_to_string(repo().join("extensions/catalog.json")).unwrap();
     let cat = catalog::Catalog::parse(&text).unwrap();
+    if let Ok(sig) = std::fs::read(repo().join("extensions/catalog.json.sig")) {
+        let s = signing::verify_catalog(text.as_bytes(), Some(&sig), &[]);
+        assert!(!matches!(s, signing::SigStatus::Invalid(_)), "{s:?}");
+    }
     assert_eq!(cat.extensions.len(), 2);
     for e in &cat.extensions {
         let bytes = std::fs::read(repo().join("extensions").join(&e.url)).unwrap();
@@ -435,19 +443,35 @@ fn committed_dist_matches_examples() {
         );
         let keys: Vec<&str> = pkg.manifest.permissions.iter().map(|p| p.key()).collect();
         assert_eq!(keys, e.permissions);
+        let s = signing::verify_package(&pkg.files, &[]);
+        assert!(!matches!(s, signing::SigStatus::Invalid(_)), "{s:?}");
+        let mut files = pkg.files.clone();
+        let signed = files.remove(signing::SIGNATURE_FILE).is_some();
         let folder = e.id.strip_prefix("meshtard.").unwrap();
+        let fresh = package::pack(&examples().join(folder)).unwrap();
         assert_eq!(
-            bytes,
-            package::pack(&examples().join(folder)).unwrap(),
+            if signed {
+                package::pack_files(&files).unwrap()
+            } else {
+                bytes
+            },
+            fresh,
             "extensions/dist is stale: run `cargo test -p mt-app build_extension_dist -- --ignored`"
         );
     }
 }
 
 /// Writes `extensions/dist/*.mtx` and `extensions/catalog.json` from the examples.
+/// With `MESHTARD_SIGNING_KEY=<key file>` (from `meshtard --extension-keygen`; the
+/// release key is kept outside the repository) the packages get a `signature.json`
+/// and the catalog a `catalog.json.sig`; without it they are unsigned and a stale
+/// `catalog.json.sig` is removed.
 #[test]
 #[ignore = "writes into the repository; run after changing an example"]
 fn build_extension_dist() {
+    let key = std::env::var_os("MESHTARD_SIGNING_KEY")
+        .map(|p| signing::read_signing_key(&std::fs::read_to_string(p).unwrap()).unwrap());
+    let signer = std::env::var("MESHTARD_SIGNER").unwrap_or_else(|_| "Meshtard".into());
     let mut entries = Vec::new();
     std::fs::create_dir_all(repo().join("extensions/dist")).unwrap();
     let mut dirs: Vec<_> = std::fs::read_dir(examples())
@@ -457,7 +481,12 @@ fn build_extension_dist() {
         .collect();
     dirs.sort();
     for dir in dirs {
-        let bytes = package::pack(&dir).unwrap();
+        let mut bytes = package::pack(&dir).unwrap();
+        if let Some(k) = &key {
+            let mut files = Package::from_zip(&bytes).unwrap().files;
+            signing::sign_package(&mut files, k, &signer);
+            bytes = package::pack_files(&files).unwrap();
+        }
         let m: Manifest = Package::from_zip(&bytes).unwrap().manifest;
         let folder = dir.file_name().unwrap().to_string_lossy().into_owned();
         let file = format!("dist/{folder}-{}.mtx", m.version);
@@ -484,7 +513,14 @@ fn build_extension_dist() {
         "extensions": entries,
     });
     let text = serde_json::to_string_pretty(&cat).unwrap() + "\n";
-    std::fs::write(repo().join("extensions/catalog.json"), text).unwrap();
+    std::fs::write(repo().join("extensions/catalog.json"), &text).unwrap();
+    let sig = repo().join("extensions/catalog.json.sig");
+    match &key {
+        Some(k) => std::fs::write(sig, signing::sign_catalog(text.as_bytes(), k, &signer)).unwrap(),
+        None => {
+            let _ = std::fs::remove_file(sig);
+        }
+    }
 }
 
 #[test]
@@ -539,4 +575,310 @@ fn input_fields_read_back() {
     assert_eq!(fields[2].kind, FieldKind::Number(4.5));
     let bad = ["x"].map(String::from).to_vec();
     assert!(ui::read_fields(&mut fields[..1], &bad, &[], unit).is_err());
+}
+
+#[test]
+fn attribute_dictionaries_are_kept_and_saved_to_skp() {
+    let script = format!(
+        r#"{COMMAND}
+fn run_it() {{
+    let g = new_group("Box");
+    edit_group(g);
+    add_line([0, 0, 0], [10, 0, 0]);
+    end_group();
+    set_attribute(g, "meshtard", "count", 3);
+    set_attribute(g, "meshtard", "label", "hello");
+    set_attribute(g, "meshtard", "ratio", 0.5);
+    set_attribute(g, "meshtard", "flag", true);
+    set_attribute(g, "meshtard", "list", [1, "a", 2.5]);
+    set_attribute(g, "other", "x", 1);
+    g
+}}
+fn read_back() {{
+    let g = groups()[0];
+    [get_attribute(g, "meshtard", "count"), get_attribute(g, "meshtard", "label"),
+     get_attribute(g, "meshtard", "missing", "dflt"), attribute_dictionaries(g).len(),
+     attributes(g, "meshtard").len()]
+}}
+fn remove() {{
+    let g = groups()[0];
+    [delete_attribute(g, "meshtard", "count"), delete_attribute(g, "other"),
+     delete_attribute(g, "nothing")]
+}}
+fn on_face() {{ set_attribute(faces()[0], "a", "b", 1); }}
+fn bad_value() {{ set_attribute(groups()[0], "a", "b", #{{ x: 1 }}); }}
+"#
+    );
+    let (mut ext, _) = ext_with("attrs", &["model.read", "model.write", "ui.menu"], &script);
+    let mut doc = Document::untitled();
+    let out = ext
+        .run_command("ext:test.attrs:go", Some(&mut doc), &[])
+        .unwrap();
+    assert!(out.error.is_none(), "{:?}", out.error);
+    let dicts = &doc.model.root.instances[0].attrs.dictionaries;
+    assert_eq!(dicts.len(), 2);
+    assert_eq!(dicts["meshtard"]["count"], mt_skp::AttrValue::Integer(3));
+    let call = |ext: &mut Extensions, doc: &mut Document, f: &str| {
+        ext.call(
+            "test.attrs",
+            &rhai::FnPtr::new(f).unwrap(),
+            Vec::new(),
+            Some(doc),
+            &[],
+        )
+    };
+    let v = call(&mut ext, &mut doc, "read_back").value.unwrap();
+    let v: Vec<String> = (v.cast::<rhai::Array>().iter())
+        .map(|x| x.to_string())
+        .collect();
+    assert_eq!(v, ["3", "hello", "dflt", "2", "5"]);
+
+    // Saved in .skp and read back.
+    let bytes = doc.to_skp().unwrap();
+    let back = mt_kernel::import::from_skp(&mt_skp::parse(&bytes).unwrap());
+    let inst = &back.root.instances[0];
+    let d = &inst.attrs.dictionaries["meshtard"];
+    assert_eq!(d["label"], mt_skp::AttrValue::String("hello".into()));
+    assert_eq!(d["ratio"], mt_skp::AttrValue::Float(0.5));
+    assert_eq!(d["flag"], mt_skp::AttrValue::Boolean(true));
+    assert_eq!(d["count"], mt_skp::AttrValue::Integer(3));
+    assert!(inst.attrs.dictionaries.contains_key("other"));
+
+    // Delete: one undo step; undo brings them back.
+    let out = call(&mut ext, &mut doc, "remove");
+    let v: Vec<String> = (out.value.unwrap().cast::<rhai::Array>().iter())
+        .map(|x| x.to_string())
+        .collect();
+    assert_eq!(v, ["true", "true", "false"]);
+    let dicts = &doc.model.root.instances[0].attrs.dictionaries;
+    assert!(!dicts.contains_key("other") && !dicts["meshtard"].contains_key("count"));
+    assert!(doc.undo());
+    assert!(
+        doc.model.root.instances[0]
+            .attrs
+            .dictionaries
+            .contains_key("other")
+    );
+
+    // Faces have none; maps are not values. Both fail and change nothing.
+    rectangle(&mut doc);
+    let state = doc.state();
+    let e = call(&mut ext, &mut doc, "on_face").error.unwrap();
+    assert!(e.contains("groups and components"), "{e}");
+    let e = call(&mut ext, &mut doc, "bad_value").error.unwrap();
+    assert!(e.contains("attribute value"), "{e}");
+    assert_eq!(doc.state(), state);
+}
+
+#[test]
+fn attributes_need_model_permissions() {
+    let script = format!(
+        "{COMMAND}\nfn run_it() {{ set_attribute(groups()[0], \"a\", \"b\", 1); }}\nfn get() {{ get_attribute(groups()[0], \"a\", \"b\") }}"
+    );
+    let (mut ext, _) = ext_with("attrperm", &["model.read", "ui.menu"], &script);
+    let mut doc = Document::untitled();
+    let mut console = Extensions::default();
+    console.console_eval("new_group(\"G\")", Some(&mut doc), &[]);
+    assert_eq!(doc.model.root.instances.len(), 1);
+    let out = ext
+        .run_command("ext:test.attrperm:go", Some(&mut doc), &[])
+        .unwrap();
+    assert!(out.error.unwrap().contains("model.write"));
+    let out = ext.call(
+        "test.attrperm",
+        &rhai::FnPtr::new("get").unwrap(),
+        Vec::new(),
+        Some(&mut doc),
+        &[],
+    );
+    assert!(out.error.is_none());
+    assert!(out.value.unwrap().is_unit());
+}
+
+#[test]
+fn revoking_one_permission_without_reinstalling() {
+    let script = format!("{COMMAND}\nfn run_it() {{ add_line([0,0,0], [10,0,0]); }}");
+    let (mut ext, _) = ext_with(
+        "revoke",
+        &["model.read", "model.write", "ui.menu", "net"],
+        &script,
+    );
+    let id = "test.revoke";
+    assert!(ext.is_granted(id, Permission::ModelWrite));
+    assert!(
+        !ext.is_granted(id, Permission::Net),
+        "sensitive: not approved"
+    );
+    ext.set_permission(id, Permission::ModelWrite, false);
+    assert!(!ext.is_granted(id, Permission::ModelWrite));
+    let mut doc = Document::untitled();
+    let out = ext
+        .run_command("ext:test.revoke:go", Some(&mut doc), &[])
+        .unwrap();
+    assert!(out.error.unwrap().contains("model.write"));
+    assert!(doc.model.root.edges.is_empty());
+    // Approving a sensitive one later, and taking it back.
+    ext.set_permission(id, Permission::Net, true);
+    assert!(ext.is_granted(id, Permission::Net));
+    assert!(ext.scripts[0].host.borrow().has(Permission::Net));
+    ext.set_permission(id, Permission::Net, false);
+    assert!(!ext.scripts[0].host.borrow().has(Permission::Net));
+    // Restored.
+    ext.set_permission(id, Permission::ModelWrite, true);
+    let out = ext
+        .run_command("ext:test.revoke:go", Some(&mut doc), &[])
+        .unwrap();
+    assert!(out.error.is_none(), "{:?}", out.error);
+    // Taking back ui.menu: the extension cannot register its command and says so.
+    ext.set_permission(id, Permission::UiMenu, false);
+    assert!(ext.scripts.is_empty());
+    assert!(ext.installed[0].error.as_ref().unwrap().contains("ui.menu"));
+    // An update keeps what was revoked.
+    let pkg = Package::from_folder(&ext.installed[0].dir.clone()).unwrap();
+    ext.install(&pkg, Vec::new()).unwrap();
+    assert!(!ext.is_granted(id, Permission::UiMenu));
+}
+
+#[test]
+fn signed_packages_install_and_broken_ones_do_not() {
+    let (mut ext, root) = ext_with("signer_base", &["model.read"], "let x = 1;");
+    let src = package::tests::scratch("signer_src");
+    std::fs::write(
+        src.join("extension.toml"),
+        "id = \"test.signed\"\nname = \"Signed\"\nversion = \"1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("main.rhai"), "let x = 1;").unwrap();
+    let mut pkg = Package::from_folder(&src).unwrap();
+    // Unsigned: allowed (the UI warns), shown as unsigned.
+    assert_eq!(
+        ext.check_signature(&pkg).unwrap(),
+        signing::SigStatus::Unsigned
+    );
+    let key = signing::test_key();
+    signing::sign_package(&mut pkg.files, &key, "Tester");
+    assert!(matches!(
+        ext.check_signature(&pkg).unwrap(),
+        signing::SigStatus::UnknownKey { .. }
+    ));
+    let pk = signing::public_key_hex(&key.verifying_key().to_bytes());
+    ext.add_trusted_key("Test key", &pk).unwrap();
+    assert!(ext.add_trusted_key("Again", &pk).is_err(), "no duplicates");
+    assert!(ext.add_trusted_key("Bad", "1234").is_err());
+    assert!(ext.check_signature(&pkg).unwrap().trusted());
+    // Through a .mtx and installed: the manager shows who signed it.
+    let bytes = package::pack_files(&pkg.files).unwrap();
+    let pkg = Package::from_zip(&bytes).unwrap();
+    ext.install(&pkg, Vec::new()).unwrap();
+    assert!(
+        root.join("test.signed")
+            .join(signing::SIGNATURE_FILE)
+            .exists()
+    );
+    let item = ext
+        .installed
+        .iter()
+        .find(|i| i.manifest.as_ref().is_ok_and(|m| m.id == "test.signed"))
+        .unwrap();
+    assert_eq!(item.signature.describe(), "Signed by Test key");
+    // A file changed after signing: refused.
+    let mut bad = pkg.clone();
+    bad.files.insert("main.rhai".into(), b"let x = 2;".to_vec());
+    assert!(ext.check_signature(&bad).unwrap_err().contains("invalid"));
+    assert!(
+        ext.install(&bad, Vec::new())
+            .unwrap_err()
+            .contains("signature")
+    );
+    // Removing the key: signed by an untrusted key again.
+    ext.remove_trusted_key("Test key");
+    assert!(!ext.check_signature(&pkg).unwrap().trusted());
+}
+
+#[test]
+fn tool_cursors_from_the_manifest_and_register_tool() {
+    let script = r#"
+register_tool(#{ id: "a", label: "A", menu: "Extensions > A", on_click: "c" });
+register_tool(#{ id: "b", label: "B", menu: "Extensions > B", on_click: "c",
+    cursor: "b.png", cursor_hotspot: [1, 2] });
+register_tool(#{ id: "c", label: "C", menu: "Extensions > C", on_click: "c" });
+fn c(p, i) {}
+"#;
+    let (mut ext, root) = ext_with("cursor", &["model.read", "ui.menu"], script);
+    let dir = root.join("test.cursor");
+    let toml = std::fs::read_to_string(dir.join("extension.toml")).unwrap();
+    std::fs::write(
+        dir.join("extension.toml"),
+        format!("{toml}\n[cursors]\na = {{ image = \"a.png\", hotspot = [4, 28] }}\n"),
+    )
+    .unwrap();
+    ext.load_all();
+    let (path, c) = ext.tool_cursor("ext:test.cursor:a").unwrap();
+    assert_eq!(c.hotspot, [4, 28]);
+    assert_eq!(path, dir.join("a.png"));
+    let (_, c) = ext.tool_cursor("ext:test.cursor:b").unwrap();
+    assert_eq!((c.image.as_str(), c.hotspot), ("b.png", [1, 2]));
+    assert!(ext.tool_cursor("ext:test.cursor:c").is_none());
+    // A cursor image is checked when loaded: size and hotspot.
+    let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]));
+    img.save(dir.join("a.png")).unwrap();
+    let small = super::manifest::ToolCursor::new("a.png", [2, 2]).unwrap();
+    assert!(ui::load_cursor(&dir.join("a.png"), &small).is_ok());
+    let outside = super::manifest::ToolCursor::new("a.png", [9, 2]).unwrap();
+    assert!(ui::load_cursor(&dir.join("a.png"), &outside).is_err());
+    image::RgbaImage::new(65, 8)
+        .save(dir.join("big.png"))
+        .unwrap();
+    assert!(ui::load_cursor(&dir.join("big.png"), &small).is_err());
+    // A bad cursor in register_tool stops the load.
+    let bad = r#"register_tool(#{ id: "a", label: "A", menu: "Extensions > A", on_click: "c",
+        cursor: "../x.png" }); fn c(p, i) {}"#;
+    let (ext, _) = ext_with("badcursor", &["model.read", "ui.menu"], bad);
+    assert!(ext.installed[0].error.as_ref().unwrap().contains("cursor"));
+}
+
+/// Attribute dictionaries of the corpus files' groups and components are kept
+/// through import, save and import again.
+#[test]
+fn corpus_attribute_dictionaries_survive_a_save() {
+    fn all(m: &mt_kernel::Model) -> Vec<mt_skp::AttrDicts> {
+        let mut out: Vec<_> = (m.root.instances.iter())
+            .chain(m.definitions.values().flat_map(|d| &d.entities.instances))
+            .map(|i| i.attrs.dictionaries.clone())
+            .filter(|d| !d.is_empty())
+            .collect();
+        out.sort_by_key(|d| format!("{:?}", d.keys().collect::<Vec<_>>()));
+        out
+    }
+    let dir = repo().join("tests/corpus/openskp");
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        if path.extension().is_none_or(|x| x != "skp") {
+            continue;
+        }
+        let model = mt_kernel::import::from_skp(&mt_skp::read(&path).unwrap());
+        let before = all(&model);
+        if before.is_empty() {
+            continue;
+        }
+        seen += 1;
+        let bytes = mt_kernel::export::to_skp(&model).unwrap();
+        let after = all(&mt_kernel::import::from_skp(
+            &mt_skp::parse(&bytes).unwrap(),
+        ));
+        assert_eq!(after.len(), before.len(), "{}", path.display());
+        for (a, b) in after.iter().zip(&before) {
+            assert_eq!(
+                a.keys().collect::<Vec<_>>(),
+                b.keys().collect::<Vec<_>>(),
+                "{}",
+                path.display()
+            );
+            for (name, d) in a {
+                assert_eq!(d.len(), b[name].len(), "{}: {name}", path.display());
+            }
+        }
+    }
+    assert!(seen > 0, "some corpus file has attribute dictionaries");
 }

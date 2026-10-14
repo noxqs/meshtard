@@ -5,13 +5,15 @@
 //! - [`manifest`]: `extension.toml` and permissions.
 //! - [`package`]: `.mtx` / folder packages, the install folder, enabled state.
 //! - [`runtime`]: the Rhai engines, the model facade, budgets and rollback.
-//! - [`catalog`]: the Extension Warehouse catalog and SHA-256 checks.
+//! - [`catalog`]: the Extension Warehouse catalog, SHA-256 checks and updates.
+//! - [`signing`]: ed25519 signatures of packages and catalogs, trusted keys.
 //! - [`ui`]: the windows, dialogs and the app glue.
 
 pub(crate) mod catalog;
 pub(crate) mod manifest;
 pub(crate) mod package;
 pub(crate) mod runtime;
+pub(crate) mod signing;
 pub(crate) mod ui;
 
 #[cfg(test)]
@@ -28,9 +30,10 @@ use glam::DVec3;
 use rhai::Dynamic;
 
 use crate::document::{Document, Owner};
-use manifest::Manifest;
+use manifest::{Manifest, Permission, ToolCursor};
 use package::Config;
 use runtime::{Action, CommandDef, LogLine, ObserverKind, Outcome, Request, Script};
+use signing::SigStatus;
 
 /// An installed extension as the Extension Manager lists it.
 #[derive(Debug)]
@@ -40,6 +43,8 @@ pub(crate) struct Installed {
     pub enabled: bool,
     /// Why it did not load.
     pub error: Option<String>,
+    /// Its `signature.json` checked against the installed files.
+    pub signature: SigStatus,
 }
 
 /// An input dialog a script asked for.
@@ -202,11 +207,16 @@ impl Extensions {
             let enabled = id
                 .as_ref()
                 .is_none_or(|id| self.config.extensions.get(id).is_none_or(|s| s.enabled));
+            let signature = match package::Package::from_folder(&dir) {
+                Ok(p) => signing::verify_package(&p.files, &self.trusted_keys()),
+                Err(_) => SigStatus::Unsigned,
+            };
             let mut item = Installed {
                 dir,
                 manifest,
                 enabled,
                 error: None,
+                signature,
             };
             match &item.manifest {
                 Err(e) => item.error = Some(e.clone()),
@@ -222,13 +232,13 @@ impl Extensions {
     }
 
     fn load_one(&mut self, m: Manifest, dir: &Path) -> Result<(), String> {
-        let approved = self
+        let state = self
             .config
             .extensions
             .get(&m.id)
-            .map(|s| s.approved.clone())
+            .cloned()
             .unwrap_or_default();
-        let granted = runtime::granted(&m, &approved);
+        let granted = runtime::granted(&m, &state.approved, &state.revoked);
         let name = m.name.clone();
         match Script::load(m, dir, granted, self.log.clone()) {
             Ok(mut s) => {
@@ -598,14 +608,24 @@ impl Extensions {
     ) -> Result<(), String> {
         let root = self.root.clone().ok_or("no data folder for extensions")?;
         std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+        // A broken signature is never installed (callers check first; this is the
+        // last line).
+        if let SigStatus::Invalid(e) = signing::verify_package(&pkg.files, &self.trusted_keys()) {
+            return Err(format!("not installed: invalid signature ({e})"));
+        }
         // Unload first (an update replaces its folder).
         self.scripts.retain(|s| s.manifest.id != pkg.manifest.id);
         pkg.install(&root)?;
+        // Permissions taken back in the manager stay taken back after an update.
+        let revoked = (self.config.extensions.get(&pkg.manifest.id))
+            .map(|s| s.revoked.clone())
+            .unwrap_or_default();
         self.config.extensions.insert(
             pkg.manifest.id.clone(),
             package::ExtState {
                 enabled: true,
                 approved,
+                revoked,
             },
         );
         self.config.save_if(self.root.is_some() && cfg!(not(test)));
@@ -624,6 +644,110 @@ impl Extensions {
         e.enabled = enabled;
         self.config.save_if(cfg!(not(test)));
         self.load_all();
+    }
+
+    /// Grants or takes back one declared permission of an installed extension
+    /// (Extension Manager), then reloads it. Sensitive permissions are approved or
+    /// unapproved; the others are revoked or restored.
+    pub(crate) fn set_permission(&mut self, id: &str, p: Permission, granted: bool) {
+        // No entry yet means enabled (see `load_all`).
+        let e =
+            (self.config.extensions.entry(id.to_owned())).or_insert_with(|| package::ExtState {
+                enabled: true,
+                ..Default::default()
+            });
+        e.approved.retain(|q| *q != p);
+        e.revoked.retain(|q| *q != p);
+        if granted {
+            if p.sensitive() {
+                e.approved.push(p);
+            }
+        } else {
+            e.revoked.push(p);
+        }
+        e.approved.sort();
+        e.revoked.sort();
+        self.config.save_if(cfg!(not(test)));
+        self.load_all();
+    }
+
+    /// Whether a declared permission is granted now.
+    pub(crate) fn is_granted(&self, id: &str, p: Permission) -> bool {
+        let s = self.config.extensions.get(id);
+        let revoked = s.is_some_and(|s| s.revoked.contains(&p));
+        let approved = s.is_some_and(|s| s.approved.contains(&p));
+        !revoked && (!p.sensitive() || approved)
+    }
+
+    /// The Warehouse catalog URL (the user's, else the default).
+    pub(crate) fn catalog_url(&self) -> String {
+        match self.config.catalog_url.trim() {
+            "" => catalog::DEFAULT_CATALOG.to_owned(),
+            u => u.to_owned(),
+        }
+    }
+
+    /// The built-in keys and the user's.
+    pub(crate) fn trusted_keys(&self) -> Vec<signing::TrustedKey> {
+        signing::trusted_keys(&self.config.trusted_keys)
+    }
+
+    /// Adds a trusted key (Extension Manager > Trusted keys).
+    pub(crate) fn add_trusted_key(&mut self, name: &str, hex: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err("give the key a name (1-80 characters)".into());
+        }
+        let key = signing::parse_public_key(hex.trim())?;
+        if self.trusted_keys().iter().any(|k| k.key == key) {
+            return Err("that key is trusted already".into());
+        }
+        self.config
+            .trusted_keys
+            .insert(name.to_owned(), signing::public_key_hex(&key));
+        self.config.save_if(cfg!(not(test)));
+        self.load_all();
+        Ok(())
+    }
+
+    pub(crate) fn remove_trusted_key(&mut self, name: &str) {
+        self.config.trusted_keys.remove(name);
+        self.config.save_if(cfg!(not(test)));
+        self.load_all();
+    }
+
+    /// Checks a package's signature; a broken one is an error.
+    pub(crate) fn check_signature(&self, pkg: &package::Package) -> Result<SigStatus, String> {
+        match signing::verify_package(&pkg.files, &self.trusted_keys()) {
+            SigStatus::Invalid(e) => Err(format!(
+                "the package's signature is invalid ({e}); not installed"
+            )),
+            s => Ok(s),
+        }
+    }
+
+    /// Installed (id, version) of every readable manifest.
+    pub(crate) fn installed_versions(&self) -> Vec<(String, String)> {
+        self.installed
+            .iter()
+            .filter_map(|i| i.manifest.as_ref().ok())
+            .map(|m| (m.id.clone(), m.version.clone()))
+            .collect()
+    }
+
+    /// The custom cursor of the click tool with app command id `id`: the image's
+    /// path and the cursor.
+    pub(crate) fn tool_cursor(&self, id: &str) -> Option<(PathBuf, ToolCursor)> {
+        let (ext, cmd) = self.command(id)?;
+        let runtime::Action::Tool(t) = &cmd.action else {
+            return None;
+        };
+        let s = self.scripts.iter().find(|s| s.manifest.id == ext)?;
+        let c = t
+            .cursor
+            .clone()
+            .or_else(|| s.manifest.cursors.get(&cmd.id).cloned())?;
+        Some((s.dir.join(&c.image), c))
     }
 
     /// Removes an installed extension's folder and settings.

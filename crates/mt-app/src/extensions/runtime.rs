@@ -19,7 +19,7 @@ use mt_infer::units::{LengthUnit, UnitsOptions};
 use mt_kernel::{DefinitionId, EdgeId, Entities, FaceId, Model};
 use rhai::{AST, Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, Scope};
 
-use super::manifest::{Manifest, Permission};
+use super::manifest::{Manifest, Permission, ToolCursor};
 use crate::document::{Document, Owner};
 
 type R<T> = Result<T, Box<EvalAltResult>>;
@@ -122,6 +122,9 @@ pub(crate) enum Action {
 #[derive(Debug, Clone)]
 pub(crate) struct ToolDef {
     pub status: String,
+    /// `cursor` / `cursor_hotspot` given to `register_tool` (else the manifest's
+    /// `[cursors]` entry for the tool, else the default cursor).
+    pub cursor: Option<ToolCursor>,
     pub on_click: Option<FnPtr>,
     pub on_move: Option<FnPtr>,
 }
@@ -187,6 +190,12 @@ pub(crate) struct Host {
 }
 
 impl Host {
+    /// Whether `p` is granted (declared, not revoked, approved when sensitive).
+    #[cfg(test)]
+    pub(crate) fn has(&self, p: Permission) -> bool {
+        self.granted.contains(&p)
+    }
+
     fn need(&self, p: Permission) -> R<()> {
         if self.granted.contains(&p) {
             Ok(())
@@ -332,6 +341,7 @@ impl Script {
             scripts: Vec::new(),
             icon: None,
             homepage: String::new(),
+            cursors: Default::default(),
         };
         let granted = manifest.permissions.iter().copied().collect();
         Self::new(manifest, Path::new(""), granted, log)
@@ -704,6 +714,7 @@ fn make_engine(host: &Rc<RefCell<Host>>, deadline: &Rc<Cell<Option<Instant>>>) -
     register_registration(&mut e, host);
     register_read(&mut e, host);
     register_write(&mut e, host);
+    register_attributes(&mut e, host);
     register_ui(&mut e, host);
     register_units(&mut e, host);
     register_io(&mut e, host);
@@ -798,7 +809,30 @@ fn command_def(h: &Host, m: &Map, tool: bool) -> R<CommandDef> {
     }
     let get_cb = |k: &str| m.get(k).cloned().map(callback).transpose();
     let action = if tool {
+        let cursor = match opt_str(m, "cursor") {
+            None => None,
+            Some(image) => {
+                let hotspot = match m.get("cursor_hotspot") {
+                    None => [0, 0],
+                    Some(v) => {
+                        let a = v
+                            .clone()
+                            .try_cast::<Array>()
+                            .filter(|a| a.len() == 2)
+                            .ok_or("cursor_hotspot is [x, y] in pixels")?;
+                        [
+                            a[0].as_int()
+                                .map_err(|_| "cursor_hotspot is [x, y] in pixels")?,
+                            a[1].as_int()
+                                .map_err(|_| "cursor_hotspot is [x, y] in pixels")?,
+                        ]
+                    }
+                };
+                Some(ToolCursor::new(&image, hotspot)?)
+            }
+        };
         Action::Tool(ToolDef {
+            cursor,
             status: opt_str(m, "status").unwrap_or_default(),
             on_click: get_cb("on_click")?,
             on_move: get_cb("on_move")?,
@@ -1381,6 +1415,189 @@ fn make_group(h: &Rc<RefCell<Host>>, d: &Dynamic, name: &str, group: bool) -> R<
     })
 }
 
+// ---------------------------------------------------------------------------------
+// Attribute dictionaries (groups and components; saved in .skp).
+
+/// Longest dictionary name or key, and most dictionaries per entity and entries per
+/// dictionary (keeps a runaway script from bloating the model).
+const MAX_ATTR_NAME: usize = 255;
+const MAX_DICTS: usize = 256;
+const MAX_ENTRIES: usize = 4096;
+/// Nesting of array values.
+const MAX_ATTR_DEPTH: usize = 8;
+
+fn attr_name(s: &str, what: &str) -> R<String> {
+    if s.is_empty() || s.chars().count() > MAX_ATTR_NAME {
+        return Err(format!("{what} must be 1-{MAX_ATTR_NAME} characters").into());
+    }
+    Ok(s.to_owned())
+}
+
+/// A script value as an attribute value: `()`, bool, int, float, string or an
+/// array of these.
+pub(crate) fn attr_value(d: &Dynamic, depth: usize) -> R<mt_skp::AttrValue> {
+    use mt_skp::AttrValue as A;
+    if depth > MAX_ATTR_DEPTH {
+        return Err("attribute arrays are nested too deeply".into());
+    }
+    Ok(if d.is_unit() {
+        A::Null
+    } else if let Ok(b) = d.as_bool() {
+        A::Boolean(b)
+    } else if let Ok(i) = d.as_int() {
+        A::Integer(i)
+    } else if let Ok(f) = d.as_float() {
+        A::Float(f)
+    } else if let Ok(c) = d.as_char() {
+        A::String(c.to_string())
+    } else if d.is_string() {
+        A::String(d.clone().into_immutable_string()?.to_string())
+    } else if let Some(a) = d.clone().try_cast::<Array>() {
+        A::Array(
+            a.iter()
+                .map(|x| attr_value(x, depth + 1))
+                .collect::<R<_>>()?,
+        )
+    } else {
+        return Err(format!(
+            "an attribute value is (), a bool, a number, a string or an array of these, not {}",
+            d.type_name()
+        )
+        .into());
+    })
+}
+
+/// An attribute value as a script value (points and lengths as numbers).
+pub(crate) fn attr_dynamic(v: &mt_skp::AttrValue) -> Dynamic {
+    use mt_skp::AttrValue as A;
+    match v {
+        A::Null => Dynamic::UNIT,
+        A::String(s) => s.clone().into(),
+        A::Integer(i) => (*i).into(),
+        A::Float(x) | A::Length(x) => (*x).into(),
+        A::Vec(p) => Dynamic::from_array(p.iter().map(|x| (*x).into()).collect()),
+        A::Array(items) => Dynamic::from_array(items.iter().map(attr_dynamic).collect()),
+        A::Boolean(b) => (*b).into(),
+    }
+}
+
+/// The dictionaries of a group or component of the active context.
+fn dicts_of(ents: &Entities, x: Entity) -> R<&mt_skp::AttrDicts> {
+    match x {
+        Entity::Instance(_) => Ok(&ents.instances[instance(ents, x)?].attrs.dictionaries),
+        _ => Err("attribute dictionaries are kept on groups and components only".into()),
+    }
+}
+
+fn register_attributes(e: &mut Engine, host: &Rc<RefCell<Host>>) {
+    let get = |hh: &Rc<RefCell<Host>>, x: Entity, dict: &str, key: &str| -> R<Dynamic> {
+        let h = hh.borrow();
+        let ents = h.active()?;
+        Ok(dicts_of(ents, x)?
+            .get(dict)
+            .and_then(|d| d.get(key))
+            .map_or(Dynamic::UNIT, attr_dynamic))
+    };
+    let hh = host.clone();
+    e.register_fn(
+        "get_attribute",
+        move |x: Entity, dict: &str, key: &str| -> R<Dynamic> { get(&hh, x, dict, key) },
+    );
+    let hh = host.clone();
+    e.register_fn(
+        "get_attribute",
+        move |x: Entity, dict: &str, key: &str, default: Dynamic| -> R<Dynamic> {
+            let v = get(&hh, x, dict, key)?;
+            Ok(if v.is_unit() { default } else { v })
+        },
+    );
+    let hh = host.clone();
+    e.register_fn("attribute_dictionaries", move |x: Entity| -> R<Array> {
+        let h = hh.borrow();
+        let ents = h.active()?;
+        Ok(dicts_of(ents, x)?
+            .keys()
+            .map(|k| Dynamic::from(k.clone()))
+            .collect())
+    });
+    let hh = host.clone();
+    e.register_fn("attributes", move |x: Entity, dict: &str| -> R<Dynamic> {
+        let h = hh.borrow();
+        let ents = h.active()?;
+        Ok(match dicts_of(ents, x)?.get(dict) {
+            None => Dynamic::UNIT,
+            Some(d) => Dynamic::from_map(
+                d.iter()
+                    .map(|(k, v)| (k.as_str().into(), attr_dynamic(v)))
+                    .collect(),
+            ),
+        })
+    });
+    let hh = host.clone();
+    e.register_fn(
+        "set_attribute",
+        move |x: Entity, dict: &str, key: &str, value: Dynamic| -> R<Dynamic> {
+            let dict = attr_name(dict, "a dictionary name")?;
+            let key = attr_name(key, "an attribute key")?;
+            let v = attr_value(&value, 0)?;
+            hh.borrow_mut().write(|_, ents| {
+                dicts_of(ents, x)?;
+                let i = instance(ents, x)?;
+                let dicts = &mut ents.instances[i].attrs.dictionaries;
+                if !dicts.contains_key(&dict) && dicts.len() >= MAX_DICTS {
+                    return Err(format!("at most {MAX_DICTS} dictionaries per entity").into());
+                }
+                let d = dicts.entry(dict).or_default();
+                if !d.contains_key(&key) && d.len() >= MAX_ENTRIES {
+                    return Err(format!("at most {MAX_ENTRIES} attributes per dictionary").into());
+                }
+                d.insert(key, v);
+                Ok(value)
+            })
+        },
+    );
+    let hh = host.clone();
+    e.register_fn(
+        "delete_attribute",
+        move |x: Entity, dict: &str, key: &str| -> R<bool> {
+            let mut h = hh.borrow_mut();
+            // Nothing to delete: no change (no undo step).
+            if !dicts_of(h.active()?, x)?
+                .get(dict)
+                .is_some_and(|d| d.contains_key(key))
+            {
+                return Ok(false);
+            }
+            h.write(|_, ents| {
+                let i = instance(ents, x)?;
+                let dicts = &mut ents.instances[i].attrs.dictionaries;
+                if let Some(d) = dicts.get_mut(dict) {
+                    d.remove(key);
+                    if d.is_empty() {
+                        dicts.remove(dict);
+                    }
+                }
+                Ok(true)
+            })
+        },
+    );
+    let hh = host.clone();
+    e.register_fn(
+        "delete_attribute",
+        move |x: Entity, dict: &str| -> R<bool> {
+            let mut h = hh.borrow_mut();
+            if !dicts_of(h.active()?, x)?.contains_key(dict) {
+                return Ok(false);
+            }
+            h.write(|_, ents| {
+                let i = instance(ents, x)?;
+                ents.instances[i].attrs.dictionaries.remove(dict);
+                Ok(true)
+            })
+        },
+    );
+}
+
 fn register_ui(e: &mut Engine, host: &Rc<RefCell<Host>>) {
     let hh = host.clone();
     e.register_fn("message", move |s: Dynamic| {
@@ -1573,13 +1790,18 @@ pub(crate) fn show_value(v: &Dynamic) -> Option<String> {
     }
 }
 
-/// The granted permissions for a manifest: declared, and sensitive ones
-/// only when approved.
-pub(crate) fn granted(manifest: &Manifest, approved: &[Permission]) -> BTreeSet<Permission> {
+/// The granted permissions for a manifest: declared and not revoked, and sensitive
+/// ones only when approved.
+pub(crate) fn granted(
+    manifest: &Manifest,
+    approved: &[Permission],
+    revoked: &[Permission],
+) -> BTreeSet<Permission> {
     manifest
         .permissions
         .iter()
         .copied()
         .filter(|p| !p.sensitive() || approved.contains(p))
+        .filter(|p| !revoked.contains(p))
         .collect()
 }
