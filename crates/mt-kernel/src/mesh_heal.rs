@@ -31,8 +31,10 @@
 //!   are replaced by one face per covered cell, taking the material, texture position
 //!   and side of the earliest face covering it (as a face drawn on another one in
 //!   SketchUp takes that face's material). Corners of the group farther than `TOL / 2`
-//!   from its plane are first moved onto it (at most [`MERGE`], when no other face at
-//!   them stops being planar and no vertex comes within the tolerance of another);
+//!   from its plane are first moved onto it (at most [`MERGE`], when no vertex comes
+//!   within the tolerance of another; a vertex that lands on an edge splits it, and
+//!   another face at them that would bend beyond the tolerance is cut into planar
+//!   parts);
 //!   each cell's loop starts at its corner nearest the middle of its corners' heights,
 //!   since a face's plane goes through its first corner. Faces of different planes
 //!   that pass through each other are left alone (SketchUp does not intersect them on
@@ -43,7 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{DVec2, DVec3};
 
 use crate::TOL;
-use crate::entities::{CoEdge, EdgeId, Entities, FaceId, Loop};
+use crate::entities::{CoEdge, EdgeId, Entities, FaceId, Loop, VertexId};
 use crate::geom::{Plane, point_in_polygon, point_segment, segment_segment, signed_area2};
 use crate::spatial::{FxMap, FxSet};
 use crate::validate::{Grid, overlaps};
@@ -589,6 +591,23 @@ pub fn drop_repeated_faces(ents: &mut Entities) {
     }
 }
 
+/// A loop through `vs`, reusing edges.
+fn loop_through(ents: &mut Entities, vs: &[VertexId]) -> Loop {
+    let coedges = (0..vs.len())
+        .map(|i| {
+            let (a, b) = (vs[i], vs[(i + 1) % vs.len()]);
+            let e = ents
+                .edge_between(a, b)
+                .unwrap_or_else(|| ents.add_raw_edge(a, b, crate::entities::EdgeAttrs::default()));
+            CoEdge {
+                edge: e,
+                reversed: ents.edges[e].start != a,
+            }
+        })
+        .collect();
+    Loop { coedges }
+}
+
 fn resolve_overlaps_once(ents: &mut Entities, touching: Option<&BTreeSet<FaceId>>) -> usize {
     let faces: Vec<FaceId> = ents.faces.keys().collect();
     let wanted = |i: usize| touching.is_none_or(|t| t.contains(&faces[i]));
@@ -645,6 +664,12 @@ fn resolve_overlaps_once(ents: &mut Entities, touching: Option<&BTreeSet<FaceId>
     let mut replaced = 0;
     for group in groups.values().filter(|g| g.len() > 1) {
         let fs: Vec<FaceId> = group.iter().map(|&i| faces[i]).collect();
+        // An earlier group's snapping can have split a face of this one: the next
+        // round sees its parts.
+        if fs.iter().any(|&f| !ents.faces.contains_key(f)) {
+            replaced += 1;
+            continue;
+        }
         let bx: Vec<(DVec3, DVec3)> = group.iter().map(|&i| boxes[i]).collect();
         if resolve_group(ents, &fs, &bx, planes[group[0]]) {
             replaced += 1;
@@ -681,7 +706,21 @@ fn resolve_group(
     if !snap_into_plane(ents, faces, &edges, &plane) {
         return false; // Drifts out of the plane: leave it.
     }
-    let mut edges = list;
+    let group_edges = |ents: &Entities| -> Vec<EdgeId> {
+        let mut set: BTreeSet<EdgeId> = BTreeSet::new();
+        for &f in faces {
+            for l in ents.faces[f].loops() {
+                set.extend(l.coedges.iter().map(|c| c.edge));
+            }
+        }
+        set.into_iter().collect()
+    };
+    // (Snapping can split edges.)
+    let mut edges = if list.iter().all(|&e| ents.edges.contains_key(e)) {
+        list
+    } else {
+        group_edges(ents)
+    };
     // Faces apart by nearly the tolerance (a sliver solid's two sides) can have sides
     // that cross seen in the plane but were too far apart to be split: split them now.
     let mut settled = false;
@@ -692,13 +731,7 @@ fn resolve_group(
             break;
         }
         split_at_crossings(ents, &edges, crossings);
-        let mut set: BTreeSet<EdgeId> = BTreeSet::new();
-        for &f in faces {
-            for l in ents.faces[f].loops() {
-                set.extend(l.coedges.iter().map(|c| c.edge));
-            }
-        }
-        edges = set.into_iter().collect();
+        edges = group_edges(ents);
     }
     if !settled {
         return false;
@@ -807,16 +840,18 @@ fn steady_start(
 /// `TOL / 2` from `plane` onto it, so the faces made in the plane are flat whatever
 /// corner they start at (faces at a tiny angle along a long side can have a corner
 /// just out of the plane of a face they overlap): when they are within [`MERGE`] of
-/// it, no vertex comes within the tolerance of another or half of it of an edge, and
-/// every other face at them stays planar (turned to the plane through its corners
-/// when it has to). Returns whether it did (or nothing had to move).
+/// it, no vertex comes within the tolerance of another or half of it of an edge
+/// (except onto it, within an eighth of the tolerance and more than the tolerance from
+/// its ends: the edge is split there), and every other face at them stays planar
+/// (turned to the plane through its corners when it has to, else cut into planar
+/// parts, [`planar_parts`]). Returns whether it did (or nothing had to move).
 fn snap_into_plane(
     ents: &mut Entities,
     faces: &[FaceId],
     edges: &BTreeSet<EdgeId>,
     plane: &Plane,
 ) -> bool {
-    let mut moves: BTreeMap<crate::entities::VertexId, DVec3> = BTreeMap::new();
+    let mut moves: BTreeMap<VertexId, DVec3> = BTreeMap::new();
     for &e in edges {
         for v in [ents.edges[e].start, ents.edges[e].end] {
             let p = ents.pos(v);
@@ -845,21 +880,49 @@ fn snap_into_plane(
             return false;
         }
     }
-    let at = |v: crate::entities::VertexId| moves.get(&v).copied().unwrap_or(ents.pos(v));
-    // Nor onto an edge, nor an edge at them onto a vertex.
-    let clear = |v: crate::entities::VertexId, e: EdgeId| {
+    let at = |v: VertexId| moves.get(&v).copied().unwrap_or(ents.pos(v));
+    // Nor onto an edge, nor an edge at them onto a vertex, unless the vertex lands on
+    // the edge away from its ends: then the edge is split there (side splitting as on
+    // import; the two sides of a solid thinner than the tolerance meet that way).
+    let mut splits: BTreeMap<EdgeId, Vec<VertexId>> = BTreeMap::new();
+    let mut onto = |v: VertexId, e: EdgeId| {
         let (a, b) = (ents.edges[e].start, ents.edges[e].end);
-        v == a || v == b || point_segment(at(v), at(a), at(b)).0 > TOL / 2.0
+        if v == a || v == b {
+            return true;
+        }
+        let (d, t) = point_segment(at(v), at(a), at(b));
+        if d > TOL / 2.0 {
+            return true;
+        }
+        let len = at(a).distance(at(b));
+        // (Not when a face at the edge has the vertex already: it would fold onto
+        // itself.)
+        let at_face = ents.edges[e].faces.iter().any(|&f| {
+            ents.faces[f]
+                .loops()
+                .any(|l| l.coedges.iter().any(|&c| ents.coedge_ends(c).0 == v))
+        });
+        if d > TOL / 8.0 || t * len <= TOL || (1.0 - t) * len <= TOL || at_face {
+            return false;
+        }
+        let list = splits.entry(e).or_default();
+        if !list.contains(&v) {
+            list.push(v);
+        }
+        true
     };
     for (&v, &q) in &moves {
-        if !ents.edges_near(q, MERGE).into_iter().all(|e| clear(v, e)) {
-            return false;
+        for e in ents.edges_near(q, MERGE) {
+            if !onto(v, e) {
+                return false;
+            }
         }
         for &e in &ents.vertices[v].edges {
             let (a, b) = (at(ents.edges[e].start), at(ents.edges[e].end));
-            let near = ents.vertices_near_segment(a, b, MERGE);
-            if !near.into_iter().all(|u| clear(u, e)) {
-                return false;
+            for u in ents.vertices_near_segment(a, b, MERGE) {
+                if !onto(u, e) {
+                    return false;
+                }
             }
         }
     }
@@ -870,19 +933,34 @@ fn snap_into_plane(
             others.extend(ents.edges[e].faces.iter().filter(|f| !group.contains(f)));
         }
     }
+    // Faces at split edges get the splitting vertices as corners.
+    let mut extra: BTreeMap<FaceId, Vec<DVec3>> = BTreeMap::new();
+    for (&e, vs) in &splits {
+        for &f in &ents.edges[e].faces {
+            extra
+                .entry(f)
+                .or_default()
+                .extend(vs.iter().map(|&v| at(v)));
+            if !group.contains(&f) {
+                others.insert(f);
+            }
+        }
+    }
     // Other faces at moved vertices stay planar, turned to the plane through their
     // moved corners when they have to.
     let mut normals: Vec<(FaceId, DVec3)> = Vec::new();
+    let mut bent: Vec<(FaceId, Vec<PlanarPart>)> = Vec::new();
     for f in others {
         let face = &ents.faces[f];
         let first = at(ents.coedge_ends(face.outer.coedges[0]).0);
+        let extra = extra.get(&f).map_or(&[][..], |x| &x[..]);
         let flat = |normal: DVec3| {
             let own = Plane::new(normal, first);
             face.loops().all(|l| {
                 l.coedges
                     .iter()
                     .all(|&c| own.contains(at(ents.coedge_ends(c).0)))
-            })
+            }) && extra.iter().all(|&p| own.contains(p))
         };
         if flat(face.normal) {
             continue;
@@ -899,7 +977,12 @@ fn snap_into_plane(
             .normalize_or_zero();
         let n = if n.dot(face.normal) < 0.0 { -n } else { n };
         if n.dot(face.normal) < 0.9 || !flat(n) {
-            return false;
+            // Bent beyond the tolerance: split it into parts that stay planar.
+            let Some(parts) = planar_parts(ents, f, &at) else {
+                return false;
+            };
+            bent.push((f, parts));
+            continue;
         }
         normals.push((f, n));
     }
@@ -908,7 +991,177 @@ fn snap_into_plane(
     for (f, n) in normals {
         ents.faces[f].normal = n;
     }
+    for (f, parts) in bent {
+        let Some(face) = ents.remove_face(f) else {
+            continue;
+        };
+        for (vs, normal) in parts {
+            let outer = loop_through(ents, &vs);
+            ents.add_raw_face(outer, Vec::new(), normal, face.attrs.clone());
+        }
+    }
+    for (e, mut vs) in splits {
+        let Some(edge) = ents.edges.get(e) else {
+            continue;
+        };
+        let (a, b) = (ents.pos(edge.start), ents.pos(edge.end));
+        let t = |v: VertexId| (ents.pos(v) - a).dot(b - a);
+        vs.sort_by(|&x, &y| t(x).total_cmp(&t(y)).then(x.cmp(&y)));
+        let mut rest = e;
+        for v in vs {
+            let Some(edge) = ents.edges.get(rest) else {
+                break;
+            };
+            if v == edge.start || v == edge.end {
+                continue;
+            }
+            let (first, next) = ents.split_edge(rest, v);
+            use_existing_edge(ents, first);
+            rest = use_existing_edge(ents, next);
+        }
+    }
     true
+}
+
+/// A planar part of a face: its corners and normal ([`planar_parts`]).
+type PlanarPart = (Vec<VertexId>, DVec3);
+
+/// Face `f` (without holes) cut into parts that are planar with corners at `at`:
+/// ear-clipped in its plane, then triangles joined again across their diagonals while
+/// the part stays within half the tolerance of a plane. Each part comes with its
+/// normal (on `f`'s side). `None` when `f` has holes, a part comes out thinner than
+/// the tolerance, or a new side passes within half of it of a corner.
+fn planar_parts(
+    ents: &Entities,
+    f: FaceId,
+    at: &dyn Fn(VertexId) -> DVec3,
+) -> Option<Vec<PlanarPart>> {
+    let face = &ents.faces[f];
+    if !face.holes.is_empty() {
+        return None;
+    }
+    let vs: Vec<VertexId> = face
+        .outer
+        .coedges
+        .iter()
+        .map(|&c| ents.coedge_ends(c).0)
+        .collect();
+    let pts: Vec<DVec3> = vs.iter().map(|&v| ents.pos(v)).collect();
+    let plane = Plane::new(face.normal, pts[0]);
+    let tris = crate::mesh_import::polygon_triangles(&pts, &plane);
+    let normal_of = |part: &[usize]| {
+        let n = (0..part.len())
+            .map(|k| at(vs[part[k]]).cross(at(vs[part[(k + 1) % part.len()]])))
+            .sum::<DVec3>()
+            .normalize_or_zero();
+        if n.dot(face.normal) < 0.0 { -n } else { n }
+    };
+    let flat = |part: &[usize]| {
+        let n = normal_of(part);
+        let (lo, hi) = part
+            .iter()
+            .map(|&k| n.dot(at(vs[k])))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), h| {
+                (lo.min(h), hi.max(h))
+            });
+        n.dot(face.normal) >= 0.9 && hi - lo <= TOL / 2.0
+    };
+    let area2 = |part: &[usize]| {
+        let n = normal_of(part);
+        let own = Plane::new(n, at(vs[part[0]]));
+        let poly: Vec<DVec2> = part.iter().map(|&k| own.project(at(vs[k]))).collect();
+        signed_area2(&poly)
+    };
+    let mut parts: Vec<Vec<usize>> = tris.iter().map(|t| t.to_vec()).collect();
+    // Join parts across a shared side (smallest first, so slivers of collinear
+    // corners go first), while the result is flat and simple.
+    loop {
+        let mut order: Vec<usize> = (0..parts.len()).collect();
+        order.sort_by(|&a, &b| {
+            area2(&parts[a])
+                .abs()
+                .total_cmp(&area2(&parts[b]).abs())
+                .then(a.cmp(&b))
+        });
+        let mut joined = None;
+        'search: for &a in &order {
+            for b in 0..parts.len() {
+                if a == b {
+                    continue;
+                }
+                let (pa, pb) = (&parts[a], &parts[b]);
+                for i in 0..pa.len() {
+                    let (x, y) = (pa[i], pa[(i + 1) % pa.len()]);
+                    let Some(j) =
+                        (0..pb.len()).find(|&j| pb[j] == y && pb[(j + 1) % pb.len()] == x)
+                    else {
+                        continue;
+                    };
+                    // pa from y round to x, then pb from x round to y (ends left out).
+                    let mut m: Vec<usize> =
+                        (0..pa.len()).map(|k| pa[(i + 1 + k) % pa.len()]).collect();
+                    m.extend((1..pb.len() - 1).map(|k| pb[(j + 1 + k) % pb.len()]));
+                    let mut seen = m.clone();
+                    seen.sort_unstable();
+                    seen.dedup();
+                    if seen.len() == m.len() && flat(&m) {
+                        joined = Some((a, b, m));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let Some((a, b, m)) = joined else { break };
+        parts[a] = m;
+        parts.remove(b);
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let corners: Vec<DVec3> = vs.iter().map(|&v| at(v)).collect();
+    let n = vs.len();
+    let mut out = Vec::new();
+    for part in &parts {
+        if !flat(part) || area2(part) < TOL * TOL {
+            return None;
+        }
+        // New sides (diagonals) clear of every other corner, and of every vertex and
+        // edge of the mesh around them (where they will be once moved).
+        for k in 0..part.len() {
+            let (a, b) = (part[k], part[(k + 1) % part.len()]);
+            if (a + 1) % n == b || (b + 1) % n == a {
+                continue;
+            }
+            let near = (0..n).any(|c| {
+                c != a && c != b && point_segment(corners[c], corners[a], corners[b]).0 <= TOL / 2.0
+            });
+            if near || !side_clear(ents, vs[a], vs[b], at) {
+                return None;
+            }
+        }
+        out.push((part.iter().map(|&k| vs[k]).collect(), normal_of(part)));
+    }
+    Some(out)
+}
+
+/// Whether a new side from `a` to `b` (with corners at `at`) keeps more than half the
+/// tolerance from every other vertex and from every edge not at its ends, so cutting
+/// a face along it makes no crossing.
+fn side_clear(ents: &Entities, a: VertexId, b: VertexId, at: &dyn Fn(VertexId) -> DVec3) -> bool {
+    let (pa, pb) = (at(a), at(b));
+    // (The grids hold the corners before they move, by at most [`MERGE`].)
+    let reach = MERGE + TOL;
+    let (qa, qb) = (ents.pos(a), ents.pos(b));
+    let vertices_clear = ents
+        .vertices_near_segment(qa, qb, reach)
+        .into_iter()
+        .all(|v| v == a || v == b || point_segment(at(v), pa, pb).0 > TOL / 2.0);
+    vertices_clear
+        && ents.edges_near_segment(qa, qb, reach).into_iter().all(|e| {
+            let (s, t) = (ents.edges[e].start, ents.edges[e].end);
+            [s, t].iter().any(|v| *v == a || *v == b)
+                || segment_segment(pa, pb, at(s), at(t)).is_none_or(|(d, _, _)| d > TOL / 2.0)
+        })
 }
 
 /// Whether faces of a coplanar group may overlap (else they surely do not, provided
@@ -929,7 +1182,7 @@ fn may_overlap(ents: &Entities, faces: &[FaceId], boxes: &[(DVec3, DVec3)], plan
             }
         }
     }
-    let mut vertices: BTreeSet<crate::entities::VertexId> = BTreeSet::new();
+    let mut vertices: BTreeSet<VertexId> = BTreeSet::new();
     for &e in ways.keys() {
         let (a, b) = (ents.edges[e].start, ents.edges[e].end);
         vertices.extend([a, b]);
@@ -970,7 +1223,7 @@ fn edges_crossing_in_plane(
     edges: &[EdgeId],
     plane: &Plane,
 ) -> Vec<(usize, usize, f64, f64)> {
-    let ends: Vec<(crate::entities::VertexId, crate::entities::VertexId)> = edges
+    let ends: Vec<(VertexId, VertexId)> = edges
         .iter()
         .map(|&e| (ents.edges[e].start, ents.edges[e].end))
         .collect();
@@ -1020,7 +1273,7 @@ fn split_at_crossings(
         let (a, b) = (ents.pos(ents.edges[e].start), ents.pos(ents.edges[e].end));
         a + (b - a) * t
     };
-    let mut splits: BTreeMap<usize, Vec<(f64, crate::entities::VertexId)>> = BTreeMap::new();
+    let mut splits: BTreeMap<usize, Vec<(f64, VertexId)>> = BTreeMap::new();
     for (i, j, s, t) in crossings {
         let p = (at(ents, edges[i], s) + at(ents, edges[j], t)) / 2.0;
         // (All of `edges` exist here: nothing is split before every point is known.)
@@ -1375,5 +1628,156 @@ mod tests {
         let ents = import(&m, false);
         assert!((area(&ents) - 10_000.0).abs() < 1e-3, "{}", area(&ents));
         assert!(ents.vertices.values().all(|v| v.pos.z.abs() < 1e-9));
+    }
+
+    /// Part of a window frame of S_Office (ThatOpen web-ifc's test file, inches): the
+    /// two sides of a slab thinner than the tolerance overlap with corners 0.0007 in.
+    /// out of each other's plane. Moving them into the plane brings a corner onto a
+    /// side of the slab (which is split there) and bends a face of the slab's rim
+    /// beyond the tolerance (which is cut into planar parts).
+    #[test]
+    fn thin_slab_sides_snap_with_split_sides_and_faces() {
+        let m = mesh(
+            &[
+                [-0.7191689008031495, 4.8602434233858265, 16.793034881850396],
+                [-0.7097855227874016, 4.845346984055118, 16.676692446811025],
+                [-0.7205093833779528, 4.830535667244094, 16.56101482570866],
+                [-0.7486595174251968, 4.874629127637795, 16.905388433385827],
+                [-0.7486595174251968, 4.7509433601968505, 16.92122511011811],
+                [-0.7191689008031495, 4.736557655905512, 16.808871558543306],
+                [-0.7191689008031495, 4.8602434233858265, 16.793034881850396],
+                [-0.7191689008031495, 4.8602434233858265, 16.793034881850396],
+                [-0.7191689008031495, 4.736557655905512, 16.808871558543306],
+                [-0.7097855227874016, 4.721661216574803, 16.692529123543306],
+                [-0.7097855227874016, 4.845346984055118, 16.676692446811025],
+                [-0.7097855227874016, 4.845346984055118, 16.676692446811025],
+                [-0.7097855227874016, 4.721661216574803, 16.692529123543306],
+                [-0.7205093833779528, 4.706849899763779, 16.576851502440945],
+                [-0.7205093833779528, 4.830535667244094, 16.56101482570866],
+                [-0.7205093833779528, 4.830535667244094, 16.56101482570866],
+                [-0.7205093833779528, 4.706849899763779, 16.576851502440945],
+                [-0.7513404825748031, 4.6925493179921265, 16.46516276480315],
+                [-0.7513404825748031, 4.816235085511811, 16.449326088070865],
+                [-0.7191689008031495, 4.8591360146063, 16.78438593055118],
+                [-0.7191689008031495, 4.6607555425590546, 16.809786487677165],
+                [-0.7486595174251968, 4.675141246811024, 16.922140039212596],
+                [-0.7486595174251968, 4.873521718897638, 16.896739482086613],
+                [-0.7097855227874016, 4.844239575275591, 16.66804349551181],
+                [-0.7097855227874016, 4.6458591032283465, 16.693444052637794],
+                [-0.7191689008031495, 4.6607555425590546, 16.809786487677165],
+                [-0.7191689008031495, 4.8591360146063, 16.78438593055118],
+                [-0.7205093833779528, 4.829428258464567, 16.55236587440945],
+                [-0.7205093833779528, 4.631047786377953, 16.577766431535434],
+                [-0.7097855227874016, 4.6458591032283465, 16.693444052637794],
+                [-0.7097855227874016, 4.844239575275591, 16.66804349551181],
+                [-0.7513404825748031, 4.815127676692914, 16.440677136771654],
+                [-0.7513404825748031, 4.616747204606299, 16.46607769389764],
+                [-0.7205093833779528, 4.631047786377953, 16.577766431535434],
+                [-0.7205093833779528, 4.829428258464567, 16.55236587440945],
+            ],
+            &[
+                (&[0, 1, 2], None),
+                (&[3, 4, 5, 6], None),
+                (&[7, 8, 9, 10], None),
+                (&[11, 12, 13, 14], None),
+                (&[15, 16, 17, 18], None),
+                (&[19, 20, 21, 22], None),
+                (&[23, 24, 25, 26], None),
+                (&[27, 28, 29, 30], None),
+                (&[31, 32, 33, 34], None),
+            ],
+        );
+        for merge in [false, true] {
+            import(&m, merge);
+        }
+        // Three of them need only the side splitting.
+        let mut m3 = m.clone();
+        m3.polygons = vec![
+            m.polygons[0].clone(),
+            m.polygons[3].clone(),
+            m.polygons[7].clone(),
+        ];
+        import(&m3, false);
+    }
+
+    /// Part of a mesh of Ifc4_Revit_ARC (buildingSMART sample, inches): moving corners into a plane
+    /// bends a face that would be cut into planar parts along a side that crosses an
+    /// edge of a face next to it; the snap is not done then.
+    #[test]
+    fn bent_face_parts_cross_no_edges() {
+        let m = mesh(
+            &[
+                [-0.7146691747944488, 1.2378433213474134, 0.6148304066461495],
+                [-0.7500489660618228, 0.6955096948131929, 0.6214071011403425],
+                [-0.8454627114327127, 1.1070497847091536, 0.6148304066461495],
+                [-0.7500489660618228, 0.6955096948131929, 0.6214071011403425],
+                [-0.585619293929, 0.7128868764045039, 0.6227865869984095],
+                [
+                    -0.5360225824643543,
+                    -5.08941287089811e-13,
+                    0.6267419058791457,
+                ],
+                [-0.40355764165504326, 0.7220804191310787, 0.6240088681814921],
+                [
+                    -0.35734838830948423,
+                    -6.796727457977796e-13,
+                    0.6281453506301024,
+                ],
+                [-0.585619293929, 0.7128868764045039, 0.6227865869984095],
+                [-0.7500489660618228, 0.6955096948131929, 0.6214071011403425],
+                [-0.8704631124376221, 0.6008534838732834, 0.6209058549057008],
+                [-0.8454627114327127, 1.1070497847091536, 0.6148304066461495],
+                [-0.585619293929, 0.7128868764045039, 0.6227865869984095],
+                [-0.7146691747944488, 1.2378433213474134, 0.6148304066461495],
+                [-0.5360018810957756, 1.285717078407827, 0.6148304066461495],
+                [-0.4386154682883346, 0.7640316197730669, 0.6233304032687599],
+                [-0.5360018810960275, 1.285717078408437, 0.614830406646126],
+                [-0.6051851751194173, 0.630302528986315, 0.6234225697976772],
+                [-0.6051851751194173, 0.630302528986315, 0.6234225697976772],
+                [-0.5360018810960275, 1.285717078408437, 0.614830406646126],
+                [-0.7146691747947874, 1.237843321348, 0.6148304066461063],
+                [-0.6051851751194173, 0.630302528986315, 0.6234225697976772],
+                [
+                    -0.5360225824648582,
+                    -3.403261652248622e-13,
+                    0.6267419058791457,
+                ],
+                [
+                    -0.44668548538733854,
+                    -3.413843336463756e-13,
+                    0.627443628254622,
+                ],
+                [
+                    -0.3573483883098213,
+                    -3.4244250206788856e-13,
+                    0.6281453506301024,
+                ],
+                [-0.6051851751194173, 0.630302528986315, 0.6234225697976772],
+                [
+                    -0.3573483883098213,
+                    -3.4244250206788856e-13,
+                    0.6281453506301024,
+                ],
+                [-0.4386154682883346, 0.7640316197730669, 0.6233304032687599],
+                [-0.7500489660621614, 0.6955096948139173, 0.6214071011403425],
+                [-0.6051851751194173, 0.630302528986315, 0.6234225697976772],
+                [-0.7146691747947874, 1.237843321348, 0.6148304066461063],
+            ],
+            &[
+                (&[0, 1, 2], None),
+                (&[3, 4, 5], None),
+                (&[6, 7, 8], None),
+                (&[9, 10, 11], None),
+                (&[12, 13, 14], None),
+                (&[15, 16, 17], None),
+                (&[18, 19, 20], None),
+                (&[21, 22, 23, 24], None),
+                (&[25, 26, 27], None),
+                (&[28, 29, 30], None),
+            ],
+        );
+        for merge in [false, true] {
+            import(&m, merge);
+        }
     }
 }

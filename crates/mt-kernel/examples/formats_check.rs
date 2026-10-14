@@ -5,17 +5,19 @@
 //! dialog defaults them) with coplanar
 //! faces merged; the result is exported as OBJ, STL, COLLADA, FBX, PLY, 3MF, VRML,
 //! KMZ, 3DS and USDZ into `OUT_DIR/<stem>/`, and the readable exports are imported
-//! again. Faces,
-//! vertices, materials and the bounding box are printed for each step; a re-import
-//! whose area, bounding box, material or texture count differs is marked `DIFF`
-//! (merged face counts may differ: triangles of slightly non-planar polygons do not
-//! merge back).
+//! again. Faces, vertices, materials and the bounding box are printed for each step; a
+//! re-import whose area (within 1e-4, relative), bounding box, material or texture
+//! count differs is marked `DIFF` (merged face counts may differ: triangles of slightly
+//! non-planar polygons do not merge back).
 //!
 //! The model is also written as `.glb` and `.gltf` and read back: their area must match
 //! the import's within 1e-6 (relative), else marked `DIFF` (zero-area triangles may drop
-//! out). Each import is also checked as kernel geometry (`valid` / `INVALID`, or
-//! `unchecked` for huge models): area lost on export comes from faces of invalid
-//! imports, whatever the format.
+//! out). Both area limits are widened by the area of the exported triangles that
+//! re-import may heal away (printed for glTF as "at tolerance"): triangles over the
+//! same corners as an earlier one, and slivers thinner than the tolerance, which models
+//! a few hundred tolerances across are largely made of. Each import is also checked as
+//! kernel geometry (`valid` / `INVALID`, or `unchecked` for huge models): area lost on
+//! export comes from faces of invalid imports, whatever the format.
 
 use std::path::{Path, PathBuf};
 
@@ -35,6 +37,8 @@ struct Summary {
     unpainted: bool,
     triangles: usize,
     area: f64,
+    /// Area of triangles at the tolerance (see [`tolerance_area`]).
+    tol_area: f64,
     min: DVec3,
     max: DVec3,
 }
@@ -78,6 +82,28 @@ fn import(path: &Path, inches_per_unit: Option<f64>) -> Result<(Model, Summary),
     Ok((model, s))
 }
 
+/// The area of the exported triangles that re-import may legitimately heal away: a
+/// triangle over the same corners as an earlier one (re-import welds the two into one
+/// face; the faces they came from overlap where they are within the tolerance of each
+/// other's plane), and a sliver thinner than the tolerance (re-import drops it, or
+/// absorbs it into the polygon across its long side). Models a few hundred
+/// tolerances across are made of little else.
+fn tolerance_area(tris: &[mesh_export::Triangle]) -> f64 {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total = 0.0;
+    for t in tris {
+        let [a, b, c] = t.points;
+        let area = (b - a).cross(c - a).length() / 2.0;
+        let longest = a.distance(b).max(b.distance(c)).max(c.distance(a));
+        let mut key = t.points.map(|p| p.to_array().map(f64::to_bits));
+        key.sort_unstable();
+        if !seen.insert(key) || 2.0 * area <= mt_kernel::TOL * longest {
+            total += area;
+        }
+    }
+    total
+}
+
 fn summary(model: &Model, polygons: usize) -> Summary {
     let ents = &model.root;
     let tris = mesh_export::triangles(model);
@@ -90,6 +116,7 @@ fn summary(model: &Model, polygons: usize) -> Summary {
                 / 2.0
         })
         .sum();
+    let tol_area = tolerance_area(&tris);
     let (mut min, mut max) = if ents.vertices.is_empty() {
         (DVec3::ZERO, DVec3::ZERO)
     } else {
@@ -116,6 +143,7 @@ fn summary(model: &Model, polygons: usize) -> Summary {
         unpainted: ents.faces.values().any(|f| f.attrs.material.is_none()),
         triangles: tris.len(),
         area,
+        tol_area,
         min,
         max,
     }
@@ -264,14 +292,15 @@ fn main() {
             match mt_kernel::gltf_io::import(&bytes, &|_: &str| None, true) {
                 Ok(m) => {
                     let s = summary(&m, 0);
-                    let ok = (s.area - s0.area).abs() <= 1e-6 * s0.area.max(1e-9);
+                    let ok = (s.area - s0.area).abs() <= 1e-6 * s0.area.max(1e-9) + s0.tol_area;
                     if !ok {
                         diffs += 1;
                     }
                     println!(
-                        "   {} area rel {:+.1e} {}",
+                        "   {} area rel {:+.1e} (at tolerance {:.1e}) {}",
                         line(label, &s),
                         (s.area - s0.area) / s0.area.max(1e-9),
+                        s0.tol_area / s0.area.max(1e-9),
                         if ok { "" } else { "DIFF" }
                     );
                 }
@@ -299,7 +328,8 @@ fn main() {
                     };
                     let tex_ok =
                         !matches!(label, "obj" | "fbx" | "3mf") || s.textured == s0.textured;
-                    let area_ok = (s.area - s0.area).abs() <= 1e-4 * s0.area.max(1e-9);
+                    let area_ok =
+                        (s.area - s0.area).abs() <= 1e-4 * s0.area.max(1e-9) + s0.tol_area;
                     // Triangle counts may differ by slivers that weld away.
                     let ok = same_box && area_ok && mats_ok && tex_ok;
                     if !ok {
