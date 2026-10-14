@@ -14,3 +14,6 @@ Changes since 0.1.4, grouped by area (each area under its own `##` heading).
 
 - Export: OBJ, STL, PLY, 3MF, FBX and 3DS now default to the unit their import assumes, so a model exported and imported back keeps its size (STL came back 25.4x too small).
 - Import: a glTF model is held by the low corner of its bounding box while placing it, so it lands where you click instead of as far away as it was from its own origin.
+## Tools
+
+- **Image Igloo:** Ctrl + arrow keys (Option + arrows on the Mac) turn among the photos taken from about the same spot, such as one station's panorama; Shift + arrow keys go to the next or previous scene of a photo series (scenes named alike apart from a trailing number). Matched photos are still not saved in .skp files.

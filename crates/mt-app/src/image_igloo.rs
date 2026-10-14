@@ -17,9 +17,29 @@
 //! highlighted photo is the one nearest the view's center; arrows go to the nearest
 //! photo in that screen direction; Enter or a double click on a frame opens the
 //! scene (`scene_activate`, which shows the photo); Esc or the command again leaves.
-//! Not done: Ctrl / Option + arrows (photos from nearly the same spot) and Shift +
-//! arrows (the next scene in a series). Frame distance, pull-back, looks and the
-//! arrow rule are guesses (unverified).
+//!
+//! The help article (search summaries again) [doc]: "Option (Mac) or Control
+//! (Windows) + Arrow keys" navigate "within a group of photos taken from nearly the
+//! same location", for example Trimble Vision imagery from one station; "Shift +
+//! Arrow keys" select "the next scene in the photo series". The key is the
+//! [`Role::Copy`] key of `tool_mods` (Ctrl on Windows and Linux, Option on the Mac).
+//! Meshtard ([`hop`]): Ctrl / Option + arrows go among the photos whose camera is
+//! within [`SAME_SPOT`] of the highlighted one's distance to the model origin
+//! ([`same_spot`]): Left / Right turn to the photo with the next smaller turn that
+//! way (wrapping round a panorama), Up / Down to the nearest photo looking higher /
+//! lower. Shift + arrows step through a series ([`series_step`]): the photo scenes
+//! whose names agree once a trailing number (and file extension) is dropped, in
+//! scene order, Right / Down forward and Left / Up back, wrapping; a photo in no
+//! such series steps through all photo scenes. What makes a series in SketchUp, the
+//! same-spot tolerance and the turn order are guesses (unverified). Other modifier
+//! combinations do nothing.
+//!
+//! Matched photos are not saved in `.skp`, so a reopened file has no igloo: the
+//! v17 writer (`mt_kernel::export`) writes no scenes at all, and the reader decodes
+//! only `CViewPage` records whose capture flags are the baseline or hidden tags
+//! (`mt_skp::legacy`, `PAGE_ALLOWED_FLAGS`); where a page keeps its photo and the
+//! solved camera is not known (`spec/parity/LEFTOVERS.md` item 1). Frame distance,
+//! pull-back, looks and the arrow rule are guesses (unverified).
 
 use std::sync::Arc;
 
@@ -29,6 +49,7 @@ use mt_kernel::photo_match::{self, PhotoCamera};
 use mt_render::Camera;
 
 use crate::App;
+use crate::tool_mods::{Keys, Platform, Role};
 
 /// Where a photo's frame is drawn: this fraction of its camera's distance to the
 /// model origin, in front of the camera.
@@ -36,6 +57,9 @@ pub(crate) const FRAME_AT: f64 = 0.3;
 /// The view on a photo is pulled back behind its camera by this fraction of that
 /// distance ("zooming out a bit").
 pub(crate) const BACK: f64 = 0.5;
+/// Photos whose cameras are closer than this fraction of the highlighted camera's
+/// distance to the model origin count as taken from the same spot (unverified).
+pub(crate) const SAME_SPOT: f64 = 0.05;
 /// Longest side of a photo's texture, in pixels.
 const THUMB: u32 = 512;
 /// Frames are drawn as this many cells per side (affine texture mapping per cell).
@@ -133,6 +157,121 @@ pub(crate) fn neighbor(
         .map(|(i, _)| i)
 }
 
+/// What an arrow key does in the igloo, by the modifiers held with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hop {
+    /// No modifier: the nearest photo on that side of the screen ([`neighbor`]).
+    Near,
+    /// Ctrl / Option: among the photos from the same spot ([`same_spot`]).
+    SameSpot,
+    /// Shift: the next scene of the series ([`series_step`]).
+    Series,
+}
+
+/// The arrow keys' meaning with `keys` held on `platform`; `None` for other
+/// combinations (they do nothing).
+pub(crate) fn hop(platform: Platform, keys: Keys) -> Option<Hop> {
+    let held = [keys.ctrl, keys.alt, keys.cmd, keys.shift];
+    match held.iter().filter(|k| **k).count() {
+        0 => Some(Hop::Near),
+        1 if keys.shift => Some(Hop::Series),
+        1 if platform.held(keys, Role::Copy) => Some(Hop::SameSpot),
+        _ => None,
+    }
+}
+
+/// Heading of a view direction about the blue axis (radians, counterclockwise from
+/// red seen from above) and its pitch above the horizon.
+fn heading_pitch(f: DVec3) -> (f64, f64) {
+    (f.y.atan2(f.x), f.z.clamp(-1.0, 1.0).asin())
+}
+
+/// The photo after `from` among those taken from the same spot, in screen
+/// direction `dir` (x right, y down): Left / Right the smallest turn that way about
+/// the blue axis (wrapping, so a panorama goes round), Up / Down the photo nearest in
+/// direction among those looking higher / lower.
+pub(crate) fn same_spot(cams: &[PhotoCamera], from: usize, dir: DVec2) -> Option<usize> {
+    use std::f64::consts::TAU;
+    let here = cams.get(from)?;
+    let near = SAME_SPOT * reach(here);
+    let (h0, p0) = heading_pitch(here.forward());
+    let group = (cams.iter().enumerate())
+        .filter(move |(i, c)| *i != from && c.eye().distance(here.eye()) <= near);
+    const EPS: f64 = 1e-6;
+    if dir.x.abs() >= dir.y.abs() {
+        // Turning right is clockwise seen from above.
+        let sign = if dir.x > 0.0 { -1.0 } else { 1.0 };
+        // The smallest turn; among photos turned as far, the one pitched nearest.
+        group
+            .filter_map(|(i, c)| {
+                let (h, p) = heading_pitch(c.forward());
+                let turn = (sign * (h - h0)).rem_euclid(TAU);
+                (turn > EPS && turn < TAU - EPS).then_some((i, turn, (p - p0).abs()))
+            })
+            .min_by(|a, b| {
+                if (a.1 - b.1).abs() < EPS {
+                    a.2.total_cmp(&b.2)
+                } else {
+                    a.1.total_cmp(&b.1)
+                }
+            })
+            .map(|(i, ..)| i)
+    } else {
+        let up = dir.y < 0.0;
+        group
+            .filter(|(_, c)| {
+                let p = heading_pitch(c.forward()).1;
+                if up { p > p0 + EPS } else { p < p0 - EPS }
+            })
+            .map(|(i, c)| (i, c.forward().angle_between(here.forward())))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+}
+
+/// A scene name's series: the name without a file extension, a trailing number and
+/// the separators before it ("Station 2 - 07.jpg" and "Station 2 - 08.jpg" are
+/// both "Station 2").
+pub(crate) fn series_of(name: &str) -> &str {
+    let name = match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && (1..=4).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphabetic()) =>
+        {
+            stem
+        }
+        _ => name,
+    };
+    name.trim_end_matches(|c: char| c.is_ascii_digit())
+        .trim_end_matches(|c: char| c.is_whitespace() || "-_.#(".contains(c))
+}
+
+/// The next (`forward`) or previous photo of `from`'s series, given the photos'
+/// scene names in scene order, wrapping; a photo alone in its series steps through
+/// all of them.
+pub(crate) fn series_step(names: &[&str], from: usize, forward: bool) -> Option<usize> {
+    let key = series_of(names.get(from)?);
+    let mut group: Vec<usize> = (0..names.len())
+        .filter(|i| series_of(names[*i]) == key)
+        .collect();
+    if group.len() < 2 {
+        group = (0..names.len()).collect();
+    }
+    if group.len() < 2 {
+        return None;
+    }
+    let at = group.iter().position(|i| *i == from)?;
+    let n = group.len();
+    Some(
+        group[if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        }],
+    )
+}
+
 /// The scenes with a matched photo whose camera solves, in scene order.
 fn scene_photos(app: &App) -> Vec<Photo> {
     let Some(doc) = &app.document else {
@@ -188,11 +327,12 @@ impl App {
             .map_or(0, |(i, _)| i);
         self.fly_to(view_on(&cams[hot], self.viewport_px));
         self.match_photo.igloo = Some(Igloo { photos, hot });
-        self.message = Some(
+        self.message = Some(format!(
             "Image Igloo: orbit to a photo, Enter or double-click opens its scene; \
-             arrows go to the next photo; Esc leaves."
-                .into(),
-        );
+             arrows go to the next photo ({} + arrows: same spot, Shift + arrows: \
+             series); Esc leaves.",
+            Platform::current().key(Role::Copy).name()
+        ));
     }
 
     fn fly_to(&mut self, to: Camera) {
@@ -242,18 +382,32 @@ impl App {
         let to_px = |p: egui::Pos2| {
             DVec2::new(f64::from(p.x - rect.min.x), f64::from(p.y - rect.min.y)) * ppp
         };
-        let (escape, enter, arrows) = ui.input_mut(|i| {
+        let (escape, enter, arrow) = ui.input_mut(|i| {
             let mut k = |key| i.consume_key(egui::Modifiers::NONE, key);
-            (
-                k(egui::Key::Escape),
-                k(egui::Key::Enter),
-                [
-                    (k(egui::Key::ArrowLeft), DVec2::NEG_X),
-                    (k(egui::Key::ArrowRight), DVec2::X),
-                    (k(egui::Key::ArrowUp), DVec2::NEG_Y),
-                    (k(egui::Key::ArrowDown), DVec2::Y),
-                ],
-            )
+            let (escape, enter) = (k(egui::Key::Escape), k(egui::Key::Enter));
+            // The first arrow press with any modifiers; every arrow press is taken.
+            let mut arrow = None;
+            i.events.retain(|e| {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = e
+                else {
+                    return true;
+                };
+                let dir = match key {
+                    egui::Key::ArrowLeft => DVec2::NEG_X,
+                    egui::Key::ArrowRight => DVec2::X,
+                    egui::Key::ArrowUp => DVec2::NEG_Y,
+                    egui::Key::ArrowDown => DVec2::Y,
+                    _ => return true,
+                };
+                arrow.get_or_insert((dir, *modifiers));
+                false
+            });
+            (escape, enter, arrow)
         });
         if escape {
             self.image_igloo_leave();
@@ -298,8 +452,19 @@ impl App {
             self.scene_activate(page);
             return true;
         }
-        let next = (arrows.iter().find(|(pressed, _)| *pressed))
-            .and_then(|(_, dir)| neighbor(&self.camera, &cams, igloo.hot, *dir, viewport_px));
+        let next = arrow.and_then(
+            |(dir, m)| match hop(Platform::current(), Keys::from_egui(m))? {
+                Hop::Near => neighbor(&self.camera, &cams, igloo.hot, dir, viewport_px),
+                Hop::SameSpot => same_spot(&cams, igloo.hot, dir),
+                Hop::Series => {
+                    let doc = self.document.as_ref()?;
+                    let names: Vec<&str> = (igloo.photos.iter())
+                        .map(|p| doc.model.pages[p.page].name.as_str())
+                        .collect();
+                    series_step(&names, igloo.hot, dir.x + dir.y > 0.0)
+                }
+            },
+        );
         if let Some(n) = next {
             igloo.hot = n;
             self.fly_to(view_on(&cams[n], viewport_px));
@@ -477,6 +642,115 @@ mod tests {
         // The far photo is seen above the view's center, nothing below.
         assert_eq!(neighbor(&v, &cams, 0, DVec2::NEG_Y, VP), Some(2));
         assert_eq!(neighbor(&v, &cams, 0, DVec2::Y, VP), None);
+    }
+
+    /// A camera at `eye` looking along heading `deg` (degrees from red,
+    /// counterclockwise) and pitch `pitch` (degrees up).
+    fn looking(eye: DVec3, deg: f64, pitch: f64) -> PhotoCamera {
+        let (h, p) = (deg.to_radians(), pitch.to_radians());
+        let f = DVec3::new(h.cos() * p.cos(), h.sin() * p.cos(), p.sin());
+        let right = f.cross(DVec3::Z).normalize();
+        let down = f.cross(right);
+        let rotation = DMat3::from_cols(right, down, f).transpose();
+        PhotoCamera {
+            rotation,
+            translation: -(rotation * eye),
+            focal: 1000.0,
+            principal: DVec2::new(500.0, 375.0),
+            size: DVec2::new(1000.0, 750.0),
+        }
+    }
+
+    const NO: Keys = Keys {
+        ctrl: false,
+        alt: false,
+        cmd: false,
+        shift: false,
+    };
+
+    #[test]
+    fn modifiers_choose_the_hop() {
+        let ctrl = Keys { ctrl: true, ..NO };
+        let alt = Keys { alt: true, ..NO };
+        let cmd = Keys { cmd: true, ..NO };
+        let shift = Keys { shift: true, ..NO };
+        for p in [Platform::Pc, Platform::Mac] {
+            assert_eq!(hop(p, NO), Some(Hop::Near));
+            assert_eq!(hop(p, shift), Some(Hop::Series));
+            assert_eq!(
+                hop(
+                    p,
+                    Keys {
+                        ctrl: true,
+                        ..shift
+                    }
+                ),
+                None
+            );
+            assert_eq!(hop(p, cmd), None);
+        }
+        // Control on Windows and Linux, Option on the Mac (help article).
+        assert_eq!(hop(Platform::Pc, ctrl), Some(Hop::SameSpot));
+        assert_eq!(hop(Platform::Pc, alt), None);
+        assert_eq!(hop(Platform::Mac, alt), Some(Hop::SameSpot));
+        assert_eq!(hop(Platform::Mac, ctrl), None);
+    }
+
+    #[test]
+    fn same_spot_turns_round_a_station() {
+        // A station of four photos a quarter turn apart, one looking up, and a photo
+        // from elsewhere looking the same way as the first.
+        let at = DVec3::new(300.0, 0.0, 60.0);
+        let mut cams: Vec<PhotoCamera> = [180.0, 90.0, 0.0, 270.0]
+            .map(|h| looking(at, h, 0.0))
+            .to_vec();
+        cams.push(looking(at + DVec3::new(1.0, 2.0, 0.0), 180.0, 30.0)); // 4: up
+        cams.push(looking(DVec3::new(600.0, 0.0, 60.0), 180.0, 0.0)); // 5: far
+        // Right turns clockwise seen from above: 180 -> 90 -> 0 -> 270 -> 180.
+        assert_eq!(same_spot(&cams, 0, DVec2::X), Some(1));
+        assert_eq!(same_spot(&cams, 1, DVec2::X), Some(2));
+        assert_eq!(same_spot(&cams, 2, DVec2::X), Some(3));
+        assert_eq!(same_spot(&cams, 3, DVec2::X), Some(0));
+        assert_eq!(same_spot(&cams, 0, DVec2::NEG_X), Some(3));
+        assert_eq!(same_spot(&cams, 2, DVec2::NEG_X), Some(1));
+        // Up goes to the photo looking higher, and back down.
+        assert_eq!(same_spot(&cams, 0, DVec2::NEG_Y), Some(4));
+        assert_eq!(same_spot(&cams, 4, DVec2::Y), Some(0));
+        assert_eq!(same_spot(&cams, 1, DVec2::Y), None);
+        // The far photo has no other photo from its spot.
+        for d in [DVec2::X, DVec2::NEG_X, DVec2::Y, DVec2::NEG_Y] {
+            assert_eq!(same_spot(&cams, 5, d), None);
+        }
+        // The plain arrows' ring has no two photos from one spot.
+        assert_eq!(same_spot(&ring(), 0, DVec2::X), None);
+    }
+
+    #[test]
+    fn series_names() {
+        assert_eq!(series_of("Station 2 - 07.jpg"), "Station 2");
+        assert_eq!(series_of("IMG_0012.JPG"), "IMG");
+        assert_eq!(series_of("Scene 3"), "Scene");
+        assert_eq!(series_of("Porch"), "Porch");
+        assert_eq!(series_of("v1.2"), "v1");
+    }
+
+    #[test]
+    fn shift_arrows_step_through_the_series() {
+        let names = [
+            "A-1.jpg", "B 1.png", "A-2.jpg", "Lone", "A-3.jpg", "B 2.png",
+        ];
+        // Forward and back within "A", wrapping, skipping other scenes.
+        assert_eq!(series_step(&names, 0, true), Some(2));
+        assert_eq!(series_step(&names, 2, true), Some(4));
+        assert_eq!(series_step(&names, 4, true), Some(0));
+        assert_eq!(series_step(&names, 0, false), Some(4));
+        assert_eq!(series_step(&names, 1, true), Some(5));
+        assert_eq!(series_step(&names, 5, true), Some(1));
+        // A photo in no series steps through all photo scenes.
+        assert_eq!(series_step(&names, 3, true), Some(4));
+        assert_eq!(series_step(&names, 3, false), Some(2));
+        assert_eq!(series_step(&["Only"], 0, true), None);
+        assert_eq!(series_step(&names, 9, true), None);
     }
 
     #[test]
