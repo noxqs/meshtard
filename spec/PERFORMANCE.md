@@ -17,6 +17,7 @@ It prints one line per stage and, at the end, a Markdown table of all of them.
 | `MESHTARD_BENCH_FILES=a.gltf:b.ifc` | Add `.skp`, glTF/GLB or IFC files (glTF and IFC are placed as one component, as File > Import does). |
 | `MESHTARD_BENCH_GRID=300` | Size of the synthetic grid (default 577: a million edges). |
 | `MESHTARD_BENCH_NO_GPU=1` | Skip the GPU stages (for profiling the CPU ones). |
+| `MESHTARD_BENCH_STEPS=1` | Print the time of each part of the rebuilds run as the app does (and how much of the scene each kept). |
 
 Frame times need a wgpu adapter; without one they are skipped. On a machine without a
 GPU, Mesa's software rasterizer (lavapipe / llvmpipe) works.
@@ -56,6 +57,8 @@ Each model is saved to `.skp` and opened again, then:
 | undo snapshot (first), move commit, undo snapshot (after an edit) | `Document::snapshot` alone (the first undo step copies everything), the Move itself (`Document::edit`, which takes an undo step), and the undo step the next edit would take (it copies only what the Move changed) | every edit |
 | rebuild after move, undo | `Document::scene` after the move (with the triangles kept from the first build), then Edit > Undo | after an edit |
 | small edit, undo snapshot (after a small edit), undo (small edit) | Move of one of the moved entities, the undo step the next edit would take, then Edit > Undo | every small edit |
+| first rebuild (kept), rebuild after … (full / kept), first hover after … | The model-dependent part of `App::rebuild` (scene, pick index, snap geometry, instance bounds, GPU upload, highlight without a selection) after the small edit, the move of a tenth and their undos, made in full as before the fifth round or kept as the app does now, and the first hover after it (see "Fifth round") | every edit, undo, redo |
+| highlight one / all (full / kept) | The highlight of one entity and of everything, sent whole or as changes | selection changes |
 
 Each model also prints a checksum of its scene (every vertex, index, edge, owner,
 material, hidden edge and container; instanced triangles count as their flattened
@@ -620,6 +623,162 @@ reference) does not apply as is: the store's last snapshot, the undo step and
 which chunks are clean. A test was added for stores of many chunks with values that
 own heap memory: `slot_store::tests::many_chunks_freeze_and_thaw_exactly`.
 
+## Fifth round: incremental rebuilds
+
+After every edit, undo and redo `App::rebuild` used to make everything again for the
+whole model: the scene (colours, texture coordinates, world positions; only the
+triangles of unchanged faces were kept), the pick index, the snap geometry and the
+GPU buffers; the first mouse move after it built the culling indexes again; and
+every selection change rebuilt and re-sent the whole edge list. Now each of them keeps
+what the edit did not change and redoes the rest (LEFTOVERS 25). The scene, pick and
+hover checksums are the same as before for every model, and the benchmark checks that
+the kept pick index and snap geometry give the same hover answers.
+
+### Results
+
+Same machine as above, release build, GPU stages on llvmpipe. The benchmark now runs
+the model-dependent part of `App::rebuild` itself (`bench::AppSide`: scene, pick index,
+snap geometry, instance bounds, GPU upload and the highlight with nothing selected)
+twice in the same run: "full" makes everything anew as the app did before this change
+(`Document::scene`, `PickIndex::build`, `snap::geometry`, `instancing::upload_faces`,
+`Highlight::build` and a new edge buffer), "kept" is what the app does now
+(`Document::scene_from`, `PickIndex::build_kept`, `snap::geometry_kept`,
+`edge_view::GpuScene`). "Small edit" moves one entity (the first face of the grid, the
+first instance of the others), "move (1/10)" a tenth of everything; each is followed
+by its undo. "Highlight one" selects one entity, "highlight all" everything. The first
+mouse move after the small edit is compared with the base commit's first hover (pick
+plus inference, which built both culling indexes from scratch).
+
+| stage | grid 1M edges | instances 10k | groups 5k | nested 4^6 | car (.skp) | gondola (.skp) |
+|---|---:|---:|---:|---:|---:|---:|
+| rebuild after small edit | 1.52 s → 57 ms (27x) | 38 ms → 40 ms (~) | 86 ms → 26 ms (3.3x) | 10 ms → 16 ms (0.65x) | 110 ms → 34 ms (3.2x) | 23 ms → 13 ms (1.8x) |
+| rebuild after undo of small edit | 2.24 s → 67 ms (33x) | 43 ms → 40 ms (~) | 79 ms → 23 ms (3.4x) | 11 ms → 16 ms (0.70x) | 128 ms → 39 ms (3.3x) | 22 ms → 13 ms (1.7x) |
+| rebuild after move (1/10) | 2.48 s → 407 ms (6.1x) | 43 ms → 36 ms (~) | 96 ms → 41 ms (2.4x) | 11 ms → 19 ms (0.58x) | 122 ms → 35 ms (3.5x) | 23 ms → 13 ms (1.8x) |
+| rebuild after undo of move (1/10) | 1.50 s → 309 ms (4.9x) | 44 ms → 45 ms (~) | 108 ms → 39 ms (2.8x) | 15 ms → 20 ms (0.76x) | 103 ms → 35 ms (3.0x) | 26 ms → 13 ms (2.0x) |
+| highlight one | 131 ms → 0.17 ms (769x) | 5.3 ms → 4.0 ms (1.3x) | 6.3 ms → 0.15 ms (42x) | 4.5 ms → 5.4 ms (~) | 2.9 ms → 3.2 ms (~) | 1.8 ms → 0.30 ms (6.1x) |
+| highlight all | 1.29 s → 430 ms (3.0x) | 25 ms → 24 ms (~) | 12 ms → 16 ms (0.75x) | 5.3 ms → 6.7 ms (0.79x) | 11 ms → 12 ms (~) | 2.5 ms → 3.5 ms (0.73x) |
+| first mouse move after the small edit | 633 ms → 9.8 ms (65x) | 37 ms → 8.9 ms (4.2x) | 55 ms → 7.6 ms (7.2x) | 23 ms → 6.0 ms (3.9x) | 42 ms → 9.0 ms (4.7x) | 6.8 ms → 7.5 ms (~) |
+
+Stages of the earlier rounds, base commit → this change (separate runs on the shared
+machine, where other builds ran too: differences under about 2x on small models are
+mostly noise; the full GPU upload of a new viewport varied from 12 to 33 ms for
+groups 5k between runs, with the extra passes this change adds to `FaceBuffers::new`
+measured at about 2 ms there):
+
+| stage | grid 1M edges | instances 10k | groups 5k | nested 4^6 | car (.skp) | gondola (.skp) |
+|---|---:|---:|---:|---:|---:|---:|
+| scene build | 653 ms → 721 ms (~) | 3.9 ms → 5.2 ms (0.75x) | 69 ms → 42 ms (1.6x) | 1.9 ms → 3.1 ms (0.61x) | 81 ms → 97 ms (~) | 9.5 ms → 14 ms (0.68x) |
+| pick index (BVH) | 227 ms → 244 ms (~) | 5.2 ms → 4.5 ms (~) | 14 ms → 11 ms (1.3x) | 1.6 ms → 1.7 ms (~) | 14 ms → 15 ms (~) | 4.4 ms → 4.4 ms (~) |
+| snap geometry | 179 ms → 174 ms (~) | 16 ms → 15 ms (~) | 10 ms → 7.3 ms (1.4x) | 5.4 ms → 5.8 ms (~) | 13 ms → 16 ms (~) | 3.2 ms → 3.4 ms (~) |
+| GPU upload | 319 ms → 374 ms (~) | 4.2 ms → 6.6 ms (0.64x) | 12 ms → 25 ms (0.49x) | 1.1 ms → 2.3 ms (0.49x) | 17 ms → 24 ms (0.70x) | 3.1 ms → 4.4 ms (0.71x) |
+| first hover pick | 305 ms → 50 ms (6.1x) | 3.6 ms → 3.8 ms (~) | 23 ms → 5.5 ms (4.1x) | 1.4 ms → 1.8 ms (0.78x) | 4.4 ms → 4.9 ms (~) | 2.3 ms → 4.0 ms (0.57x) |
+| first hover inference | 329 ms → 61 ms (5.4x) | 34 ms → 13 ms (2.7x) | 32 ms → 8.2 ms (4.0x) | 22 ms → 11 ms (1.9x) | 37 ms → 9.6 ms (3.9x) | 4.5 ms → 7.5 ms (0.60x) |
+| hover pick | 0.03 ms → 0.04 ms (0.75x) | 0.01 ms → 0.01 ms (~) | 0.01 ms → 0.01 ms (~) | <0.01 ms → <0.01 ms | 0.10 ms → 0.02 ms (5.0x) | 0.01 ms → 0.01 ms (~) |
+| hover inference | 0.23 ms → 0.23 ms (~) | 0.12 ms → 0.12 ms (~) | 0.05 ms → 0.07 ms (0.71x) | 0.02 ms → 0.02 ms (~) | 0.04 ms → 0.03 ms (1.3x) | 0.02 ms → 0.02 ms (~) |
+| selection highlight | 1.77 s → 186 ms (9.5x) | 11 ms → 9.7 ms (~) | 3.6 ms → 4.8 ms (0.76x) | 2.7 ms → 3.3 ms (~) | 11 ms → 6.6 ms (1.7x) | 1.1 ms → 1.4 ms (~) |
+| move commit | 5.04 s → 4.27 s (~) | 2.5 ms → 2.2 ms (~) | 9.4 ms → 12 ms (0.80x) | 0.05 ms → 0.05 ms (~) | 1.5 ms → 0.72 ms (2.1x) | 0.12 ms → 0.13 ms (~) |
+| rebuild after move | 1.99 s → 555 ms (3.6x) | 5.0 ms → 5.0 ms (~) | 77 ms → 45 ms (1.7x) | 6.2 ms → 2.8 ms (2.2x) | 78 ms → 56 ms (1.4x) | 16 ms → 12 ms (1.4x) |
+| undo | 65 ms → 69 ms (~) | 1.5 ms → 1.2 ms (1.3x) | 16 ms → 12 ms (1.3x) | 0.12 ms → 0.12 ms (~) | 6.4 ms → 1.4 ms (4.5x) | 0.16 ms → 0.28 ms (0.57x) |
+
+Notes:
+
+- The grid (one flat context of a million edges) gains most: a small edit draws again
+  the few storage chunks it touched and writes a few thousand items into the scene's
+  lists, the GPU buffers and the indexes. Moving a tenth of it redraws a quarter of
+  the chunks (the moved faces' neighbours read the moved vertices).
+- The car and the gondola (real files: groups and components, some instanced) gain 3x
+  and 2x: groups not touched by the edit are taken whole.
+- Instances 10k and nested 4^6 are all placements of a few meshes: the scene there was
+  already cheap and stays about the same; moving the only top-level component of
+  nested 4^6 moves everything, which makes the kept path a little slower than making it
+  all anew (bookkeeping for nothing kept). Moving a group or component drawn flattened
+  draws it again (its world positions change).
+- Highlighting one entity no longer depends on the model's size. Select All still
+  draws every edge, as before (from `Highlight::build`, sent as one buffer).
+- The first mouse move after an edit builds the culling indexes in blocks on several
+  threads and keeps the previous scene's blocks over unchanged edges and vertices; on
+  the first scene (no blocks to keep) the grid's first hover pick and inference went
+  from 305 and 329 ms to 50 and 61 ms.
+- A build from scratch (`Document::scene`, "scene build") also walks by chunks and
+  notes where the open context's entities go: within noise on the big models, maybe
+  up to 1.3x slower on the small ones.
+
+### How it works
+
+1. **Chunk versions** (`mt_kernel::slot_store`). Each 256-slot chunk of a collection's
+   vertices, edges and faces has a version that changes with every write to it (and
+   with every rewrite by undo or redo) and never goes back; each store has an id of its
+   own (copies get new ones). A chunk with the same id and version as when something
+   was computed from it is exactly what it was. This costs a counter increment per
+   write.
+2. **Scene pieces** (`mt-app/src/scene_cache.rs`). The scene walk records, per visit of
+   a collection (the root, a definition through an instance), where each chunk of its
+   edges and of its faces put its edges, triangles and vertices, and the versions of
+   every chunk the drawing read (the vertices, edges and faces they reach). The next
+   build finds each visit again (by collection, level and order) and, when everything
+   the visit depends on is the same (transform, inherited material, tag, fading, level,
+   instancing role, cut openings), takes the chunks whose versions all match from the
+   previous scene. A visit that makes an instanced mesh, and the placements of a kept
+   mesh, are kept whole, mesh included; they do not depend on where they are placed,
+   so moving a component keeps its mesh (and the GPU's copy of it). Anything else the
+   walk reads (materials, tags, style, open context, face-camera view) is compared as a
+   whole and rebuilds everything when it differs. The kept triangles of earlier rounds
+   (`tess_cache`) follow along.
+3. **Lists in place** (`scene_cache::List`). The scene's per-edge, per-triangle and
+   per-vertex lists are put together from new items and ranges of the previous lists:
+   when every range taken stays where it was (an edit that did not change how much a
+   chunk draws), the new items are written into the previous lists in place, so a small
+   edit of the grid writes a few thousand items instead of copying 360 MB.
+4. **What changed.** The scene tells which ranges of each list are the previous
+   scene's at the same place (`scene_cache::Changes`). The pick index keeps blocks of
+   16,384 stored triangles with a BVH each (`pick_index::Blocks`, made on several
+   threads) and the meshes' indexes; the snap geometry keeps blocks of 16,384 edges
+   with their kept ends and de-duplicated points, and finds the vertices' first-seen
+   order again only from the first changed block on and only in blocks holding a point
+   a changed block gained or lost (`snap::geometry_kept`); the edge culling index
+   (`pick_index::EdgeIndex`) and the inference culling index (`mt_infer::Geometry`) are
+   in blocks too, and the next scene keeps the blocks over unchanged items.
+5. **GPU** (`mt-app/src/edge_view.rs`, `mt_render::Viewport::update_faces`,
+   `write_edges`, `set_extra_edges`). The face vertices that changed are written into
+   the buffer in place (`queue.write_buffer`); the index buffer only when the indices or
+   a triangle's opacity changed; the bounds per block of 65,536 vertices. The model's
+   edge buffer holds the scene's edges as drawn without a selection (a copy is kept on
+   the CPU: grid ~80 MB); after an edit only the changed edges are written. Move,
+   Rotate and Scale send only new indices when they start and end (the vertices are on
+   the GPU already).
+6. **Highlight** (`live_view::Highlight::build_sparse`). The scene records where the
+   open context's entities are drawn (per chunk, per instance: `ContextIndex`), so the
+   highlight looks only at the edges and triangles of the selected, moving and
+   stretching entities, writes the edges it draws otherwise into the edge buffer, puts
+   back those it no longer does, and sends the rest (moved copies, boxes, selected
+   placements' edges) as extra edges. Large selections (more than 4,096 entities and an
+   eighth of the edges) are drawn as one buffer made in full, as before.
+7. **Picking exactly.** `Bvh::ray` could leave out a triangle exactly as near as the
+   best hit when a box's entry distance rounded above it, or when the ray ran in the
+   plane of a box face (0 times infinity), so an index's answer could depend on its
+   shape (seen with rays straight down on the grid's vertices). Box tests now let such
+   rays in and allow a 1e-9 relative slack before giving up on a box
+   (`bvh::ray_box`, `bvh::search_limit`), so blocks answer exactly as one index; the
+   benchmark's hover checksums did not change.
+
+Tests: `scene_cache::tests::incremental_scenes_equal_full_builds` (a grid of many
+chunks, instanced and flattened components, groups, nested components, a translucent
+instance and tiles with few edges: 27 kinds of edit and change without an undo step,
+style changes, opened groups and components with Hide Rest of Model, undo all and redo
+all; after each, every list of the kept scene equals a full build's, what it says it
+kept is so, and building again with nothing changed keeps everything), the existing
+`undo_and_redo_restore_the_exact_model_after_many_edit_kinds` and
+`kept_triangles_follow_every_edit` (every step also checked kept against full),
+`small_edits_keep_the_rest_in_place`, `lists_take_ranges_in_place_or_anew`,
+`slot_store::tests::chunk_versions_follow_writes`,
+`pick_index::tests::kept_blocks_pick_as_one_index` (blocks against one BVH on 4,000
+rays a round, ties straight down on vertices, picking with the kept edge index against
+a fresh scene's), `snap::tests::kept_snap_geometry_equals_a_full_build` and
+`kept_snap_geometry_follows_random_edits` (60 random edits and undos; inference with
+the kept culling index against a fresh one), `live_view::tests::sparse_highlight_draws_what_the_full_one_draws`,
+`edge_view::tests::kept_edges_are_what_a_full_upload_holds` and the headless
+`partial_updates_draw_like_full_ones` (partial writes render the same pixels).
+
 ## Left to do
 
 Measured but not changed here, biggest first:
@@ -642,23 +801,33 @@ Measured but not changed here, biggest first:
   store's base snapshot lend its chunks to the store, would hide most of it. Instances,
   curves, guides and annotations of a collection are still copied whole into a step
   when any of them changed (instances 10k: ~1 to 2 ms per step and per undo).
-- **Whole-scene rebuilds after small edits.** `App::rebuild` still rebuilds the scene
-  (except the kept triangles of unchanged faces), pick index, snap geometry and GPU
-  buffers for the whole model after every edit. Going further needs the scene split
-  per context, with owners and indices kept stable, and the GPU buffers updated in
-  place. The first scene build of a model also fills the kept triangles (first builds
-  measured up to ~20% slower, within noise on most models).
+- **What rebuilds still redo** (see "Fifth round"). Groups and components drawn
+  flattened (placed once, on the open context's path, hidden, "Shadows face sun",
+  translucent) are drawn again when their transform changes: the scene is in world
+  space. Any change to materials, tags, the style, the open context or (with
+  face-camera components) the camera draws everything again. Every rebuild still
+  recomputes the instance bounds (instances 10k: ~6 ms), the section cut, the
+  triangle containers of the snap geometry and the placements' top-level indexes
+  (pick and edge culling), and walks every visit (models of many placements gain
+  little: instances 10k and nested 4^6 stay at 15 to 45 ms). A visit is found again
+  by its collection, level and order: inserting an instance before others of the same
+  definition draws those again. The culling indexes keep blocks only from the scene
+  just before (when a hover built them). The model's edge buffer is mirrored on the
+  CPU (grid: ~80 MB).
 - **What GPU instancing left flattened** (see "GPU instancing" and "Fourth round"):
   inference's snap geometry (`mt_infer::Geometry`) still holds every instanced edge's
-  ends and vertices in world space, built on every rebuild (instances 10k: ~15 ms,
-  and ~35 ms for its culling index on the first hover). A two-level version must keep
+  ends and vertices in world space (since the fifth round kept per block of edges and
+  made again only where placements moved; ~15 ms and ~35 ms for its culling index
+  when made in full for instances 10k). A two-level version must keep
   the vertex de-duplication across instances (its order decides ties). Section cuts
   make the full world triangle list. The owners, materials and containers are still
   stored per triangle and edge (instances 10k: ~5 MB). Selected and moving instances
   draw their edges flattened, rebuilt with the highlight. Translucent meshes are
   flattened (one-by-one sorting).
-- **The highlight on huge models** (grid: ~0.25 s): it still rebuilds and re-uploads
-  the whole edge list on every selection change.
+- **The highlight of large selections** (grid, Select All: ~0.4 s): more than 4,096
+  selected or moving entities (and an eighth of the edges) are drawn as one new buffer
+  made from every edge, as before; selecting few is now independent of the model's
+  size.
 - **Frame time** on llvmpipe grows with edges and triangles drawn, instanced or not
   (instancing saves memory and uploads, not vertex work); not measured on a
   real GPU here.

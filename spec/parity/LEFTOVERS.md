@@ -39,7 +39,7 @@ Waiting:
 
 Open:
 24. [ ] Texts and dimensions inside groups and components saved in .skp (the writer can already put them in definitions; the kernel export only writes root ones). S
-25. [ ] Faster rebuilds: colours, texture coordinates, pick index, snap geometry and GPU upload are still redone in full after each edit; the selection highlight re-uploads every edge. M
+25. [x] Faster rebuilds: colours, texture coordinates, pick index, snap geometry and GPU upload are still redone in full after each edit; the selection highlight re-uploads every edge. M (Done: scene pieces kept per collection and storage chunk, pick index, snap geometry and culling indexes in blocks, GPU buffers rewritten where they changed, highlight sends only its changes; spec/PERFORMANCE.md "Fifth round". Left: groups and components drawn flattened are drawn again when their transform changes; any change to materials, tags, style or the open context rebuilds everything; instance bounds and section cuts are recomputed every time; culling indexes keep blocks only from the scene just before.)
 26. [ ] Instancing leftovers: translucent meshes, Jitter's second stroke on instanced edges. S
 27. [ ] IFC leftovers (item 15): openings in elements made of mapped items or open shells, extrusion/revolution/offset surfaces in advanced breps, export of edges, textures, spaces and openings. M
 28. [ ] Mesh import: the last invalid S_Office mesh, glTF round trips of tiny models (item 17). S

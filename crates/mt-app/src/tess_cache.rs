@@ -11,6 +11,7 @@
 use std::ops::Range;
 
 use glam::DVec3;
+use mt_kernel::slot_store::SlotStore;
 use mt_kernel::spatial::FxMap;
 use mt_kernel::{Entities, Face, FaceId, VertexId, tessellate};
 
@@ -105,6 +106,14 @@ impl TessCache {
         let Visit { ctx, old, new, .. } = visit;
         self.colls.insert(ctx, new.unwrap_or(old));
     }
+
+    /// Keeps collection `ctx`'s triangles for this build without visiting it: the
+    /// caller knows its faces unchanged (`scene_cache` kept what it drew).
+    pub fn keep(&mut self, ctx: Ctx) {
+        if let Some(c) = self.colls.get_mut(&ctx) {
+            c.build = self.build;
+        }
+    }
 }
 
 /// The faces of one collection being reached ([`TessCache::visit`]).
@@ -127,6 +136,33 @@ const KEEP_MIN_VERTICES: usize = 4;
 pub const KEEP_MIN_FACES: usize = 16;
 
 impl Visit {
+    /// Keeps the entries of the faces in slot chunk `chunk` as they are, without
+    /// checking them: the caller knows those faces unchanged (`scene_cache`). Chunks
+    /// are given in order, between the faces asked for with [`Visit::triangles`].
+    pub fn keep_chunk(&mut self, chunk: usize) {
+        let of = SlotStore::<FaceId, Face>::chunk_of;
+        let old = &self.old;
+        while self.cursor < old.entries.len() && of(old.entries[self.cursor].face) < chunk {
+            self.cursor += 1;
+        }
+        let Some(new) = &mut self.new else {
+            return;
+        };
+        while let Some(e) = old.entries.get(self.cursor).filter(|e| of(e.face) == chunk) {
+            let from_start = new.from.len() as u32;
+            let tris_start = new.tris.len() as u32;
+            new.from.extend_from_slice(&old.from[range(&e.from)]);
+            new.tris.extend_from_slice(&old.tris[range(&e.tris)]);
+            new.entries.push(Entry {
+                face: e.face,
+                normal: e.normal,
+                from: from_start..new.from.len() as u32,
+                tris: tris_start..new.tris.len() as u32,
+            });
+            self.cursor += 1;
+        }
+    }
+
     /// The triangles of face `f` of `ents`; `None` for a face not kept (the caller
     /// tessellates it). Faces must be asked for in the collection's order (some may be
     /// left out).

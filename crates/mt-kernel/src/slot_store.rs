@@ -12,11 +12,18 @@
 //! rewriting only the chunks that differ.
 //!
 //! Reads go straight to the flat storage, as with `SlotMap`; writes also set a flag.
+//!
+//! Each chunk also has a version ([`SlotStore::chunk_version`]) that changes with every
+//! write to it and is never cleared, and each store an id of its own
+//! ([`SlotStore::uid`], new for every store and every copy): the pair names one content
+//! of the chunk, so what was computed from a chunk can be kept until it changes (the
+//! app's scene build, spec/PERFORMANCE.md "Fifth round").
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut, Range};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use slotmap::{Key, KeyData};
 
@@ -106,9 +113,19 @@ impl<V: Clone> Snapshot<V> {
             num_elems: f.num_elems,
             dirty: vec![false; f.chunks.len()],
             base: Some(self.clone()),
+            versions: vec![0; f.chunks.len()],
+            writes: 0,
+            uid: new_uid(),
             _k: PhantomData,
         }
     }
+}
+
+/// Ids of stores made so far.
+static NEXT_UID: AtomicU64 = AtomicU64::new(1);
+
+fn new_uid() -> u64 {
+    NEXT_UID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// See the module documentation.
@@ -122,6 +139,12 @@ pub struct SlotStore<K: Key, V> {
     /// The last snapshot taken or restored. Every chunk not marked in `dirty` equals
     /// its chunk exactly (slot for slot, vacant ones included).
     base: Option<Snapshot<V>>,
+    /// Per chunk of `slots`: the value `writes` had at its last change.
+    versions: Vec<u64>,
+    /// Changes so far (see `versions`).
+    writes: u64,
+    /// Unique among stores (copies get their own).
+    uid: u64,
     _k: PhantomData<fn(K) -> K>,
 }
 
@@ -160,6 +183,9 @@ impl<K: Key, V> SlotStore<K, V> {
             num_elems: 0,
             dirty: Vec::new(),
             base: None,
+            versions: Vec::new(),
+            writes: 0,
+            uid: new_uid(),
             _k: PhantomData,
         }
     }
@@ -199,18 +225,64 @@ impl<K: Key, V> SlotStore<K, V> {
         if let Some(d) = self.dirty.get_mut(idx >> SHIFT) {
             *d = true;
         }
+        self.bump(idx >> SHIFT);
+    }
+
+    /// Gives chunk `c` a new version.
+    #[inline]
+    fn bump(&mut self, c: usize) {
+        self.writes += 1;
+        if c >= self.versions.len() {
+            self.versions.resize(c + 1, 0);
+        }
+        self.versions[c] = self.writes;
     }
 
     fn touch_all(&mut self) {
         self.dirty.fill(true);
+        self.writes += 1;
+        self.versions.resize(self.slots.len().div_ceil(CHUNK), 0);
+        self.versions.fill(self.writes);
+    }
+
+    /// This store's id: no other store, copies included, has it.
+    pub fn uid(&self) -> u64 {
+        self.uid
+    }
+
+    /// Number of chunks (of [`CHUNK`] slots; the last may hold fewer).
+    pub fn chunk_count(&self) -> usize {
+        self.slots.len().div_ceil(CHUNK)
+    }
+
+    /// The version of chunk `c`: it changes whenever anything in the chunk does (and
+    /// only then). `None` past the last chunk.
+    #[inline]
+    pub fn chunk_version(&self, c: usize) -> Option<u64> {
+        (c < self.chunk_count()).then(|| self.versions.get(c).copied().unwrap_or(0))
+    }
+
+    /// The chunk key `k`'s slot is in.
+    #[inline]
+    pub fn chunk_of(k: K) -> usize {
+        parts(k).0 >> SHIFT
+    }
+
+    /// The entries of chunk `c`, in key order.
+    pub fn iter_chunk(&self, c: usize) -> ChunkIter<'_, K, V> {
+        let r = chunk_range(c, self.slots.len());
+        let start = r.start.min(self.slots.len());
+        ChunkIter {
+            slots: self.slots[start..r.end.max(start)].iter(),
+            idx: start,
+            _k: PhantomData,
+        }
     }
 
     #[inline]
     pub fn get_mut(&mut self, k: K) -> Option<&mut V> {
         let (idx, version) = parts(k);
-        if let Some(d) = self.dirty.get_mut(idx >> SHIFT) {
-            *d = true;
-        }
+        self.touch(idx);
         match self.slots.get_mut(idx) {
             Some(Slot {
                 version: v,
@@ -254,6 +326,7 @@ impl<K: Key, V> SlotStore<K, V> {
             Some(d) => *d = true,
             None => self.dirty.push(true),
         }
+        self.bump(idx >> SHIFT);
         self.free_head = idx as u32 + 1;
         self.num_elems += 1;
         k
@@ -435,6 +508,11 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
         let mut changed = self.slots.len() != f.slots
             || self.free_head != f.free_head
             || self.num_elems != f.num_elems;
+        if self.slots.len() != f.slots {
+            // The last chunk may end elsewhere.
+            let last = self.slots.len().min(f.slots).saturating_sub(1) >> SHIFT;
+            self.bump(last);
+        }
         self.slots.truncate(f.slots);
         for (c, chunk) in f.chunks.iter().enumerate() {
             let r = chunk_range(c, f.slots);
@@ -445,6 +523,7 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
                 continue;
             }
             changed = true;
+            self.bump(c);
             if self.slots.len() >= r.end {
                 self.slots[r].clone_from_slice(chunk);
             } else {
@@ -456,12 +535,14 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
         self.num_elems = f.num_elems;
         self.dirty.clear();
         self.dirty.resize(f.chunks.len(), false);
+        self.versions.resize(f.chunks.len(), 0);
         self.base = Some(s.clone());
         changed
     }
 }
 
-/// A full copy (keeping the base snapshot it shares unchanged chunks with).
+/// A full copy (keeping the base snapshot it shares unchanged chunks with), with an
+/// id of its own.
 impl<K: Key, V: Clone> Clone for SlotStore<K, V> {
     fn clone(&self) -> Self {
         Self {
@@ -470,6 +551,9 @@ impl<K: Key, V: Clone> Clone for SlotStore<K, V> {
             num_elems: self.num_elems,
             dirty: self.dirty.clone(),
             base: self.base.clone(),
+            versions: self.versions.clone(),
+            writes: self.writes,
+            uid: new_uid(),
             _k: PhantomData,
         }
     }
@@ -547,6 +631,29 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
+    }
+}
+
+/// The entries of one chunk, in key order ([`SlotStore::iter_chunk`]).
+pub struct ChunkIter<'a, K, V> {
+    slots: std::slice::Iter<'a, Slot<V>>,
+    /// Index of the slot `slots` yields next.
+    idx: usize,
+    _k: PhantomData<fn(K) -> K>,
+}
+
+impl<'a, K: Key, V> Iterator for ChunkIter<'a, K, V> {
+    type Item = (K, &'a V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let s = self.slots.next()?;
+            self.idx += 1;
+            if let Content::Occupied(v) = &s.content {
+                return Some((key(self.idx - 1, s.version), v));
+            }
+        }
     }
 }
 
@@ -787,5 +894,54 @@ mod tests {
         assert_eq!(dump(&b), d0);
         assert!(b.thaw(&s2));
         assert_eq!(dump(&b), d2);
+    }
+
+    /// A chunk's version changes with every write to it (thaws included) and only
+    /// then; chunk iteration gives the entries in order; copies get ids of their own.
+    #[test]
+    fn chunk_versions_follow_writes() {
+        type Store = SlotStore<Id, u32>;
+        let mut b: Store = SlotStore::with_key();
+        let keys: Vec<Id> = (0..1000).map(|i| b.insert(i)).collect();
+        let versions = |b: &Store| -> Vec<u64> {
+            (0..b.chunk_count())
+                .map(|c| b.chunk_version(c).unwrap())
+                .collect()
+        };
+        let chunks = |b: &Store| -> Vec<(Id, u32)> {
+            (0..b.chunk_count())
+                .flat_map(|c| b.iter_chunk(c).map(|(k, v)| (k, *v)))
+                .collect()
+        };
+        assert_eq!(b.chunk_count(), 4);
+        assert_eq!(b.chunk_version(4), None);
+        let v0 = versions(&b);
+        let s0 = b.freeze();
+        assert_eq!(versions(&b), v0, "reads and snapshots change nothing");
+        let _ = b.get(keys[300]);
+        assert_eq!(versions(&b), v0);
+        b[keys[300]] += 1;
+        let v1 = versions(&b);
+        let c = Store::chunk_of(keys[300]);
+        for k in 0..v0.len() {
+            assert_eq!(v0[k] != v1[k], k == c, "chunk {k}");
+        }
+        let c2 = Store::chunk_of(keys[900]);
+        b.remove(keys[900]);
+        let v2 = versions(&b);
+        assert_ne!(v2[c2], v1[c2]);
+        assert!(chunks(&b).into_iter().eq(b.iter().map(|(k, v)| (k, *v))));
+        // Back to the first state: the changed chunks get new versions again.
+        assert!(b.thaw(&s0));
+        let v3 = versions(&b);
+        for k in [c, c2] {
+            assert!(v3[k] != v2[k] && v3[k] != v0[k]);
+        }
+        assert!(chunks(&b).into_iter().eq(b.iter().map(|(k, v)| (k, *v))));
+        b.retain(|_, v| *v % 2 == 0);
+        assert!(versions(&b).iter().zip(&v3).all(|(a, b)| a != b));
+        let copy = b.clone();
+        assert_ne!(copy.uid(), b.uid());
+        assert_ne!(Store::with_key().uid(), b.uid());
     }
 }

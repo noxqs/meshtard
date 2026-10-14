@@ -24,12 +24,35 @@ impl Aabb {
 
     /// Entry distance of the ray, if it hits before `t_max`.
     fn hit(&self, origin: DVec3, inv_dir: DVec3, t_max: f64) -> Option<f64> {
-        let t0 = (self.min - origin) * inv_dir;
-        let t1 = (self.max - origin) * inv_dir;
-        let near = t0.min(t1).max_element().max(0.0);
-        let far = t0.max(t1).min_element().min(t_max);
-        (near <= far).then_some(near)
+        ray_box(origin, inv_dir, t_max, self.min, self.max)
     }
+}
+
+/// Entry distance of the ray (`inv_dir` is one over its direction) into the closed box
+/// `[min, max]`, if it enters at a distance in `[0, t_max]`. A ray running in the plane
+/// of a face of the box (a zero direction component, its origin on the face) meets it.
+#[inline]
+pub fn ray_box(origin: DVec3, inv_dir: DVec3, t_max: f64, min: DVec3, max: DVec3) -> Option<f64> {
+    let t0 = (min - origin) * inv_dir;
+    let t1 = (max - origin) * inv_dir;
+    let (mut near, mut far) = (0.0f64, t_max);
+    for a in 0..3 {
+        // 0 times infinity: the ray runs in the slab's boundary plane, inside it.
+        if t0[a].is_nan() || t1[a].is_nan() {
+            continue;
+        }
+        near = near.max(t0[a].min(t1[a]));
+        far = far.min(t0[a].max(t1[a]));
+    }
+    (near <= far).then_some(near)
+}
+
+/// How far past the best hit so far boxes are still entered: a triangle exactly as
+/// near (a tie the lower number wins) must not be left out by the rounding of a box's
+/// entry distance, so the answer never depends on the index's shape.
+#[inline]
+pub fn search_limit(best: Option<Hit>) -> f64 {
+    best.map_or(f64::INFINITY, |h| h.t + (h.t.abs() + 1.0) * 1e-9)
 }
 
 #[derive(Debug, Clone)]
@@ -184,8 +207,11 @@ impl Bvh {
         let mut best: Option<Hit> = None;
         let mut stack = vec![0usize];
         while let Some(n) = stack.pop() {
-            let t_max = best.map_or(f64::INFINITY, |h| h.t);
-            if self.nodes[n].bounds().hit(origin, inv, t_max).is_none() {
+            if self.nodes[n]
+                .bounds()
+                .hit(origin, inv, search_limit(best))
+                .is_none()
+            {
                 continue;
             }
             match self.nodes[n] {

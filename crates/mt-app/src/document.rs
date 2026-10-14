@@ -61,6 +61,8 @@ pub struct Document {
     pub dims_hidden: Vec<(bool, usize)>,
     /// Faces' triangles from earlier scene builds, reused while the face is unchanged.
     tess: std::sync::Mutex<crate::tess_cache::TessCache>,
+    /// What the last [`Document::scene_from`] drew, per collection and chunk.
+    pieces: std::sync::Mutex<crate::scene_cache::SceneCache>,
 }
 
 /// A state Undo and Redo go back to: the model, the edit context, the state id and
@@ -151,7 +153,7 @@ pub struct Scene {
     pub tri_container: Vec<Option<mt_infer::Container>>,
     /// Index into `textures` of each model material (`FaceVertex::NO_TEXTURE` when
     /// untextured).
-    texture_of: Vec<u32>,
+    pub(crate) texture_of: Vec<u32>,
     /// Vertex ranges of face-camera components with "Shadows face sun", and the
     /// rotation turning each from the camera to the sun (see [`Scene::shadow_casters`]).
     pub sun_facing: Vec<(std::ops::Range<usize>, DMat4)>,
@@ -166,7 +168,98 @@ pub struct Scene {
     /// ([`Scene::edges`], [`Scene::triangles`]).
     pub(crate) all_edges: std::sync::OnceLock<Vec<Segment>>,
     pub(crate) all_tris: std::sync::OnceLock<Vec<[DVec3; 3]>>,
+    /// Where the open context's entities are drawn (see [`ContextIndex`]).
+    pub(crate) context: ContextIndex,
+    /// The previous scene's edge index, for this one's to keep what it can
+    /// (`pick_index::EdgeSeed`).
+    pub(crate) edge_seed: Option<crate::pick_index::EdgeSeed>,
+    /// This build's id (0: not built by `Document`), see `scene_cache`.
+    pub(crate) build: u64,
+    /// What this scene kept of the one it was built from ([`Document::scene_from`]).
+    pub changes: crate::scene_cache::Changes,
 }
+
+/// A [`Scene`] while `Document::collect` draws it: its per-edge, per-triangle and
+/// per-vertex lists take ranges of the previous scene's without copying them yet
+/// (`scene_cache::List`). The indices are not kept: they are always `0..n`.
+#[derive(Default)]
+pub(crate) struct SceneBuild {
+    pub edge_list: crate::scene_cache::List<Segment>,
+    pub edge_owner: crate::scene_cache::List<Option<Owner>>,
+    pub vertices: crate::scene_cache::List<FaceVertex>,
+    pub tri_list: crate::scene_cache::List<[DVec3; 3]>,
+    pub tri_owner: crate::scene_cache::List<Option<Owner>>,
+    pub tri_material: crate::scene_cache::List<[Option<MaterialId>; 2]>,
+    pub guides: Vec<Segment>,
+    pub hidden_edges: FxSet<usize>,
+    pub edge_container: Vec<Option<mt_infer::Container>>,
+    pub tri_container: Vec<Option<mt_infer::Container>>,
+    pub texture_of: Vec<u32>,
+    pub sun_facing: Vec<(std::ops::Range<usize>, DMat4)>,
+    pub instancing: crate::instancing::Instancing,
+    pub context: ContextIndex,
+}
+
+impl SceneBuild {
+    /// Adds an edge (world space) and its owner.
+    fn push_edge(&mut self, seg: Segment, owner: Option<Owner>) {
+        self.edge_list.push(seg);
+        self.edge_owner.push(owner);
+    }
+
+    /// Adds a triangle (world space) and its owner.
+    fn push_tri(&mut self, tri: [DVec3; 3], owner: Option<Owner>) {
+        self.tri_list.push(tri);
+        self.tri_owner.push(owner);
+    }
+
+    /// The scene drawn, its lists taken from `prev` (the previous scene's) where they
+    /// are kept.
+    fn finish(self, prev: &mut Scene, scene: &mut Scene) {
+        scene.edge_list = self.edge_list.finish(&mut prev.edge_list);
+        scene.edge_owner = self.edge_owner.finish(&mut prev.edge_owner);
+        scene.vertices = self.vertices.finish(&mut prev.vertices);
+        scene.tri_list = self.tri_list.finish(&mut prev.tri_list);
+        scene.tri_owner = self.tri_owner.finish(&mut prev.tri_owner);
+        scene.tri_material = self.tri_material.finish(&mut prev.tri_material);
+        // Always 0..n: the previous scene's are kept as far as they go.
+        let n = scene.vertices.len();
+        let mut indices = std::mem::take(&mut prev.indices);
+        indices.truncate(n);
+        indices.extend(indices.len() as u32..n as u32);
+        scene.indices = indices;
+        scene.guides = self.guides;
+        scene.hidden_edges = self.hidden_edges;
+        scene.edge_container = self.edge_container;
+        scene.tri_container = self.tri_container;
+        scene.texture_of = self.texture_of;
+        scene.sun_facing = self.sun_facing;
+        scene.instancing = self.instancing;
+        scene.context = self.context;
+    }
+}
+
+/// Where the open context's entities are drawn in a [`Scene`], so the highlight finds
+/// the edges and triangles of a few selected entities without looking at all of them
+/// (`live_view`). Ranges are of edge and triangle numbers ([`Scene::edge`],
+/// [`Scene::tri`]); an entity's are all inside its range (with others).
+#[derive(Default, Clone, Debug)]
+pub(crate) struct ContextIndex {
+    /// Per chunk of the context's edges (`mt_kernel::slot_store`): the edges drawn.
+    pub edge_chunks: Vec<std::ops::Range<usize>>,
+    /// Per chunk of its faces: the edges (hidden faces' outlines) and triangles drawn.
+    pub face_chunks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+    /// Its groups and components drawn: instance index, edges, triangles (in order).
+    pub instances: Vec<(usize, std::ops::Range<usize>, std::ops::Range<usize>)>,
+    /// The first edge and triangle after the model's (section planes, dimensions and
+    /// texts).
+    pub tail: (usize, usize),
+    /// Filled in (the scene was built by `Document`).
+    pub known: bool,
+}
+
+/// Ids of scene builds made so far.
+static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Records that entry `i` of `edges` or `triangles` lies in container `c`.
 fn set_container(list: &mut Vec<Option<mt_infer::Container>>, i: usize, c: mt_infer::Container) {
@@ -177,7 +270,7 @@ fn set_container(list: &mut Vec<Option<mt_infer::Container>>, i: usize, c: mt_in
 }
 
 /// Records that entries `range` of `edges` or `triangles` lie in container `c`.
-fn set_containers(
+pub(crate) fn set_containers(
     list: &mut Vec<Option<mt_infer::Container>>,
     range: std::ops::Range<usize>,
     c: mt_infer::Container,
@@ -221,6 +314,7 @@ impl Scene {
     }
 
     /// Adds a triangle (world space) and its owner.
+    #[cfg(test)]
     pub fn push_tri(&mut self, tri: [DVec3; 3], owner: Option<Owner>) {
         self.tri_list.push(tri);
         self.tri_owner.push(owner);
@@ -254,6 +348,8 @@ struct Walk<'a> {
     instancing: Option<crate::instancing::Builder>,
     /// The mesh the next collection walked is a placement of, if instanced.
     next: Option<crate::instancing::Key>,
+    /// Pieces kept from the previous build (`None`: draw everything).
+    pieces: Option<crate::scene_cache::Pieces>,
 }
 
 /// What an instance passes to its contents.
@@ -473,6 +569,7 @@ impl Document {
             view: None,
             dims_hidden: Vec::new(),
             tess: Default::default(),
+            pieces: Default::default(),
         })
     }
 
@@ -515,6 +612,7 @@ impl Document {
             view: None,
             dims_hidden: Vec::new(),
             tess: Default::default(),
+            pieces: Default::default(),
         }
     }
 
@@ -827,7 +925,56 @@ impl Document {
     /// [`Document::scene`], with or without instancing (without: every instance
     /// flattened into the scene's vertices).
     pub(crate) fn scene_with(&self, instancing: bool) -> Scene {
-        let mut scene = Scene::default();
+        self.build_scene(instancing, None)
+    }
+
+    /// [`Document::scene`], keeping what did not change from `prev`, the scene this
+    /// function last returned (see `scene_cache`). The result is the scene
+    /// [`Document::scene`] makes; its `changes` say which of its parts are `prev`'s.
+    pub fn scene_from(&self, prev: Option<Scene>) -> Scene {
+        let mut cache = (self.pieces.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        let settings = self.scene_settings(true);
+        let pieces = crate::scene_cache::Pieces::begin(&mut cache, prev, &settings);
+        let (mut scene, pieces) = self.build_scene_with(true, Some(pieces));
+        if let Some(p) = pieces {
+            p.end(&mut cache, &mut scene, settings);
+        }
+        scene
+    }
+
+    /// Everything besides the geometry a scene build reads.
+    fn scene_settings(&self, instancing: bool) -> crate::scene_cache::Settings {
+        let m = &self.model;
+        crate::scene_cache::Settings {
+            materials: m.materials.clone(),
+            layers: m.layers.clone(),
+            folders: m.tag_folders.clone(),
+            colors: [m.front_color, m.back_color],
+            style: m.style.clone(),
+            axes: m.axes,
+            color_by_tag: m.color_by_tag,
+            edit_fade: m.edit_fade,
+            context: self.context.clone(),
+            path: Self::path_definitions(m, &self.context),
+            view: self.view,
+            instancing,
+        }
+    }
+
+    fn build_scene(&self, instancing: bool, pieces: Option<crate::scene_cache::Pieces>) -> Scene {
+        self.build_scene_with(instancing, pieces).0
+    }
+
+    fn build_scene_with(
+        &self,
+        instancing: bool,
+        pieces: Option<crate::scene_cache::Pieces>,
+    ) -> (Scene, Option<crate::scene_cache::Pieces>) {
+        let mut scene = Scene {
+            build: BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ..Default::default()
+        };
+        let mut out = SceneBuild::default();
         for m in &self.model.materials {
             let layer = match &m.texture {
                 Some(t) => {
@@ -839,24 +986,38 @@ impl Document {
                 }
                 None => FaceVertex::NO_TEXTURE,
             };
-            scene.texture_of.push(layer);
+            out.texture_of.push(layer);
         }
         let root = &self.model.root;
         let mut tess = (self.tess.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
         tess.begin();
+        let mut walk = Walk {
+            tess: Some(&mut tess),
+            instancing: instancing.then(|| crate::instancing::Builder::new(&self.model)),
+            pieces,
+            ..Default::default()
+        };
         self.collect(
             root,
             Some(crate::undo::Ctx::Root),
             DMat4::IDENTITY,
             Inherited::default(),
             Level::Context(&self.context),
-            &mut Walk {
-                tess: Some(&mut tess),
-                instancing: instancing.then(|| crate::instancing::Builder::new(&self.model)),
-                ..Default::default()
-            },
-            &mut scene,
+            &mut walk,
+            &mut out,
         );
+        let mut pieces = walk.pieces.take();
+        drop(walk);
+        out.context.tail = (out.edge_owner.len(), out.tri_owner.len());
+        out.context.known = true;
+        match &mut pieces {
+            Some(p) => {
+                out.finish(p.prev(), &mut scene);
+                let prev = p.prev();
+                scene.edge_seed = (prev.edge_index.take()).map(|e| e.seed(prev.build));
+            }
+            None => out.finish(&mut Scene::default(), &mut scene),
+        }
         tess.end();
         drop(tess);
         let f = |p: DVec3| p.as_vec3().to_array();
@@ -890,17 +1051,17 @@ impl Document {
                 }
             }
         }
-        scene
+        (scene, pieces)
     }
 
     /// Faces and edges of entities that are not in the model (the clipboard while
     /// Paste places it), in their own coordinates, drawn with the model's materials,
     /// tags and style.
     pub fn ghost_scene(&self, ents: &Entities) -> Scene {
-        let mut scene = Scene::default();
+        let mut out = SceneBuild::default();
         // The same texture numbering as `scene` (the viewport holds those textures).
         let mut next = 0;
-        scene.texture_of = self
+        out.texture_of = self
             .model
             .materials
             .iter()
@@ -920,8 +1081,10 @@ impl Document {
             // Owners are not used: the ghost is not pickable.
             Level::Inside(Owner::Instance(usize::MAX)),
             &mut Walk::default(),
-            &mut scene,
+            &mut out,
         );
+        let mut scene = Scene::default();
+        out.finish(&mut Scene::default(), &mut scene);
         scene
     }
 
@@ -1042,7 +1205,7 @@ impl Document {
         inherited: Inherited,
         level: Level,
         walk: &mut Walk,
-        out: &mut Scene,
+        out: &mut SceneBuild,
     ) {
         // This collection's own faces and edges as a placement of an instanced mesh.
         let place = walk.next.take();
@@ -1122,12 +1285,201 @@ impl Document {
         };
         let local = |p: DVec3| [p.x as f32, p.y as f32, p.z as f32];
         let local_normal = |f: FaceId| f32x3(ents.faces[f].normal.normalize_or_zero());
+        // Where this visit's own drawing starts.
+        let start = crate::scene_cache::ends(out);
         let edges_start = out.edge_owner.len();
-        // Another placement of a mesh that gives its edges for any placement: only
-        // their owners, containers and hidden marks (see `instancing`).
+        // Draws edge `id` (into `build` too when it makes a mesh).
+        let style = &self.model.style;
+        let draw_edge =
+            |out: &mut SceneBuild, build: &mut Option<Build>, id: EdgeId, e: &mt_kernel::Edge| {
+                // Edges off: the renderer draws only the profiles among model edges, so
+                // edges are left out only when profiles are off too. View > Hidden
+                // Geometry shows hidden edges (and soft ones) dashed.
+                let hidden = ghost || e.attrs.hidden || e.attrs.soft;
+                if rest_here
+                    || (!style.edges && !style.profiles)
+                    || ((e.attrs.hidden || e.attrs.soft) && !show_hidden)
+                    || (ghost && !show_objects)
+                    || !self.layer_visible(e.attrs.layer)
+                {
+                    return;
+                }
+                // Color by Tag and the tag's dashes (own tag, else the container's).
+                let tag = e.attrs.layer.filter(|&l| l > 0).or(outer_layer);
+                let color = match self.tag_color(tag) {
+                    Some(c) if faded => fade_by(c, fade_amount * EDGE_FADE),
+                    Some(c) => c,
+                    None => edge_color(
+                        xf.transform_vector3(ents.pos(e.end) - ents.pos(e.start)),
+                        &e.faces,
+                    ),
+                };
+                let mut seg = Segment::line(
+                    world(ents.pos(e.start)),
+                    world(ents.pos(e.end)),
+                    if hidden { hidden_color } else { color },
+                    [
+                        EDGE_WIDTH,
+                        if hidden {
+                            HIDDEN_DASH
+                        } else {
+                            self.tag_dash(tag)
+                        },
+                    ],
+                );
+                if let Some(c) = container {
+                    set_container(&mut out.edge_container, out.edge_owner.len(), c);
+                }
+                if let Some(b) = build {
+                    let mut l = seg;
+                    (l.a, l.b) = (local(ents.pos(e.start)), local(ents.pos(e.end)));
+                    if !hidden {
+                        l.flags = Segment::MODEL_EDGE;
+                        match e.faces[..] {
+                            [] => {}
+                            [f] => {
+                                l.n1 = local_normal(f);
+                                l.profile = Segment::BORDER;
+                            }
+                            [f, g, ..] => {
+                                l.n1 = local_normal(f);
+                                l.n2 = local_normal(g);
+                                l.profile = Segment::SILHOUETTE;
+                            }
+                        }
+                    }
+                    b.edges.push(l);
+                }
+                // The faces whose normals the world segment takes (none when hidden).
+                let normals: &[FaceId] = if hidden {
+                    &[]
+                } else {
+                    &e.faces[..e.faces.len().min(2)]
+                };
+                if hidden {
+                    out.hidden_edges.insert(out.edge_owner.len());
+                } else {
+                    seg.flags = Segment::MODEL_EDGE;
+                    match *normals {
+                        [] => {}
+                        [f] => {
+                            seg.n1 = f32x3(world_normal(f));
+                            seg.profile = Segment::BORDER;
+                        }
+                        [f, g, ..] => {
+                            seg.n1 = f32x3(world_normal(f));
+                            seg.n2 = f32x3(world_normal(g));
+                            seg.profile = Segment::SILHOUETTE;
+                        }
+                    }
+                }
+                if let Some(b) = build {
+                    let n = |k: usize| {
+                        normals
+                            .get(k)
+                            .map_or(DVec3::ZERO, |&f| ents.faces[f].normal)
+                    };
+                    b.local_edges.push(crate::instancing::LocalEdge {
+                        a: ents.pos(e.start),
+                        b: ents.pos(e.end),
+                        seg,
+                        normals: [n(0), n(1)],
+                        count: normals.len() as u8,
+                        hidden,
+                    });
+                }
+                out.push_edge(seg, owner_of(Owner::Edge(id)));
+            };
+
+        // "Cut opening" components glued here cut holes into the faces they sit on.
+        let openings = self.cut_openings(ents);
+        // Another placement of a mesh that gives its edges for any placement.
         let lazy_edges =
             placed.filter(|&m| out.instancing.meshes[m as usize].local_edges.is_some());
-        if let Some(m) = lazy_edges {
+        // The visit as the next build may reuse it (`scene_cache`).
+        use crate::scene_cache::{At, Deps, LevelKey, Map, Piece, Pieces, Role, Whole};
+        let role = match (&build, lazy_edges, place) {
+            (Some(_), _, Some(k)) => Some(Role::Build(k)),
+            (None, Some(_), Some(k)) => Some(Role::Placed(k)),
+            (None, None, _) if placed.is_none() => Some(Role::Flat),
+            _ => None,
+        };
+        let vkey = match (&walk.pieces, ctx, role) {
+            (Some(_), Some(ctx), Some(role)) => Some(crate::scene_cache::VisitKey {
+                ctx,
+                // A mesh and its placements do not depend on where they are (but
+                // see `Whole::valid`).
+                xf: match role {
+                    Role::Flat => crate::scene_cache::bits(&xf),
+                    _ => [0; 16],
+                },
+                material: inherited,
+                hidden: ghost,
+                container,
+                layer: outer_layer,
+                similar,
+                flat,
+                level: match level {
+                    Level::Context(rest) => LevelKey::Context(rest.len()),
+                    Level::Inside(o) => LevelKey::Inside(o),
+                    Level::Outside => LevelKey::Outside,
+                },
+                role,
+                uids: [ents.vertices.uid(), ents.edges.uid(), ents.faces.uid()],
+                openings: openings.clone(),
+            }),
+            _ => None,
+        };
+        let (mut rec, mut old) = match (&mut walk.pieces, vkey) {
+            (Some(p), Some(k)) => {
+                let (rec, old) = p.take(k);
+                (Some(rec), old)
+            }
+            _ => (None, None),
+        };
+        // A visit that made a mesh, unchanged: the mesh and what it drew are kept.
+        let mut whole_kept = false;
+        if let (Some(rec), Some(Role::Build(k)), Some(ctx)) = (&mut rec, role, ctx)
+            && let Some(w) = Pieces::valid_whole(&mut old, ents, &xf)
+            && let Some(p) = &mut walk.pieces
+        {
+            let w = p.copy_whole(out, w, container, &xf);
+            if let Some(builder) = &mut walk.instancing {
+                let made = w.mesh.map_or(Made::Flat, Made::Mesh);
+                builder.made.insert(k, made);
+            }
+            if let Some(m) = w.mesh {
+                (out.instancing).place(
+                    m,
+                    xf,
+                    placement_owner,
+                    w.at.tris.clone(),
+                    w.at.edges.clone(),
+                    w.lazy,
+                );
+            }
+            if let Some(cache) = &mut walk.tess {
+                cache.keep(ctx);
+            }
+            build = None;
+            whole_kept = true;
+            rec.whole = Some(w);
+        }
+        // Another placement of a mesh kept from the last build, unchanged: what it drew
+        // is kept.
+        let mut placed_kept = false;
+        if let (Some(rec), Some(Role::Placed(_)), Some(m)) = (&mut rec, role, lazy_edges)
+            && let Some(p) = &mut walk.pieces
+            && let Some(w) = p.valid_placed(&mut old, ents, m)
+        {
+            let w = p.copy_whole(out, w, container, &xf);
+            let (tris, edges) = (w.at.tris.clone(), w.at.edges.clone());
+            (out.instancing).place(m, xf, placement_owner, tris, edges, true);
+            placed_kept = true;
+            rec.whole = Some(w);
+        }
+        if let Some(m) = lazy_edges.filter(|_| !placed_kept) {
+            // Only their owners, containers and hidden marks (see `instancing`).
             let mesh = &out.instancing.meshes[m as usize];
             let n = mesh.local_edges.as_ref().map_or(0, Vec::len);
             if let Some(c) = container {
@@ -1139,114 +1491,53 @@ impl Document {
             out.edge_owner
                 .extend(std::iter::repeat_n(placement_owner, n));
         }
-        for (id, e) in &ents.edges {
-            if lazy_edges.is_some() {
-                // Given by the mesh (above).
-                break;
-            }
-            // Edges off: the renderer draws only the profiles among model edges, so
-            // edges are left out only when profiles are off too. View > Hidden
-            // Geometry shows hidden edges (and soft ones) dashed.
-            let style = &self.model.style;
-            let hidden = ghost || e.attrs.hidden || e.attrs.soft;
-            if rest_here
-                || (!style.edges && !style.profiles)
-                || ((e.attrs.hidden || e.attrs.soft) && !show_hidden)
-                || (ghost && !show_objects)
-                || !self.layer_visible(e.attrs.layer)
-            {
-                continue;
-            }
-            // Color by Tag and the tag's dashes (own tag, else the container's).
-            let tag = e.attrs.layer.filter(|&l| l > 0).or(outer_layer);
-            let color = match self.tag_color(tag) {
-                Some(c) if faded => fade_by(c, fade_amount * EDGE_FADE),
-                Some(c) => c,
-                None => edge_color(
-                    xf.transform_vector3(ents.pos(e.end) - ents.pos(e.start)),
-                    &e.faces,
-                ),
-            };
-            let mut seg = Segment::line(
-                world(ents.pos(e.start)),
-                world(ents.pos(e.end)),
-                if hidden { hidden_color } else { color },
-                [
-                    EDGE_WIDTH,
-                    if hidden {
-                        HIDDEN_DASH
-                    } else {
-                        self.tag_dash(tag)
-                    },
-                ],
-            );
-            if let Some(c) = container {
-                set_container(&mut out.edge_container, out.edge_owner.len(), c);
-            }
-            if let Some(b) = &mut build {
-                let mut l = seg;
-                (l.a, l.b) = (local(ents.pos(e.start)), local(ents.pos(e.end)));
-                if !hidden {
-                    l.flags = Segment::MODEL_EDGE;
-                    match e.faces[..] {
-                        [] => {}
-                        [f] => {
-                            l.n1 = local_normal(f);
-                            l.profile = Segment::BORDER;
+        // Flat visits are drawn (and kept) per chunk of their edges and faces.
+        let chunked = !whole_kept && role == Some(Role::Flat);
+        // Where the open context's entities are drawn, by chunk (`Scene::context`).
+        let is_context = matches!(level, Level::Context([]));
+        // Edges may be drawn as hidden geometry (`Scene::hidden_edges`).
+        let any_hidden = show_hidden || (ghost && show_objects);
+        if chunked {
+            for c in 0..ents.edges.chunk_count() {
+                let start = crate::scene_cache::ends(out);
+                match (&mut rec, &mut walk.pieces) {
+                    (Some(rec), Some(p)) => {
+                        if let Some(piece) = Pieces::valid_piece(&mut old, ents, Map::Edges, c) {
+                            rec.edges.push(Some(p.copy_piece(out, piece, container)));
+                        } else {
+                            let mut deps = Deps::default();
+                            for (id, e) in ents.edges.iter_chunk(c) {
+                                deps.edge(e);
+                                draw_edge(out, &mut build, id, e);
+                            }
+                            let at = At::since(start, out);
+                            let piece = Piece::new(ents, Map::Edges, c, deps, at, out, any_hidden);
+                            rec.edges.push(Some(piece));
                         }
-                        [f, g, ..] => {
-                            l.n1 = local_normal(f);
-                            l.n2 = local_normal(g);
-                            l.profile = Segment::SILHOUETTE;
+                    }
+                    _ => {
+                        for (id, e) in ents.edges.iter_chunk(c) {
+                            draw_edge(out, &mut build, id, e);
                         }
                     }
                 }
-                b.edges.push(l);
-            }
-            // The faces whose normals the world segment takes (none when hidden).
-            let normals: &[FaceId] = if hidden {
-                &[]
-            } else {
-                &e.faces[..e.faces.len().min(2)]
-            };
-            if hidden {
-                out.hidden_edges.insert(out.edge_owner.len());
-            } else {
-                seg.flags = Segment::MODEL_EDGE;
-                match *normals {
-                    [] => {}
-                    [f] => {
-                        seg.n1 = f32x3(world_normal(f));
-                        seg.profile = Segment::BORDER;
-                    }
-                    [f, g, ..] => {
-                        seg.n1 = f32x3(world_normal(f));
-                        seg.n2 = f32x3(world_normal(g));
-                        seg.profile = Segment::SILHOUETTE;
-                    }
+                if is_context {
+                    (out.context.edge_chunks).push(start[0]..out.edge_owner.len());
                 }
             }
-            if let Some(b) = &mut build {
-                let n = |k: usize| {
-                    normals
-                        .get(k)
-                        .map_or(DVec3::ZERO, |&f| ents.faces[f].normal)
-                };
-                b.local_edges.push(crate::instancing::LocalEdge {
-                    a: ents.pos(e.start),
-                    b: ents.pos(e.end),
-                    seg,
-                    normals: [n(0), n(1)],
-                    count: normals.len() as u8,
-                    hidden,
-                });
+        } else if !whole_kept {
+            for (id, e) in &ents.edges {
+                if lazy_edges.is_some() {
+                    // Given by the mesh (above).
+                    break;
+                }
+                draw_edge(out, &mut build, id, e);
             }
-            out.push_edge(seg, owner_of(Owner::Edge(id)));
         }
 
         let edges = edges_start..out.edge_owner.len();
         let tris_start = out.tri_owner.len();
-        if let Some(m) = placed {
+        if let Some(m) = placed.filter(|_| !placed_kept) {
             // Another placement of a mesh: its triangles come from the mesh; only
             // their owners, materials and containers are kept.
             let mesh = &out.instancing.meshes[m as usize];
@@ -1268,8 +1559,6 @@ impl Document {
                 lazy,
             );
         }
-        // "Cut opening" components glued here cut holes into the faces they sit on.
-        let openings = self.cut_openings(ents);
         // A collection reached again (another instance of its definition) reuses the
         // triangles of its faces (they depend only on the collection).
         let key = std::ptr::from_ref(ents) as usize;
@@ -1280,23 +1569,28 @@ impl Document {
         // face: not kept).
         let mut kept = match (&mut walk.tess, ctx) {
             (Some(cache), Some(ctx))
-                if openings.is_empty() && ents.faces.len() >= crate::tess_cache::KEEP_MIN_FACES =>
+                if !whole_kept
+                    && openings.is_empty()
+                    && ents.faces.len() >= crate::tess_cache::KEEP_MIN_FACES =>
             {
                 Some(cache.visit(ctx))
             }
             _ => None,
         };
-        for (f, face) in &ents.faces {
-            if placed.is_some() {
-                break;
-            }
+        // Draws face `f` (into `build` too when it makes a mesh).
+        let draw_face = |out: &mut SceneBuild,
+                         build: &mut Option<Build>,
+                         kept: &mut Option<crate::tess_cache::Visit>,
+                         triangles: &mut FxMap<(usize, FaceId), Vec<[DVec3; 3]>>,
+                         f: FaceId,
+                         face: &mt_kernel::Face| {
             let hidden = ghost || face.attrs.hidden;
             if rest_here
                 || (face.attrs.hidden && !show_hidden)
                 || (ghost && !show_objects)
                 || !self.layer_visible(face.attrs.layer)
             {
-                continue;
+                return;
             }
             let front_material = face.attrs.material.or(inherited);
             let back_material = face.attrs.back_material.or(inherited);
@@ -1351,7 +1645,7 @@ impl Document {
             let own;
             let tris: &[[DVec3; 3]] = match kept.as_mut().and_then(|v| v.triangles(ents, f)) {
                 Some(tris) => tris,
-                None if reused => walk.triangles.entry((key, f)).or_insert_with(tessellate),
+                None if reused => triangles.entry((key, f)).or_insert_with(tessellate),
                 None => {
                     own = tessellate();
                     &own
@@ -1376,11 +1670,10 @@ impl Document {
                 // A mirroring transform flips the winding; `place` keeps it
                 // counter-clockwise around the front normal.
                 let (verts, tri) = lt.place(&xf, n);
-                match &mut build {
+                match build {
                     Some(b) => b.tris.push(lt),
                     None => {
                         for v in verts {
-                            out.indices.push(out.vertices.len() as u32);
                             out.vertices.push(v);
                         }
                     }
@@ -1404,13 +1697,70 @@ impl Document {
                 out.push_tri(tri, owner_of(Owner::Face(f)));
                 out.tri_material.push([front_material, back_material]);
             }
+        };
+        if chunked {
+            for c in 0..ents.faces.chunk_count() {
+                let start = crate::scene_cache::ends(out);
+                match (&mut rec, &mut walk.pieces) {
+                    (Some(rec), Some(p)) => {
+                        if let Some(piece) = Pieces::valid_piece(&mut old, ents, Map::Faces, c) {
+                            rec.faces.push(Some(p.copy_piece(out, piece, container)));
+                            if let Some(k) = &mut kept {
+                                k.keep_chunk(c);
+                            }
+                        } else {
+                            let mut deps = Deps::default();
+                            for (f, face) in ents.faces.iter_chunk(c) {
+                                deps.face(ents, face);
+                                draw_face(out, &mut build, &mut kept, &mut walk.triangles, f, face);
+                            }
+                            let at = At::since(start, out);
+                            let piece = Piece::new(ents, Map::Faces, c, deps, at, out, any_hidden);
+                            rec.faces.push(Some(piece));
+                        }
+                    }
+                    _ => {
+                        for (f, face) in ents.faces.iter_chunk(c) {
+                            draw_face(out, &mut build, &mut kept, &mut walk.triangles, f, face);
+                        }
+                    }
+                }
+                if is_context {
+                    let edges = start[0]..out.edge_owner.len();
+                    (out.context.face_chunks).push((edges, start[2]..out.tri_owner.len()));
+                }
+            }
+        } else if !whole_kept && placed.is_none() {
+            for (f, face) in &ents.faces {
+                draw_face(out, &mut build, &mut kept, &mut walk.triangles, f, face);
+            }
         }
         if let (Some(visit), Some(cache)) = (kept, &mut walk.tess) {
             cache.finish(visit);
         }
         if let (Some(b), Some(key), Some(builder)) = (build, place, &mut walk.instancing) {
             let tris = tris_start..out.tri_owner.len();
-            b.finish(builder, key, xf, placement_owner, tris, edges, out);
+            let meshes = out.instancing.meshes.len();
+            let contained = edges.len();
+            b.finish(builder, key, xf, placement_owner, tris, edges.clone(), out);
+            if let Some(rec) = &mut rec {
+                let mesh = (out.instancing.meshes.len() > meshes).then_some(meshes as u32);
+                let lazy =
+                    mesh.is_some_and(|m| out.instancing.meshes[m as usize].local_edges.is_some());
+                let at = At::since(start, out);
+                let w = Whole::new(ents, at, contained, out, mesh, lazy, &xf, any_hidden);
+                rec.whole = Some(w);
+            }
+        }
+        if let (Some(rec), Some(Role::Placed(_)), Some(m)) = (&mut rec, role, lazy_edges)
+            && !placed_kept
+        {
+            let at = At::since(start, out);
+            let w = Whole::placement(at, edges.len(), out, m, &xf, any_hidden);
+            rec.whole = Some(w);
+        }
+        if let (Some(rec), Some(p)) = (rec, &mut walk.pieces) {
+            p.new.push(rec);
         }
 
         for (index, i) in ents.instances.iter().enumerate() {
@@ -1493,7 +1843,12 @@ impl Document {
                 similar: parent.similar,
                 faded: matches!(child, Level::Outside),
             });
+            let drawn = (out.edge_owner.len(), out.tri_owner.len());
             self.collect(&def.entities, ctx, ix, parent, child, walk, out);
+            if matches!(level, Level::Context([])) {
+                let edges = drawn.0..out.edge_owner.len();
+                (out.context.instances).push((index, edges, drawn.1..out.tri_owner.len()));
+            }
             if let Some(turn) = sun_turn {
                 out.sun_facing.push((start..out.vertices.len(), turn));
             }
@@ -1727,6 +2082,11 @@ mod tests {
         assert_eq!(doc.redo_name(), Some("Line"));
     }
 
+    thread_local! {
+        /// The scene the last `dump` built from the one before (`scene_cache`).
+        static KEPT: std::cell::RefCell<Option<Scene>> = const { std::cell::RefCell::new(None) };
+    }
+
     /// Everything undo restores, as text (clones drop the spatial indexes, which are
     /// lookup caches, not model data).
     /// Also checks that the scene, built with the triangles kept from earlier builds,
@@ -1740,6 +2100,10 @@ mod tests {
             crate::bench::checksum(&fresh.scene()),
             "kept triangles"
         );
+        // And the scene built from the previous dump's keeps only what is unchanged.
+        let prev = KEPT.with(|k| k.borrow_mut().take());
+        let kept = crate::scene_cache::tests::step(doc, prev, "kept pieces");
+        KEPT.with(|k| *k.borrow_mut() = Some(kept));
         format!(
             "{:?}",
             (

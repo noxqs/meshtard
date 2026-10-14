@@ -181,6 +181,21 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    /// A mesh with nothing (left where a mesh was moved out, `scene_cache`).
+    pub fn empty() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            edges: Vec::new(),
+            tris: Vec::new(),
+            local_edges: None,
+            hidden_edges: Vec::new(),
+            tri_points: Vec::new(),
+            edge_points: Vec::new(),
+            edge_normals: Vec::new(),
+        }
+    }
+
     /// The world segment of edge `k` (of `local_edges`) placed with `tables`, exactly
     /// as the scene build makes it.
     pub fn placed_edge(&self, k: usize, tables: &PlacedTables) -> Segment {
@@ -350,7 +365,7 @@ impl Build {
         owner: Option<Owner>,
         tris: Range<usize>,
         edges: Range<usize>,
-        out: &mut Scene,
+        out: &mut crate::document::SceneBuild,
     ) {
         let edges_instanced = builder.edges && self.edges.len() >= MIN_INSTANCED_EDGES;
         let flat =
@@ -361,7 +376,6 @@ impl Build {
             for t in &self.tris {
                 let (verts, _) = t.place(&xf, world_normal(&normal_xf, t.normal));
                 for v in verts {
-                    out.indices.push(out.vertices.len() as u32);
                     out.vertices.push(v);
                 }
             }
@@ -733,6 +747,84 @@ impl Scene {
                 (p.mesh, p.transform.as_mat4())
             })
             .collect()
+    }
+}
+
+impl Instancing {
+    /// Everything held, exactly (bit patterns of floats), for tests comparing scenes.
+    #[cfg(test)]
+    pub(crate) fn exact(&self) -> String {
+        use std::fmt::Write;
+        let m4 = |m: &DMat4| m.to_cols_array().map(f64::to_bits);
+        let m3 = |m: &DMat3| m.to_cols_array().map(f64::to_bits);
+        let mut s = format!("{} {}\n", self.instanced_tris, self.lazy_edges);
+        s += &self.exact_meshes();
+        for p in &self.placements {
+            writeln!(
+                s,
+                "{} {:?} {:?} {:?} {:?} {:?} {} {} {}",
+                p.mesh,
+                m4(&p.transform),
+                p.owner,
+                p.tris,
+                p.edges,
+                m3(&p.normal_xf),
+                p.lazy_edges,
+                p.flat_before,
+                p.lazy_edges_before
+            )
+            .unwrap();
+        }
+        s
+    }
+
+    /// The meshes, exactly.
+    #[cfg(test)]
+    pub(crate) fn exact_meshes(&self) -> String {
+        use std::fmt::Write;
+        let b = |v: &[DVec3]| -> Vec<[u64; 3]> {
+            v.iter().map(|p| p.to_array().map(f64::to_bits)).collect()
+        };
+        let mut s = String::new();
+        for m in &self.meshes {
+            let tris: Vec<_> = (m.tris.iter())
+                .map(|t| {
+                    (
+                        b(&t.local),
+                        b(&[t.normal]),
+                        t.materials,
+                        bytemuck::cast_slice::<_, u8>(&t.verts).to_vec(),
+                    )
+                })
+                .collect();
+            let local: Option<Vec<_>> = m.local_edges.as_ref().map(|l| {
+                l.iter()
+                    .map(|e| {
+                        (
+                            bytemuck::bytes_of(&e.seg).to_vec(),
+                            e.ends,
+                            e.normals,
+                            e.count,
+                        )
+                    })
+                    .collect()
+            });
+            writeln!(
+                s,
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                bytemuck::cast_slice::<_, u8>(&m.vertices),
+                m.indices,
+                bytemuck::cast_slice::<_, u8>(&m.edges),
+                tris,
+                local,
+                m.hidden_edges,
+                b(&m.tri_points),
+                b(&m.edge_points),
+                b(&m.edge_normals),
+            )
+            .unwrap();
+        }
+        s
     }
 }
 

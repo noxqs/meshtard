@@ -593,6 +593,18 @@ fn fit_sun(sun: Vec3, bounds: (Vec3, Vec3)) -> (Mat4, f32) {
     )
 }
 
+/// Bounds of the [`Segment::MODEL_EDGE`] segments of `segments`.
+pub fn model_edge_bounds(segments: &[Segment]) -> Option<(Vec3, Vec3)> {
+    segments
+        .iter()
+        .filter(|s| s.flags & Segment::MODEL_EDGE != 0)
+        .flat_map(|s| [Vec3::from(s.a), Vec3::from(s.b)])
+        .fold(None, |acc, p| match acc {
+            None => Some((p, p)),
+            Some((lo, hi)) => Some((p.min(lo), p.max(hi))),
+        })
+}
+
 /// The multisample counts (of 1, 2, 4, 8) the adapter supports for the viewport's
 /// color and depth formats.
 pub fn supported_samples(adapter: &wgpu::Adapter) -> Vec<u32> {
@@ -711,6 +723,10 @@ pub struct Viewport {
     edges_count: u32,
     /// Bounds of the [`Segment::MODEL_EDGE`] segments.
     edge_bounds: Option<(Vec3, Vec3)>,
+    /// Edges drawn after the model's (see [`Viewport::set_extra_edges`]).
+    extra_edges: Option<wgpu::Buffer>,
+    extra_count: u32,
+    extra_bounds: Option<(Vec3, Vec3)>,
     style: Style,
     targets: Option<Targets>,
     /// Multisample count of the color and depth targets and pipelines (1: none).
@@ -1069,6 +1085,9 @@ impl Viewport {
             edges: None,
             edges_count: 0,
             edge_bounds: None,
+            extra_edges: None,
+            extra_count: 0,
+            extra_bounds: None,
             style: style.clone(),
             targets: None,
             samples,
@@ -1080,22 +1099,67 @@ impl Viewport {
 
     /// Replaces the model's edges.
     pub fn set_edges(&mut self, device: &wgpu::Device, segments: &[Segment]) {
-        self.edge_bounds = segments
-            .iter()
-            .filter(|s| s.flags & Segment::MODEL_EDGE != 0)
-            .flat_map(|s| [Vec3::from(s.a), Vec3::from(s.b)])
-            .fold(None, |acc, p| match acc {
-                None => Some((p, p)),
-                Some((lo, hi)) => Some((p.min(lo), p.max(hi))),
-            });
+        self.edge_bounds = model_edge_bounds(segments);
         self.edges_count = segments.len() as u32;
         self.edges = (!segments.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model edges"),
                 contents: bytemuck::cast_slice(segments),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            })
+        });
+    }
+
+    /// Rewrites the model's edges from `first` on with `segments` (they must fit in
+    /// those of the last [`Viewport::set_edges`]). The bounds are left as they were:
+    /// see [`Viewport::set_edge_bounds`].
+    pub fn write_edges(&mut self, queue: &wgpu::Queue, first: usize, segments: &[Segment]) {
+        debug_assert!(first + segments.len() <= self.edges_count as usize);
+        if let Some(edges) = &self.edges
+            && !segments.is_empty()
+        {
+            let at = (first * std::mem::size_of::<Segment>()) as u64;
+            queue.write_buffer(edges, at, bytemuck::cast_slice(segments));
+        }
+    }
+
+    /// Sets the bounds of the model's [`Segment::MODEL_EDGE`] segments, for edges
+    /// changed with [`Viewport::write_edges`].
+    pub fn set_edge_bounds(&mut self, bounds: Option<(Vec3, Vec3)>) {
+        self.edge_bounds = bounds;
+    }
+
+    /// Edges drawn after the model's, like them (the highlight's moved copies and
+    /// boxes, guides); empty clears them.
+    pub fn set_extra_edges(&mut self, device: &wgpu::Device, segments: &[Segment]) {
+        self.extra_bounds = model_edge_bounds(segments);
+        self.extra_count = segments.len() as u32;
+        self.extra_edges = (!segments.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("extra edges"),
+                contents: bytemuck::cast_slice(segments),
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+    }
+
+    /// Takes the model's faces as [`Viewport::set_faces`] does, rewriting only the
+    /// vertices in `changed` when there are as many as last time (the others must be
+    /// the last ones given), and the indices only when they or the opacity of a
+    /// triangle changed.
+    pub fn update_faces(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertices: &[FaceVertex],
+        indices: &[u32],
+        changed: &[std::ops::Range<usize>],
+    ) {
+        let updated = (self.faces.as_mut())
+            .is_some_and(|f| f.update(device, queue, vertices, indices, changed));
+        if !updated {
+            self.set_faces(device, vertices, indices);
+        }
     }
 
     /// Replaces the model's faces: an indexed triangle list. Empty slices clear.
@@ -1413,7 +1477,10 @@ impl Viewport {
         let forward = camera.forward().as_vec3();
         let eye = camera.eye.as_vec3();
         let bounds = union(
-            union(self.face_bounds(), self.edge_bounds),
+            union(
+                self.face_bounds(),
+                union(self.edge_bounds, self.extra_bounds),
+            ),
             self.edge_instances.as_ref().and_then(|i| i.bounds),
         );
         let (near, far) = bounds.map_or((0.0, 1.0), |(lo, hi)| {
@@ -1772,22 +1839,31 @@ impl Viewport {
             pass.set_index_buffer(sel.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..sel.translucent.end.max(sel.opaque.end), 0, 0..1);
         }
-        if let Some(edges) = &self.edges {
-            pass.set_pipeline(&self.lines);
-            pass.set_vertex_buffer(0, edges.slice(..));
-            // Jitter draws a second stroke of each model edge (vertices 6..12).
-            let vertices = if style.jitter { 12 } else { 6 };
-            pass.draw(0..vertices, 0..self.edges_count);
+        // Jitter draws a second stroke of each model edge (vertices 6..12).
+        let vertices = if style.jitter { 12 } else { 6 };
+        for (edges, count) in [
+            (&self.edges, self.edges_count),
+            (&self.extra_edges, self.extra_count),
+        ] {
+            if let Some(edges) = edges {
+                pass.set_pipeline(&self.lines);
+                pass.set_vertex_buffer(0, edges.slice(..));
+                pass.draw(0..vertices, 0..count);
+            }
         }
         self.draw_instanced_edges(pass, &self.inst_lines);
-        if let Some(edges) = self
-            .edges
-            .as_ref()
-            .filter(|_| style.back_edges && !wireframe && !xray)
-        {
-            pass.set_pipeline(&self.back_lines);
-            pass.set_vertex_buffer(0, edges.slice(..));
-            pass.draw(0..6, 0..self.edges_count);
+        for (edges, count) in [
+            (&self.edges, self.edges_count),
+            (&self.extra_edges, self.extra_count),
+        ] {
+            if let Some(edges) = edges
+                .as_ref()
+                .filter(|_| style.back_edges && !wireframe && !xray)
+            {
+                pass.set_pipeline(&self.back_lines);
+                pass.set_vertex_buffer(0, edges.slice(..));
+                pass.draw(0..6, 0..count);
+            }
         }
         if style.back_edges && !wireframe && !xray {
             self.draw_instanced_edges(pass, &self.inst_back_lines);
