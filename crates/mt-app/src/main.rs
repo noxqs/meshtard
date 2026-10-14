@@ -1,5 +1,10 @@
 //! meshtard desktop application.
 
+// Release builds on Windows are GUI programs: no console window next to the app.
+// Debug builds keep the console for log output. (`--version` still prints when
+// its output is redirected, e.g. `meshtard --version > v.txt`.)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod about;
 mod anim_export;
 mod animation;
