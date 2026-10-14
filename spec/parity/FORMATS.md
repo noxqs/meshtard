@@ -96,8 +96,10 @@ corner within the tolerance of the other's plane (normals within 0.8° of opposi
 two sides of a fold or of a solid thinner than the tolerance, which exports turn into
 the same triangles). A group's corners more than half the tolerance off its plane are
 first moved onto it (at most twice the tolerance, when no vertex comes within the
-tolerance of another or half of it of an edge and every other face at them stays
-planar), and each cell starts at its corner nearest the middle of its corners'
+tolerance of another or half of it of an edge, except onto an edge away from its ends,
+which is then split there, and every other face at them stays planar, turned to the
+plane through its moved corners or else ear-clipped and joined back into planar parts
+whose new sides pass no vertex or edge), and each cell starts at its corner nearest the middle of its corners'
 heights (a face's plane goes through its first corner). Merged faces take their first
 face's plane, which can make them coplanar with a face they overlap; those overlaps are
 resolved after merging too. Faces over the same edges are dropped. Faces of different
@@ -106,10 +108,12 @@ either). `import_check` (now also reading OBJ, STL, PLY, 3MF and 3DS; `--errors`
 counts every problem by kind) over the 59 assimp / tinyobj / 3MF Consortium / Stanford
 bunny files of `formats_check`, the Khronos samples above and the IFC samples: every
 `formats_check` import is valid with `Checks::ALL` (16 invalid before healing, 3 after
-its first version: `regr01.obj`, `Wuson.stl`, `heartgears.3mf`), and S_Office (web-ifc)
-has 1 of its ~3,760 meshes left (was 3): a window-frame slab whose two overlapping
-faces have corners 0.0007 in. out of each other's plane, where moving them would bend
-another face of the slab (LEFTOVERS 17). Times (release, same machine): TransmissionTest
+its first version: `regr01.obj`, `Wuson.stl`, `heartgears.3mf`), and so are all of
+S_Office's (web-ifc) ~3,760 meshes (the last one, a window-frame slab whose two
+overlapping faces have corners 0.0007 in. out of each other's plane, settled when
+moving them could split a side of the slab and cut a face of its rim into planar
+parts; LEFTOVERS 28). Ifc4_Revit_ARC (buildingSMART) still has 3 invalid meshes
+(crossing edges, as before). Times (release, same machine): TransmissionTest
 imports in about 2.9 s (2.4 s with the first healing, 1.0 s unhealed); S_Office 7.3 s
 (7.6 s), heartgears 1.4 s (1.0 s), bun_zipper 1.3 s (1.0 s).
 
@@ -126,6 +130,12 @@ slivers (Lawson flips towards a constrained Delaunay triangulation, or maximizin
 narrowest triangle) was tried in `tessellate` and made these round trips worse (29 to
 45 differences): earcut's slivers are ears of three consecutive corners, which
 re-import's side splitting absorbs exactly, while flipped ones are not; it is not used.
+`formats_check` now widens its area limits by the area of the exported triangles that
+re-import may heal away (triangles over the same corners as an earlier one, slivers
+thinner than the tolerance: 2e-6 of the low-res bunny, 5e-3 of Spider, 6e-2 of
+`Wuson.stl`), since a round trip of such a model can only be compared that closely;
+every round trip above is within it (29 differences to 1, `transparentTest.fbx`, an
+ASCII FBX file that is not read).
 
 ## IFC checks
 
