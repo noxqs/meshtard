@@ -11,7 +11,9 @@
 //! edit touched. [`SlotStore::thaw`] makes the map equal to a snapshot again,
 //! rewriting only the chunks that differ.
 //!
-//! Reads go straight to the flat storage, as with `SlotMap`; writes also set a flag.
+//! Reads go straight to the flat storage, as with `SlotMap`; writes also store the
+//! chunk's new version (a chunk is dirty when its version is past the write count at
+//! the last snapshot: no separate flags).
 //!
 //! Each chunk also has a version ([`SlotStore::chunk_version`]) that changes with every
 //! write to it and is never cleared, and each store an id of its own
@@ -111,10 +113,10 @@ impl<V: Clone> Snapshot<V> {
             slots,
             free_head: f.free_head,
             num_elems: f.num_elems,
-            dirty: vec![false; f.chunks.len()],
             base: Some(self.clone()),
             versions: vec![0; f.chunks.len()],
             writes: 0,
+            clean_at: 0,
             uid: new_uid(),
             _k: PhantomData,
         }
@@ -133,16 +135,18 @@ pub struct SlotStore<K: Key, V> {
     slots: Vec<Slot<V>>,
     free_head: u32,
     num_elems: u32,
-    /// Per chunk of `slots`: may differ from the same chunk of `base` (chunks past its
-    /// end count as changed).
-    dirty: Vec<bool>,
-    /// The last snapshot taken or restored. Every chunk not marked in `dirty` equals
-    /// its chunk exactly (slot for slot, vacant ones included).
+    /// The last snapshot taken or restored. Every chunk whose version is at most
+    /// `clean_at` equals its chunk exactly (slot for slot, vacant ones included); chunks
+    /// past its end count as changed.
     base: Option<Snapshot<V>>,
-    /// Per chunk of `slots`: the value `writes` had at its last change.
+    /// Per chunk of `slots` (always exactly one per chunk): the value `writes` had at
+    /// its last change. A write costs one store here, nothing else.
     versions: Vec<u64>,
     /// Changes so far (see `versions`).
     writes: u64,
+    /// `writes` when `base` was taken or restored: chunks changed since have a later
+    /// version (the dirty flags).
+    clean_at: u64,
     /// Unique among stores (copies get their own).
     uid: u64,
     _k: PhantomData<fn(K) -> K>,
@@ -181,10 +185,10 @@ impl<K: Key, V> SlotStore<K, V> {
             }],
             free_head: 1,
             num_elems: 0,
-            dirty: Vec::new(),
             base: None,
-            versions: Vec::new(),
+            versions: vec![0],
             writes: 0,
+            clean_at: 0,
             uid: new_uid(),
             _k: PhantomData,
         }
@@ -219,17 +223,15 @@ impl<K: Key, V> SlotStore<K, V> {
         }
     }
 
-    /// Marks the chunk of slot `idx` changed.
-    #[inline]
+    /// Marks the chunk of slot `idx` (an existing slot) changed: gives it a new version.
+    #[inline(always)]
     fn touch(&mut self, idx: usize) {
-        if let Some(d) = self.dirty.get_mut(idx >> SHIFT) {
-            *d = true;
-        }
-        self.bump(idx >> SHIFT);
+        self.writes += 1;
+        self.versions[idx >> SHIFT] = self.writes;
     }
 
-    /// Gives chunk `c` a new version.
-    #[inline]
+    /// Gives chunk `c` a new version (growing `versions` up to it: for `thaw`, which
+    /// restores the invariant when done).
     fn bump(&mut self, c: usize) {
         self.writes += 1;
         if c >= self.versions.len() {
@@ -239,7 +241,6 @@ impl<K: Key, V> SlotStore<K, V> {
     }
 
     fn touch_all(&mut self) {
-        self.dirty.fill(true);
         self.writes += 1;
         self.versions.resize(self.slots.len().div_ceil(CHUNK), 0);
         self.versions.fill(self.writes);
@@ -259,7 +260,7 @@ impl<K: Key, V> SlotStore<K, V> {
     /// only then). `None` past the last chunk.
     #[inline]
     pub fn chunk_version(&self, c: usize) -> Option<u64> {
-        (c < self.chunk_count()).then(|| self.versions.get(c).copied().unwrap_or(0))
+        self.versions.get(c).copied()
     }
 
     /// The chunk key `k`'s slot is in.
@@ -282,12 +283,16 @@ impl<K: Key, V> SlotStore<K, V> {
     #[inline]
     pub fn get_mut(&mut self, k: K) -> Option<&mut V> {
         let (idx, version) = parts(k);
-        self.touch(idx);
         match self.slots.get_mut(idx) {
             Some(Slot {
                 version: v,
                 content: Content::Occupied(x),
-            }) if *v == version => Some(x),
+            }) if *v == version => {
+                // `touch`, with the slot borrowed.
+                self.writes += 1;
+                self.versions[idx >> SHIFT] = self.writes;
+                Some(x)
+            }
             _ => None,
         }
     }
@@ -316,17 +321,20 @@ impl<K: Key, V> SlotStore<K, V> {
             self.touch(idx);
             return k;
         }
+        debug_assert_eq!(self.versions.len(), self.chunk_count());
         assert!(self.slots.len() < u32::MAX as usize, "SlotMap is full");
         let k = key(idx, 1);
         self.slots.push(Slot {
             version: 1,
             content: Content::Occupied(f(k)),
         });
-        match self.dirty.get_mut(idx >> SHIFT) {
-            Some(d) => *d = true,
-            None => self.dirty.push(true),
+        // A new chunk starts at a multiple of `CHUNK`.
+        self.writes += 1;
+        if idx & (CHUNK - 1) == 0 {
+            self.versions.push(self.writes);
+        } else {
+            self.versions[idx >> SHIFT] = self.writes;
         }
-        self.bump(idx >> SHIFT);
         self.free_head = idx as u32 + 1;
         self.num_elems += 1;
         k
@@ -334,16 +342,18 @@ impl<K: Key, V> SlotStore<K, V> {
 
     #[inline]
     pub fn remove(&mut self, k: K) -> Option<V> {
-        self.get(k)?;
-        let (idx, _) = parts(k);
-        self.touch(idx);
-        let slot = &mut self.slots[idx];
+        let (idx, version) = parts(k);
+        let slot = self.slots.get_mut(idx)?;
+        if slot.version != version || !matches!(slot.content, Content::Occupied(_)) {
+            return None;
+        }
         let Content::Occupied(value) =
             std::mem::replace(&mut slot.content, Content::Vacant(self.free_head))
         else {
             unreachable!()
         };
         slot.version = slot.version.wrapping_add(1);
+        self.touch(idx);
         self.free_head = idx as u32;
         self.num_elems -= 1;
         Some(value)
@@ -417,7 +427,7 @@ impl<K: Key, V> SlotStore<K, V> {
 
     /// Whether chunk `c` is known to equal chunk `c` of `base`.
     fn clean(&self, c: usize) -> bool {
-        !self.dirty.get(c).copied().unwrap_or(true)
+        self.versions.get(c).is_some_and(|&v| v <= self.clean_at)
             && self.base.as_ref().is_some_and(|b| c < b.0.chunks.len())
     }
 
@@ -474,7 +484,7 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
             && b.0.slots == self.slots.len()
             && b.0.free_head == self.free_head
             && b.0.num_elems == self.num_elems
-            && !self.dirty.contains(&true)
+            && self.writes == self.clean_at
         {
             return b.clone();
         }
@@ -496,8 +506,7 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
             num_elems: self.num_elems,
         }));
         self.base = Some(s.clone());
-        self.dirty.clear();
-        self.dirty.resize(n, false);
+        self.clean_at = self.writes;
         s
     }
 
@@ -508,11 +517,9 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
         let mut changed = self.slots.len() != f.slots
             || self.free_head != f.free_head
             || self.num_elems != f.num_elems;
-        if self.slots.len() != f.slots {
-            // The last chunk may end elsewhere.
-            let last = self.slots.len().min(f.slots).saturating_sub(1) >> SHIFT;
-            self.bump(last);
-        }
+        // The last chunk may end elsewhere.
+        let last = (self.slots.len() != f.slots)
+            .then(|| self.slots.len().min(f.slots).saturating_sub(1) >> SHIFT);
         self.slots.truncate(f.slots);
         for (c, chunk) in f.chunks.iter().enumerate() {
             let r = chunk_range(c, f.slots);
@@ -531,11 +538,13 @@ impl<K: Key, V: Clone + PartialEq> SlotStore<K, V> {
                 self.slots.extend_from_slice(chunk);
             }
         }
+        if let Some(last) = last {
+            self.bump(last);
+        }
         self.free_head = f.free_head;
         self.num_elems = f.num_elems;
-        self.dirty.clear();
-        self.dirty.resize(f.chunks.len(), false);
         self.versions.resize(f.chunks.len(), 0);
+        self.clean_at = self.writes;
         self.base = Some(s.clone());
         changed
     }
@@ -549,10 +558,10 @@ impl<K: Key, V: Clone> Clone for SlotStore<K, V> {
             slots: self.slots.clone(),
             free_head: self.free_head,
             num_elems: self.num_elems,
-            dirty: self.dirty.clone(),
             base: self.base.clone(),
             versions: self.versions.clone(),
             writes: self.writes,
+            clean_at: self.clean_at,
             uid: new_uid(),
             _k: PhantomData,
         }

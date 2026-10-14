@@ -617,38 +617,70 @@ fn try_in_place(ents: &mut Entities, moves: &BTreeMap<VertexId, DVec3>, flip: &[
     ok
 }
 
+/// Whether `test` holds for every item. Many items are tested on several threads (the
+/// answer is the same: the tests only read).
+fn all_items<T: Sync>(items: &[T], test: impl Fn(&T) -> bool + Sync) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// Items per thread at least (fewer are not worth a thread).
+    const MIN_ITEMS: usize = 2048;
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len() / MIN_ITEMS);
+    if threads <= 1 {
+        return items.iter().all(test);
+    }
+    let failed = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        for part in items.chunks(items.len().div_ceil(threads)) {
+            let (test, failed) = (&test, &failed);
+            s.spawn(move || {
+                for x in part {
+                    if failed.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if !test(x) {
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    !failed.into_inner()
+}
+
 fn in_place_ok(
     ents: &mut Entities,
     moves: &BTreeMap<VertexId, DVec3>,
     edges: &[EdgeId],
     faces: &[FaceId],
 ) -> bool {
+    let moved: Vec<VertexId> = moves.keys().copied().collect();
+    let r: &Entities = ents;
     // Moved vertices stay apart from all others and off all edges.
-    for &v in moves.keys() {
-        let p = ents.pos(v);
-        if ents
+    let apart = all_items(&moved, |&v| {
+        let p = r.pos(v);
+        let welds = r
             .vertices_near(p, TOL)
             .into_iter()
-            .any(|w| w != v && ents.pos(w).distance(p) <= TOL)
-        {
-            return false;
-        }
-        let on_edge = ents.edges_near(p, TOL).into_iter().any(|e| {
-            let e = &ents.edges[e];
-            e.start != v
-                && e.end != v
-                && point_segment(p, ents.pos(e.start), ents.pos(e.end)).0 <= TOL
-        });
-        if on_edge {
-            return false;
-        }
+            .any(|w| w != v && r.pos(w).distance(p) <= TOL);
+        !welds
+            && !r.edges_near(p, TOL).into_iter().any(|e| {
+                let e = &r.edges[e];
+                e.start != v
+                    && e.end != v
+                    && point_segment(p, r.pos(e.start), r.pos(e.end)).0 <= TOL
+            })
+    });
+    if !apart {
+        return false;
     }
     // Moved edges cross nothing and pass through no vertex.
-    for &a in edges {
-        let ea = &ents.edges[a];
-        let (p0, p1) = (ents.pos(ea.start), ents.pos(ea.end));
-        let crosses = ents.edges_near_segment(p0, p1, TOL).into_iter().any(|b| {
-            let eb = &ents.edges[b];
+    let clear = all_items(edges, |&a| {
+        let ea = &r.edges[a];
+        let (p0, p1) = (r.pos(ea.start), r.pos(ea.end));
+        let crosses = r.edges_near_segment(p0, p1, TOL).into_iter().any(|b| {
+            let eb = &r.edges[b];
             if b == a
                 || [eb.start, eb.end]
                     .iter()
@@ -656,16 +688,17 @@ fn in_place_ok(
             {
                 return false;
             }
-            segment_segment(p0, p1, ents.pos(eb.start), ents.pos(eb.end))
+            segment_segment(p0, p1, r.pos(eb.start), r.pos(eb.end))
                 .is_some_and(|(d, _, _)| d <= TOL)
         });
-        let through = ents
+        let through = r
             .vertices_near_segment(p0, p1, TOL)
             .into_iter()
-            .any(|w| w != ea.start && w != ea.end && point_segment(ents.pos(w), p0, p1).0 <= TOL);
-        if crosses || through {
-            return false;
-        }
+            .any(|w| w != ea.start && w != ea.end && point_segment(r.pos(w), p0, p1).0 <= TOL);
+        !crosses && !through
+    });
+    if !clear {
+        return false;
     }
     // Faces stay planar and well wound; their normals follow.
     for &f in faces {
@@ -688,8 +721,9 @@ fn in_place_ok(
             }
         }
     }
+    let ents: &Entities = ents;
     // No coplanar overlaps with the moved faces or edges.
-    for &f in faces {
+    let alone = all_items(faces, |&f| {
         let s = face_sample(ents, f);
         if ents
             .faces_near(s, TOL)
@@ -710,32 +744,26 @@ fn in_place_ok(
                 return false;
             }
         }
-        let covered = ents.edges_in(&bounds).into_iter().any(|e| {
+        !ents.edges_in(&bounds).into_iter().any(|e| {
             let edge = &ents.edges[e];
             let (a, b) = (ents.pos(edge.start), ents.pos(edge.end));
             !mine.contains(&e)
                 && plane.contains(a)
                 && plane.contains(b)
                 && ents.face_contains(f, (a + b) / 2.0)
-        });
-        if covered {
-            return false;
-        }
-    }
-    for &a in edges {
-        let edge = &ents.edges[a];
-        let (p, q) = (ents.pos(edge.start), ents.pos(edge.end));
-        let inside = ents.faces_near((p + q) / 2.0, TOL).into_iter().any(|g| {
-            !edge.faces.contains(&g)
-                && ents.face_plane(g).contains(p)
-                && ents.face_plane(g).contains(q)
-                && ents.face_contains(g, (p + q) / 2.0)
-        });
-        if inside {
-            return false;
-        }
-    }
-    true
+        })
+    });
+    alone
+        && all_items(edges, |&a| {
+            let edge = &ents.edges[a];
+            let (p, q) = (ents.pos(edge.start), ents.pos(edge.end));
+            !ents.faces_near((p + q) / 2.0, TOL).into_iter().any(|g| {
+                !edge.faces.contains(&g)
+                    && ents.face_plane(g).contains(p)
+                    && ents.face_plane(g).contains(q)
+                    && ents.face_contains(g, (p + q) / 2.0)
+            })
+        })
 }
 
 /// Takes out every edge and face touching the moved vertices and inserts them again at

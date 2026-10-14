@@ -4,6 +4,7 @@ Changes since 0.1.4, grouped by area (each area under its own `##` heading).
 
 ## Performance
 
+- Moving a large part of a huge flat model (a tenth of a million-edge grid) is about 2.5x faster, and a Move that welds onto existing geometry there several times faster.
 - Groups and components with translucent materials (windows, glass) and edges drawn with the Jitter style are now drawn with GPU instancing too, with the same back-to-front transparency as before. 5,000 placed windows: 88 MB of GPU buffers down to 2.4 MB, uploads after each edit about 25x faster.
 
 ## Windows
