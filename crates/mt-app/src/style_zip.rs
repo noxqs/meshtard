@@ -1,4 +1,6 @@
-//! SketchUp's own `.style` files (Styles > Details > Open and style collections).
+//! SketchUp's own `.style` files (Styles > Details > Open and style collections;
+//! written by [`write`] for Details > Save As > SketchUp Style), and the zip and XML
+//! helpers the `.skm` material files share ([`crate::skm`]).
 //!
 //! What is known: a `.style` file is a zip archive (forum posts describe renaming
 //! one to `.zip` and finding a few XML files, a `ref` folder and a
@@ -41,10 +43,11 @@ const MAX_TOTAL: u64 = 256 << 20;
 /// Most entries looked at.
 const MAX_ENTRIES: usize = 10_000;
 
-/// Reads a SketchUp `.style` archive.
-pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
+/// The files of a zip archive (directories skipped, names with `/`), read within
+/// the size limits above.
+pub(crate) fn entries(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut zip =
-        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("not a style file: {e}"))?;
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("not a zip archive: {e}"))?;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut total = 0u64;
     for i in 0..zip.len().min(MAX_ENTRIES) {
@@ -60,12 +63,18 @@ pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
         let room = MAX_TOTAL.saturating_sub(total).min(MAX_ENTRY);
         if (&mut f).take(room + 1).read_to_end(&mut bytes).is_ok() {
             if bytes.len() as u64 > room {
-                return Err("the style file is too large".into());
+                return Err("the file is too large".into());
             }
             total += bytes.len() as u64;
             files.push((name, bytes));
         }
     }
+    Ok(files)
+}
+
+/// Reads a SketchUp `.style` archive.
+pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
+    let files = entries(data).map_err(|e| format!("not a style file: {e}"))?;
     let (folder, raw) = files
         .iter()
         .filter(|(n, _)| n.to_ascii_lowercase().ends_with(".xml"))
@@ -83,6 +92,16 @@ pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
         &|id| raw.items.get(&id).map(String::as_str),
         &mut style.settings,
     );
+    // Written by us: our text style holds what the items lack (fog, Monochrome, ...).
+    if let Some(ours) = files
+        .iter()
+        .find(|(n, _)| n == OURS)
+        .and_then(|(_, b)| std::str::from_utf8(b).ok())
+        .and_then(|t| crate::tray_extra::parse_style_file(t).ok())
+    {
+        style.settings = ours.settings;
+        style.settings.watermarks.clear();
+    }
     let find = |path: &str, file_name: &str| -> Option<Arc<[u8]>> {
         let mut p = path.trim();
         while let Some(rest) = p.strip_prefix("./") {
@@ -126,8 +145,10 @@ pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
             image,
             overlay: w.overlay,
             opacity: w.opacity,
-            mode: WatermarkMode::Stretched { lock_aspect: true },
-            mask: false,
+            mode: w
+                .mode
+                .unwrap_or(WatermarkMode::Stretched { lock_aspect: true }),
+            mask: w.mask,
         });
     }
     let thumbnail = files
@@ -142,7 +163,7 @@ pub(crate) fn read(data: &[u8]) -> Result<ZipStyle, String> {
 }
 
 /// `[Name]` (a SketchUp built-in name) without its brackets.
-fn display_name(s: &str, empty: &str) -> String {
+pub(crate) fn display_name(s: &str, empty: &str) -> String {
     let t = s.trim();
     let t = t
         .strip_prefix('[')
@@ -162,6 +183,9 @@ struct RawWatermark {
     file_name: String,
     overlay: bool,
     opacity: f32,
+    /// Placement and Create Mask from our own attributes (see [`write`]).
+    mode: Option<WatermarkMode>,
+    mask: bool,
 }
 
 #[derive(Debug, Default)]
@@ -174,12 +198,12 @@ struct RawStyle {
 
 /// An XML tag at `start` (the `<`): its local name (prefix dropped), its attribute
 /// text, whether it closes (`</x>`) or is empty (`<x/>`), and the index after `>`.
-struct Tag<'a> {
-    name: &'a str,
-    attrs: &'a str,
-    closing: bool,
-    empty: bool,
-    end: usize,
+pub(crate) struct Tag<'a> {
+    pub name: &'a str,
+    pub attrs: &'a str,
+    pub closing: bool,
+    pub empty: bool,
+    pub end: usize,
 }
 
 fn tag_at(xml: &str, start: usize) -> Option<Tag<'_>> {
@@ -211,7 +235,7 @@ fn tag_at(xml: &str, start: usize) -> Option<Tag<'_>> {
 
 /// The tags of `xml` in order (comments, declarations and processing instructions
 /// skipped), with the index of each `<`.
-fn tags(xml: &str) -> impl Iterator<Item = (usize, Tag<'_>)> {
+pub(crate) fn tags(xml: &str) -> impl Iterator<Item = (usize, Tag<'_>)> {
     xml.match_indices('<').filter_map(move |(i, _)| {
         let next = xml[i + 1..].chars().next()?;
         if next == '!' || next == '?' {
@@ -222,7 +246,7 @@ fn tags(xml: &str) -> impl Iterator<Item = (usize, Tag<'_>)> {
 }
 
 /// Attribute `key` of a tag's attribute text, entities decoded.
-fn attr(attrs: &str, key: &str) -> Option<String> {
+pub(crate) fn attr(attrs: &str, key: &str) -> Option<String> {
     let mut rest = attrs;
     while let Some(i) = rest.find(key) {
         let before_ok = i == 0 || rest.as_bytes()[i - 1].is_ascii_whitespace();
@@ -242,7 +266,7 @@ fn attr(attrs: &str, key: &str) -> Option<String> {
 }
 
 /// XML entities decoded once.
-fn decode(s: &str) -> String {
+pub(crate) fn decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
@@ -353,6 +377,8 @@ fn watermarks(list: &str) -> Vec<RawWatermark> {
                 opacity: attr(t.attrs, "alphaScale")
                     .and_then(|v| v.trim().parse::<f32>().ok())
                     .map_or(1.0, |a| a.clamp(0.0, 1.0)),
+                mode: attr(t.attrs, MODE_ATTR).and_then(|m| parse_mode(&m)),
+                mask: attr(t.attrs, MASK_ATTR).is_some_and(|m| m.trim() == "1"),
             };
             if t.empty {
                 out.push(w);
@@ -370,6 +396,210 @@ fn watermarks(list: &str) -> Vec<RawWatermark> {
     out.extend(open);
     out.retain(|w| !w.path.is_empty() || !w.file_name.is_empty());
     out
+}
+
+/// Our text style inside archives we write (SketchUp ignores it, presumably).
+const OURS: &str = "meshtard.style";
+/// Our own `<screenimage>` attributes: placement ([`mode_text`]) and Create Mask.
+const MODE_ATTR: &str = "meshtardMode";
+const MASK_ATTR: &str = "meshtardMask";
+
+/// Style items holding a color (variant type 5 in real files; the rest by value:
+/// 1 for flags, 4 for numbers, 3 for decimals, the last unverified).
+const COLOR_ITEMS: [i32; 12] = [
+    1014, 4000, 4001, 4003, 4007, 7000, 7001, 7002, 7003, 7004, 7005, 7016,
+];
+
+/// A watermark placement as text: `stretched 1|0`, `tiled <scale>` or
+/// `positioned <x> <y> <scale>` (our own notation, used in both kinds of `.style`).
+pub(crate) fn mode_text(m: &WatermarkMode) -> String {
+    match m {
+        WatermarkMode::Stretched { lock_aspect } => {
+            format!("stretched {}", u8::from(*lock_aspect))
+        }
+        WatermarkMode::Tiled { scale } => format!("tiled {scale}"),
+        WatermarkMode::Positioned { anchor, scale } => {
+            format!("positioned {} {} {scale}", anchor[0], anchor[1])
+        }
+    }
+}
+
+/// Reads [`mode_text`]'s notation.
+pub(crate) fn parse_mode(t: &str) -> Option<WatermarkMode> {
+    let mut it = t.split_whitespace();
+    let kind = it.next()?;
+    let mut num = || -> Option<f32> { it.next()?.parse::<f32>().ok().filter(|v| v.is_finite()) };
+    Some(match kind {
+        "stretched" => WatermarkMode::Stretched {
+            lock_aspect: num()? != 0.0,
+        },
+        "tiled" => WatermarkMode::Tiled {
+            scale: num()?.max(1e-3),
+        },
+        "positioned" => {
+            let (x, y, scale) = (num()?, num()?, num()?);
+            WatermarkMode::Positioned {
+                anchor: [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
+                scale: scale.max(1e-3),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// `s` with XML's special characters escaped (attribute values and text).
+pub(crate) fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            '\n' => out.push_str("&#10;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The extension of an image's bytes (`png`, `jpg` or `bmp`; `png` when unknown).
+pub(crate) fn image_ext(data: &[u8]) -> &'static str {
+    if data.starts_with(&[0xFF, 0xD8]) {
+        "jpg"
+    } else if data.starts_with(b"BM") {
+        "bmp"
+    } else {
+        "png"
+    }
+}
+
+/// A `documentProperties.xml` in the shape of real `.skm` files (generator `name`:
+/// `Material` there, `Style` here unverified).
+pub(crate) fn document_properties(title: &str, description: &str, generator: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<documentProperties xmlns="http://www.sketchup.com/schemas/1.0/documentproperties" xmlns:dp="http://www.sketchup.com/schemas/1.0/documentproperties" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sketchup.com/schemas/1.0/documentproperties http://www.sketchup.com/schemas/1.0/documentproperties.xsd">
+
+  <dp:title>{}</dp:title>
+
+  <dp:description>{}</dp:description>
+
+  <dp:creator></dp:creator>
+
+  <dp:keywords></dp:keywords>
+
+  <dp:lastModifiedBy></dp:lastModifiedBy>
+
+  <dp:revision>0</dp:revision>
+
+  <dp:thumbnail>doc_thumbnail.png</dp:thumbnail>
+
+  <dp:generator dp:name="{generator}" dp:version="1"/>
+
+</documentProperties>
+"#,
+        escape(title),
+        escape(description)
+    )
+}
+
+/// The (empty) `references.xml` of real `.skm` files.
+pub(crate) const REFERENCES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<references xmlns="http://www.sketchup.com/schemas/1.0/references" xmlns:r="http://www.sketchup.com/schemas/1.0/references" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sketchup.com/schemas/1.0/references http://www.sketchup.com/schemas/1.0/references.xsd"/>
+"#;
+
+/// A zip archive of `files` (name, bytes), deflated.
+pub(crate) fn zip_files(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let o = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in files {
+        zip.start_file(name.as_str(), o)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(data).map_err(|e| e.to_string())?;
+    }
+    Ok(zip.finish().map_err(|e| e.to_string())?.into_inner())
+}
+
+/// Writes `style` as a SketchUp `.style` archive, laid out like a `.skm` file (the
+/// one archive of SketchUp's that was seen): `document.xml` holding the
+/// `<sty:style>` element as a `.skp` file's `style.xml` does, `documentProperties.xml`,
+/// `references.xml`, `doc_thumbnail.png` (when given) and the watermark images in
+/// `ref/`. Our text style goes in as `meshtard.style` for what the items lack.
+/// Unverified against SketchUp's own files.
+pub(crate) fn write(style: &NamedStyle, thumbnail: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    use mt_skp::OptionValue;
+    let s = &style.settings;
+    let mut xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<styleDocument xmlns="http://sketchup.google.com/schemas/sketchup/1.0/style" xmlns:sty="http://sketchup.google.com/schemas/sketchup/1.0/style">
+  <sty:style xmlns:t="http://sketchup.google.com/schemas/1.0/types" name="{}" desc="{}">
+"#,
+        escape(&style.name),
+        escape(&style.description)
+    );
+    let mut items = mt_kernel::export::style_items(s);
+    items.sort_by_key(|(id, _)| *id);
+    for (id, v) in items {
+        let (kind, value) = match v {
+            OptionValue::Bool(b) => (1, i32::from(b).to_string()),
+            OptionValue::Int(i) if COLOR_ITEMS.contains(&id) => (5, i.to_string()),
+            OptionValue::Int(i) => (4, i.to_string()),
+            OptionValue::Double(d) => (3, d.to_string()),
+        };
+        xml.push_str(&format!(
+            "    <sty:item id=\"{id}\">\n      <t:variant type=\"{kind}\">{value}</t:variant>\n    </sty:item>\n"
+        ));
+    }
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    if !s.watermarks.is_empty() {
+        xml.push_str("    <sty:item id=\"5001\">\n      <t:variant type=\"13\">\n");
+        // Backgrounds, the model, then overlays (bottom first, as the reader takes them).
+        let mut list: Vec<&Watermark> = s.watermarks.iter().filter(|w| !w.overlay).collect();
+        let split = list.len();
+        list.extend(s.watermarks.iter().filter(|w| w.overlay));
+        for (k, w) in list.iter().enumerate() {
+            if k == split {
+                xml.push_str("        <screenimage name=\"&lt;MODEL SPACE&gt;\"/>\n");
+            }
+            let file = format!("watermark_{}.{}", k + 1, image_ext(&w.image));
+            xml.push_str(&format!(
+                "        <screenimage name=\"{}\" alphaScale=\"{}\" {MODE_ATTR}=\"{}\" {MASK_ATTR}=\"{}\"><image path=\"{file}\" file_name=\"{file}\"/></screenimage>\n",
+                escape(&w.name),
+                w.opacity.clamp(0.0, 1.0),
+                mode_text(&w.mode),
+                u8::from(w.mask),
+            ));
+            files.push((format!("ref/{file}"), w.image.to_vec()));
+        }
+        if split == list.len() {
+            xml.push_str("        <screenimage name=\"&lt;MODEL SPACE&gt;\"/>\n");
+        }
+        xml.push_str("      </t:variant>\n    </sty:item>\n");
+    }
+    xml.push_str("  </sty:style>\n</styleDocument>\n");
+    let mut all = vec![
+        ("document.xml".to_owned(), xml.into_bytes()),
+        (
+            "documentProperties.xml".to_owned(),
+            document_properties(&style.name, &style.description, "Style").into_bytes(),
+        ),
+        ("references.xml".to_owned(), REFERENCES.as_bytes().to_vec()),
+    ];
+    if let Some(t) = thumbnail {
+        all.push(("doc_thumbnail.png".to_owned(), t.to_vec()));
+    }
+    let mut plain = style.clone();
+    plain.settings.watermarks.clear();
+    all.push((
+        OURS.to_owned(),
+        crate::tray_extra::style_file_text(&plain).into_bytes(),
+    ));
+    all.extend(files);
+    zip_files(&all)
 }
 
 #[cfg(test)]

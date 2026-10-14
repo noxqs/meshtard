@@ -42,10 +42,23 @@ pub(crate) fn collection_combo(
             if ui.selectable_label(shown.is_none(), "In Model").clicked() {
                 *shown = None;
             }
-            for (c, col) in collections.iter().enumerate() {
-                if ui.selectable_label(*shown == Some(c), &col.name).clicked() {
-                    *shown = Some(c);
-                    picked = Some(c);
+            // Favorites first under their own heading, then the rest (unverified
+            // look of SketchUp's list).
+            let favorites = collections.iter().any(|c| c.favorite);
+            for fav in [true, false] {
+                if favorites {
+                    ui.separator();
+                    let heading = if fav { "Favorites" } else { "Collections" };
+                    ui.label(RichText::new(heading).small().weak());
+                }
+                for (c, col) in collections.iter().enumerate() {
+                    if col.favorite != fav {
+                        continue;
+                    }
+                    if ui.selectable_label(*shown == Some(c), &col.name).clicked() {
+                        *shown = Some(c);
+                        picked = Some(c);
+                    }
                 }
             }
         });
@@ -301,11 +314,22 @@ impl Shell {
                 let r = icon_button(ui, &t, "Details", true, paint_details);
                 egui::Popup::menu(&r).show(|ui| {
                     ui.set_min_width(190.0);
+                    if ui.button("Open Material...").clicked() {
+                        self.pending.push(Event::MaterialOpenFile);
+                        ui.close();
+                    }
                     if ui.button("Open or Create a Collection...").clicked() {
                         self.pending
                             .push(Event::CollectionAdd(CollectionKind::Materials));
                         ui.close();
                     }
+                    crate::panels4::favorite_items(
+                        ui,
+                        &mut self.pending,
+                        CollectionKind::Materials,
+                        &data.material_collections,
+                        self.tray_ui.more.material_collection,
+                    );
                     ui.separator();
                     thumbnail_menu(ui, &mut self.tray_ui.more.thumbnail_style);
                 });
@@ -404,6 +428,9 @@ impl Shell {
             );
             return;
         }
+        if self.component_collection_grid(ui, data, c, &t) {
+            return;
+        }
         let w = ui.available_width();
         ui.spacing_mut().item_spacing.y = 0.0;
         let top = ui.cursor().top();
@@ -428,22 +455,32 @@ impl Shell {
         current: Option<usize>,
     ) {
         let t = self.theme.clone();
-        if current.is_none() {
-            ui.label(
-                RichText::new("Pick a component in the Select tab to see its statistics.")
-                    .color(t.text_disabled),
-            );
+        ui.horizontal(|ui| {
+            self.stats_scope_combo(ui);
+            ui.checkbox(&mut self.tray_ui.more.stats_expand, "Expand")
+                .on_hover_text("Count the contents of nested components too");
+        });
+        let scope = self.tray_ui.more.stats_scope;
+        let rows = if scope == crate::tray_data::StatsScope::Component {
+            &data.component_stats
+        } else {
+            &data.model_stats
+        };
+        let empty = match scope {
+            crate::tray_data::StatsScope::Component => current.is_none(),
+            _ => rows.iter().all(|r| r.1 == 0 && r.2 == 0),
+        };
+        if empty {
+            ui.label(crate::panels4::empty_hint(scope).color(t.text_disabled));
             return;
         }
-        ui.checkbox(&mut self.tray_ui.more.stats_expand, "Expand")
-            .on_hover_text("Count the contents of nested components too");
         let expand = self.tray_ui.more.stats_expand;
         egui::Grid::new("mt_ui_component_stats")
             .num_columns(2)
             .striped(true)
             .spacing(vec2(16.0, 3.0))
             .show(ui, |ui| {
-                for (label, own, nested) in &data.component_stats {
+                for (label, own, nested) in rows {
                     ui.label(label);
                     let n = if expand { nested } else { own };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -866,6 +903,7 @@ mod tests {
                     color: Some([200, 0, 0]),
                     thumbnail: None,
                 }],
+                favorite: false,
             }],
             ..TrayData::default()
         });
@@ -905,6 +943,44 @@ mod tests {
             }
         }
         assert!(sampled, "no Sample Paint button found");
+    }
+
+    #[test]
+    fn component_grid_tiles_pick_and_statistics_scope() {
+        use crate::tray_data::{ComponentRow, ScenesView, StatsScope};
+        let spec = mt_spec::Spec::builtin().expect("spec");
+        let mut s = Shell::new(&spec);
+        s.open_panel("window.components");
+        only(&mut s, "window.components");
+        let mut data = TrayData::default();
+        for n in ["A", "B"] {
+            data.components.push(ComponentRow {
+                name: n.into(),
+                instances: 1,
+                ..ComponentRow::default()
+            });
+        }
+        s.set_tray_data(data);
+        let ctx = egui::Context::default();
+        run(&mut s, &ctx, vec![]);
+        run(&mut s, &ctx, vec![]);
+        let rect = s.last_tray_rects.first().map(|r| r.1).expect("tray drawn");
+        let reset = |s: &mut Shell| {
+            only(s, "window.components");
+            s.tray_ui.component_tab = crate::panels::ComponentTab::Select;
+            s.tray_ui.more.component_view = ScenesView::LargeThumbnails;
+        };
+        // The second tile is right of the first (a grid, not a list).
+        let got = click_until(&mut s, &ctx, rect.left() + 130.0, reset, |e| {
+            matches!(e, Event::ComponentPick(_))
+        });
+        assert_eq!(got, Some(Event::ComponentPick(1)));
+        // The Statistics scope is asked for only while that tab shows it.
+        assert_eq!(s.stats_scope(), None);
+        s.tray_ui.component_tab = crate::panels::ComponentTab::Statistics;
+        assert_eq!(s.stats_scope(), None);
+        s.tray_ui.more.stats_scope = StatsScope::Model;
+        assert_eq!(s.stats_scope(), Some(StatsScope::Model));
     }
 
     #[test]

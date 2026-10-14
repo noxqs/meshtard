@@ -30,7 +30,7 @@ pub(crate) struct TrayUi {
     material_name: String,
     material_name_of: Option<usize>,
     styles_page: StylesPage,
-    component_tab: ComponentTab,
+    pub(crate) component_tab: ComponentTab,
     /// Edit tab fields of the Components panel and the definition they were loaded
     /// from.
     component_name: String,
@@ -70,7 +70,7 @@ enum ColorMode {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum ComponentTab {
+pub(crate) enum ComponentTab {
     #[default]
     Select,
     Edit,
@@ -293,6 +293,10 @@ impl Shell {
                                         self.pending.push(Event::MaterialArea(i));
                                         ui.close();
                                     }
+                                    if ui.button("Save As...").clicked() {
+                                        self.pending.push(Event::MaterialSaveFile(i));
+                                        ui.close();
+                                    }
                                 });
                             }
                             if r.clicked() {
@@ -320,6 +324,14 @@ impl Shell {
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Write a SketchUp material file (place unverified).
+                        if ui
+                            .button("Save As...")
+                            .on_hover_text("Save the material as a SketchUp .skm file")
+                            .clicked()
+                        {
+                            self.pending.push(Event::MaterialSaveFile(i));
+                        }
                         // Back to the image's own colors (textured materials only).
                         if ui
                             .add_enabled(m.texture.is_some(), egui::Button::new("Reset Color"))
@@ -662,6 +674,14 @@ impl Shell {
                         ui.close();
                     }
                     ui.separator();
+                    crate::panels4::favorite_items(
+                        ui,
+                        &mut self.pending,
+                        crate::CollectionKind::Components,
+                        &data.component_collections,
+                        self.tray_ui.more.component_collection,
+                    );
+                    ui.separator();
                     if ui
                         .add_enabled(any_unused, egui::Button::new("Purge Unused"))
                         .clicked()
@@ -670,6 +690,7 @@ impl Shell {
                         ui.close();
                     }
                 });
+                self.component_view_button(ui, t);
                 let pick = crate::panels3::collection_combo(
                     ui,
                     "mt_ui_component_collection",
@@ -695,6 +716,9 @@ impl Shell {
         }
         if data.components.is_empty() {
             ui.label(RichText::new("No components in the model.").color(t.text_disabled));
+            return;
+        }
+        if self.components_grid(ui, data, current, t) {
             return;
         }
         let w = ui.available_width();
@@ -1401,7 +1425,7 @@ pub(crate) fn paint_component_icon(p: &Painter, r: Rect, ink: Color32) {
 
 /// Isometric cube outline: icon of a component definition (SketchUp shows a
 /// rendered thumbnail instead).
-fn paint_cube(p: &Painter, r: Rect, ink: Color32) {
+pub(crate) fn paint_cube(p: &Painter, r: Rect, ink: Color32) {
     let s = Stroke::new(1.2, ink);
     let c = r.center();
     let a = r.width().min(r.height()) / 2.0;

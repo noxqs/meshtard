@@ -126,6 +126,7 @@ mod menu;
 mod panels;
 mod panels2;
 mod panels3;
+mod panels4;
 pub use panels3::STYLE_THUMB_ASPECT;
 mod status;
 mod style_panel;
@@ -149,9 +150,9 @@ pub use style_panel::{
 };
 pub use theme::apply as apply_theme;
 pub use tray_data::{
-    Collection, CollectionItem, STYLE_PARTS, ScenesView, StyleSource, TagSort, ThumbnailStyle,
-    cube_shades, natural_cmp, outliner_parent_paths, outliner_rows_sorted, range_select,
-    search_names, tag_tree_rows_sorted,
+    Collection, CollectionItem, STYLE_PARTS, ScenesView, StatsScope, StyleSource, TagSort,
+    ThumbnailStyle, cube_shades, natural_cmp, outliner_parent_paths, outliner_rows_sorted,
+    range_select, search_names, tag_tree_rows_sorted,
 };
 pub use tray_data::{
     ComponentBehavior, ComponentRow, DASH_NAMES, FaceStyle, FogSettings, GLUE_NAMES, MaterialRow,
@@ -475,14 +476,27 @@ pub enum Event {
     /// Materials: a swatch of a collection clicked: the app adds the material to the
     /// model (or reuses one of that name) and makes it current.
     MaterialFromCollection { collection: usize, item: usize },
+    /// Materials: Details > Open Material...: read a `.skm` file into the model.
+    MaterialOpenFile,
+    /// Materials: Save As... (Edit tab, swatch right-click): write material `index`
+    /// to a `.skm` file.
+    MaterialSaveFile(usize),
+    /// Materials, Components, Styles: Details > Add Collection to Favorites (`add`)
+    /// or Remove Collection from Favorites, for collection `collection`.
+    CollectionFavorite {
+        kind: CollectionKind,
+        collection: usize,
+        add: bool,
+    },
     /// Components: an entry of a collection clicked: the app loads it into the model
     /// and starts placing it.
     ComponentFromCollection { collection: usize, item: usize },
     /// Styles: a style of a collection clicked: the app adds it to "In Model" and
     /// applies it.
     StyleFromCollection { collection: usize, item: usize },
-    /// Styles: Details > Save As...: write the In Model style to a `.style` file.
-    StyleSaveFile(usize),
+    /// Styles: Details > Save As: write In Model style `index` to a `.style` file,
+    /// SketchUp's zip archive (`sketchup`) or our text file.
+    StyleSaveFile { index: usize, sketchup: bool },
     /// Styles: Details > Open...: read a `.style` file into "In Model".
     StyleOpenFile,
     /// Styles, Mix tab: apply setting group `part` (index into [`STYLE_PARTS`]) of

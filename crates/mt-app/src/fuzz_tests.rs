@@ -49,6 +49,34 @@ fn style_seeds() -> Vec<Vec<u8>> {
             ("doc_thumbnail.png", b"T"),
         ]),
         crate::tray_extra::style_file_text(&style).into_bytes(),
+        crate::style_zip::write(&style, Some(b"T")).unwrap(),
+    ]
+}
+
+fn skm_seeds() -> Vec<Vec<u8>> {
+    let mut png = Vec::new();
+    image::RgbImage::from_pixel(2, 2, image::Rgb([9, 8, 7]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let textured = mt_kernel::Material {
+        name: "Fuzz".into(),
+        color: [1, 2, 3],
+        opacity: 0.5,
+        texture: Some(mt_kernel::texture::Texture {
+            filename: "f.png".into(),
+            data: std::sync::Arc::from(png.as_slice()),
+            width: 10.0,
+            height: 5.0,
+            colorize: true,
+        }),
+    };
+    let plain = mt_kernel::Material {
+        texture: None,
+        ..textured.clone()
+    };
+    vec![
+        crate::skm::write(&textured).unwrap(),
+        crate::skm::write(&plain).unwrap(),
     ]
 }
 
@@ -107,6 +135,9 @@ fn run_all(iters: usize) {
         if crate::style_zip::is_zip(d) {
             let _ = crate::style_zip::read(d);
         }
+    });
+    fuzz("skm", &skm_seeds(), true, iters, |d| {
+        let _ = crate::skm::read(d);
     });
     fuzz("mtx", &mtx_seeds(), true, iters, |d| {
         let _ = crate::extensions::package::Package::from_zip_unguarded(d);

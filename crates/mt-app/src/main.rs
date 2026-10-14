@@ -67,6 +67,7 @@ mod selection;
 mod self_install;
 mod settings;
 mod shortcut_list;
+mod skm;
 mod small_items;
 mod snap;
 mod soften;
@@ -85,6 +86,7 @@ mod tool_mods;
 mod tools;
 mod tray;
 mod tray_extra;
+mod tray_files;
 mod tray_more;
 mod undo;
 mod welcome;
@@ -550,6 +552,8 @@ struct App {
     extensions: extensions::Extensions,
     /// Tray panel collections and thumbnails.
     tray_lib: tray_extra::TrayLib,
+    /// Components Statistics of the whole model or the selection.
+    stats_cache: tray_files::StatsCache,
     /// Label fonts of dimensions and texts loaded into egui.
     label_fonts: label_fonts::LabelFonts,
     /// Model Info > Geo-location > Add Location (map import).
@@ -672,6 +676,7 @@ impl App {
             match_photo: Default::default(),
             extensions: Default::default(),
             tray_lib: Default::default(),
+            stats_cache: Default::default(),
             label_fonts: Default::default(),
             geo_map: None,
         };
@@ -2697,6 +2702,8 @@ impl eframe::App for App {
         #[cfg(target_os = "macos")]
         self.native_menu
             .update(ui_frame.is_enabled, ui_frame.is_checked);
+        // The shell is out of `self` while the frame runs: hand over what it shows.
+        self.stats_cache.scope = shell.stats_scope();
         shell.set_tray_data(self.tray_data());
         let events = shell.show(ui, &ui_frame, |ui| self.viewport_ui(ui, frame));
         #[cfg(target_os = "macos")]

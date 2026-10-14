@@ -71,6 +71,9 @@ pub struct TrayData {
     /// of (label, count in the definition itself, count with nested components
     /// expanded).
     pub component_stats: Vec<(String, usize, usize)>,
+    /// The same rows for the whole model or the selection, when the Statistics tab
+    /// shows one of them (see `Shell::stats_scope`).
+    pub model_stats: Vec<(String, usize, usize)>,
     /// Scenes panel thumbnails, one per entry of `scenes` (`None`: not rendered yet).
     pub scene_thumbnails: Vec<Option<egui::TextureId>>,
     /// Texture images of `materials` (`None`: plain color or not loaded yet); the
@@ -119,6 +122,7 @@ impl Default for TrayData {
             component_collections: Vec::new(),
             style_collections: Vec::new(),
             component_stats: Vec::new(),
+            model_stats: Vec::new(),
             scene_thumbnails: Vec::new(),
             material_thumbnails: Vec::new(),
             component_thumbnails: Vec::new(),
@@ -330,6 +334,8 @@ pub fn tag_tree_rows_sorted(
 pub struct Collection {
     pub name: String,
     pub items: Vec<CollectionItem>,
+    /// In the favorites (listed first in the collection dropdown).
+    pub favorite: bool,
 }
 
 /// One entry of a [`Collection`].
@@ -390,7 +396,19 @@ pub fn cube_shades(c: [u8; 3]) -> [[u8; 3]; 3] {
     [lift, c, scale(0.72)]
 }
 
-/// The Scenes panel's View Options.
+/// What the Components panel's Statistics tab counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatsScope {
+    /// The definition picked in the Select tab.
+    #[default]
+    Component,
+    /// The whole model ("All geometry").
+    Model,
+    /// The selection in the open context.
+    Selection,
+}
+
+/// The Scenes panel's View Options (also the Components panel's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScenesView {
     #[default]
