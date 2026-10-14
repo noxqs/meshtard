@@ -59,6 +59,10 @@ pub(crate) struct MoreUi {
     pub(crate) thumbnail_style: crate::tray_data::ThumbnailStyle,
     /// Components Statistics tab: count nested components' contents.
     pub(crate) stats_expand: bool,
+    /// Components Statistics tab: what it counts.
+    pub(crate) stats_scope: crate::tray_data::StatsScope,
+    /// Components panel View Options (list, small or large thumbnails).
+    pub(crate) component_view: crate::tray_data::ScenesView,
     /// Scenes panel View Options.
     pub(crate) scenes_view: crate::tray_data::ScenesView,
     /// Scene tab search: popup open and its text.
@@ -1195,19 +1199,35 @@ impl Shell {
                         self.pending.push(Event::StyleOpenFile);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(selected.is_some(), egui::Button::new("Save As..."))
-                        .clicked()
-                        && let Some(i) = selected
-                    {
-                        self.pending.push(Event::StyleSaveFile(i));
-                        ui.close();
-                    }
+                    // Save As: SketchUp's zip `.style` or our text one (unverified
+                    // place; SketchUp has one Save As).
+                    ui.add_enabled_ui(selected.is_some(), |ui| {
+                        ui.menu_button("Save As", |ui| {
+                            for (label, sketchup) in [
+                                ("SketchUp Style (.style)...", true),
+                                ("meshtard Text Style (.style)...", false),
+                            ] {
+                                if ui.button(label).clicked()
+                                    && let Some(index) = selected
+                                {
+                                    self.pending.push(Event::StyleSaveFile { index, sketchup });
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     if ui.button("Open or Create a Collection...").clicked() {
                         self.pending
                             .push(Event::CollectionAdd(crate::CollectionKind::Styles));
                         ui.close();
                     }
+                    crate::panels4::favorite_items(
+                        ui,
+                        &mut self.pending,
+                        crate::CollectionKind::Styles,
+                        &data.style_collections,
+                        self.tray_ui.more.style_collection,
+                    );
                     ui.separator();
                     if ui
                         .add_enabled(n > 0, egui::Button::new("Purge Unused"))

@@ -8,16 +8,18 @@
 //! `Components` or `Styles` under the data folder, and folders added with Details >
 //! Open or Create a Collection (remembered in `collections.txt` in the config
 //! folder). A folder with files is a collection, and so is each subfolder with
-//! files. Materials collections hold PNG / JPEG images (SketchUp's `.skm` files are
-//! not read), Components collections `.skp` files, Styles collections `.style`
-//! files. Built in: a "Colors" materials collection and a "Default Styles" styles
-//! collection (names and contents our own drafts, unverified).
+//! files. Materials collections hold PNG / JPEG images and SketchUp `.skm` files
+//! (read by [`crate::skm`]), Components collections `.skp` files, Styles collections
+//! `.style` files. Built in: a "Colors" materials collection and a "Default Styles"
+//! styles collection (names and contents our own drafts, unverified). Favorite
+//! collections: see [`crate::tray_files`].
 //!
 //! `.style` files are told apart by their content: SketchUp's own are zip archives
 //! (read by [`crate::style_zip`]: its items, watermarks and thumbnail), ours are a
 //! text file of `key=value` lines with the style items of
-//! `mt_kernel::export::style_items` plus fog and a few model-only settings
-//! (watermarks are not saved in ours). Save As writes ours.
+//! `mt_kernel::export::style_items` plus fog, a few model-only settings and the
+//! watermarks (image in base64). Save As writes either kind
+//! ([`crate::tray_files`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -125,7 +127,7 @@ pub(crate) fn apply_tags_to_scenes(m: &mut Model, tags: &[usize], scenes: &[usiz
 }
 
 /// What the Components Statistics tab counts.
-const STAT_ROWS: [&str; 12] = [
+pub(crate) const STAT_ROWS: [&str; 12] = [
     "Edges",
     "Faces",
     "Component Instances",
@@ -325,7 +327,46 @@ pub(crate) fn style_file_text(style: &NamedStyle) -> String {
             .unwrap_or(0),
         s.background.horizon_blend,
     ));
+    // Watermarks, bottom first: overlay;blend;mask;placement;image (base64);name.
+    for w in &s.watermarks {
+        out.push_str(&format!(
+            "watermark={};{};{};{};{};{}\n",
+            u8::from(w.overlay),
+            w.opacity,
+            u8::from(w.mask),
+            crate::style_zip::mode_text(&w.mode),
+            mt_kernel::gltf_io::base64_encode(&w.image),
+            escape(&w.name),
+        ));
+    }
     out
+}
+
+/// A `watermark=` line's value (see [`style_file_text`]).
+fn parse_watermark(v: &str) -> Option<mt_kernel::style_extras::Watermark> {
+    let mut it = v.splitn(6, ';');
+    let overlay = it.next()?.trim() == "1";
+    let opacity = it.next()?.trim().parse::<f32>().ok()?;
+    let mask = it.next()?.trim() == "1";
+    let mode = crate::style_zip::parse_mode(it.next()?)?;
+    let image = mt_kernel::gltf_io::base64_decode(it.next()?)?;
+    let name = unescape(it.next().unwrap_or(""));
+    (!image.is_empty()).then(|| mt_kernel::style_extras::Watermark {
+        name: if name.is_empty() {
+            "Watermark".into()
+        } else {
+            name
+        },
+        image: Arc::from(image),
+        overlay,
+        opacity: if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        },
+        mode,
+        mask,
+    })
 }
 
 fn parse_rgb(v: &str) -> Option<[u8; 3]> {
@@ -392,6 +433,7 @@ pub(crate) fn parse_style_file(text: &str) -> Result<NamedStyle, String> {
                 s.background.horizon_blend = v.parse().unwrap_or(s.background.horizon_blend);
             }
             "ao.use_color" => s.ambient_occlusion.use_color = flag,
+            "watermark" => s.watermarks.extend(parse_watermark(&v)),
             "modeling.hidden" | "modeling.endpoint" | "modeling.midpoint" | "modeling.on_edge"
             | "modeling.on_face" => {
                 let me = &mut s.modeling_extras;
@@ -524,8 +566,10 @@ impl LibItem {
 
 #[derive(Clone)]
 pub(crate) struct LibCollection {
-    name: String,
-    items: Vec<LibItem>,
+    pub(crate) name: String,
+    pub(crate) items: Vec<LibItem>,
+    /// What favorites remember it by: its folder, or `builtin:<name>`.
+    pub(crate) key: String,
 }
 
 fn kind_index(k: CollectionKind) -> usize {
@@ -547,7 +591,7 @@ fn folder_kind(k: usize) -> crate::filedialog::Folder {
 
 fn extensions(k: usize) -> &'static [&'static str] {
     match k {
-        0 => &["png", "jpg", "jpeg"],
+        0 => &["png", "jpg", "jpeg", "skm"],
         1 => &["skp"],
         _ => &["style"],
     }
@@ -610,7 +654,8 @@ pub(crate) fn scan_folders(roots: &[PathBuf], k: usize) -> Vec<LibCollection> {
             || dir.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        out.push(LibCollection { name, items });
+        let key = dir.display().to_string();
+        out.push(LibCollection { name, items, key });
     };
     for root in roots {
         add(root, &mut out);
@@ -665,14 +710,21 @@ fn save_extra(extra: &[Vec<PathBuf>; 3]) {
     }
 }
 
+/// A collection material's swatch: its image (none for a plain `.skm` color) and
+/// color.
+type MaterialThumb = (Option<egui::TextureHandle>, [u8; 3]);
+
 /// Library collections and thumbnails of the panels.
 #[derive(Default)]
 pub(crate) struct TrayLib {
     /// Scanned collections per kind (`None`: to scan).
-    collections: [Option<Vec<LibCollection>>; 3],
+    pub(crate) collections: [Option<Vec<LibCollection>>; 3],
     extra: Option<[Vec<PathBuf>; 3]>,
-    /// Material image thumbnails, and the images waiting to be loaded.
-    thumbs: HashMap<PathBuf, Option<(egui::TextureHandle, [u8; 3])>>,
+    /// Favorite collections' keys per kind ([`LibCollection::key`]).
+    pub(crate) favorites: Option<[Vec<String>; 3]>,
+    /// Material thumbnails (image, or none for a plain `.skm` color, and the swatch
+    /// color), and the files waiting to be loaded.
+    thumbs: HashMap<PathBuf, Option<MaterialThumb>>,
     want_thumbs: Vec<PathBuf>,
     /// Scene thumbnails by [`scene_key`].
     scene_thumbs: HashMap<u64, egui::TextureHandle>,
@@ -686,15 +738,21 @@ impl TrayLib {
     }
 
     /// Collections of kind `k`, scanned on first use.
-    fn collections(&mut self, k: usize) -> &[LibCollection] {
+    pub(crate) fn collections(&mut self, k: usize) -> &[LibCollection] {
         if self.collections[k].is_none() {
             let mut roots: Vec<PathBuf> = Vec::new();
             roots.extend(crate::filedialog::folder(folder_kind(k)));
             let sub = ["Materials", "Components", "Styles"][k];
             roots.extend(crate::settings::data_dir().map(|d| d.join(sub)));
             roots.extend(self.extra()[k].iter().cloned());
+            roots.extend(
+                (self.favorites()[k].iter())
+                    .filter(|f| !f.starts_with("builtin:"))
+                    .map(PathBuf::from),
+            );
             let mut list = match k {
                 0 => vec![LibCollection {
+                    key: "builtin:Colors".into(),
                     name: "Colors".into(),
                     items: builtin_colors()
                         .into_iter()
@@ -702,6 +760,7 @@ impl TrayLib {
                         .collect(),
                 }],
                 2 => vec![LibCollection {
+                    key: "builtin:Default Styles".into(),
                     name: "Default Styles".into(),
                     items: builtin_styles()
                         .into_iter()
@@ -747,15 +806,17 @@ impl TrayLib {
             })
     }
 
-    fn item(&mut self, k: usize, c: usize, i: usize) -> Option<LibItem> {
+    pub(crate) fn item(&mut self, k: usize, c: usize, i: usize) -> Option<LibItem> {
         self.collections(k).get(c)?.items.get(i).cloned()
     }
 
     fn ui_collections(&mut self, k: usize) -> Vec<Collection> {
         let cols: Vec<LibCollection> = self.collections(k).to_vec();
+        let favorites = self.favorites()[k].clone();
         cols.iter()
             .map(|c| Collection {
                 name: c.name.clone(),
+                favorite: favorites.contains(&c.key),
                 items: c
                     .items
                     .iter()
@@ -764,7 +825,7 @@ impl TrayLib {
                             LibItem::Color(_, c) => (Some(*c), None),
                             LibItem::File(_, p) if k == 1 => (None, self.render.file(p)),
                             LibItem::File(_, p) => match self.thumbs.get(p) {
-                                Some(Some((t, c))) => (Some(*c), Some(t.id())),
+                                Some(Some((t, c))) => (Some(*c), t.as_ref().map(|t| t.id())),
                                 _ => (None, None),
                             },
                             LibItem::Style(s) => {
@@ -845,17 +906,34 @@ impl App {
             if self.tray_lib.thumbs.contains_key(&path) {
                 continue;
             }
-            let thumb = mt_kernel::images::open(&path).ok().map(|img| {
-                let color = crate::image_entity::average_color(&img.to_rgb8());
+            let to_texture = |img: &image::DynamicImage| {
                 let small = img.thumbnail(64, 64).to_rgba8();
                 let size = [small.width() as usize, small.height() as usize];
                 let pixels = egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw());
                 let name = format!("mt_material_thumb_{}", path.display());
-                (
-                    ctx.load_texture(name, pixels, egui::TextureOptions::LINEAR),
-                    color,
-                )
-            });
+                ctx.load_texture(name, pixels, egui::TextureOptions::LINEAR)
+            };
+            let thumb = if crate::skm::is_skm(&path) {
+                // A `.skm` file: its texture image (shown flat or on a cube like
+                // model materials), or its color.
+                (std::fs::read(&path).ok())
+                    .and_then(|d| crate::errors::guard(|| crate::skm::read(&d)).ok())
+                    .map(|s| {
+                        let m = s.material;
+                        // The file's small thumbnail, else the texture itself.
+                        let img = (m.texture.as_ref()).and_then(|t| {
+                            (s.thumbnail.as_deref())
+                                .and_then(|b| mt_kernel::images::decode(b).ok())
+                                .or_else(|| mt_kernel::images::decode(&t.data).ok())
+                        });
+                        (img.as_ref().map(to_texture), m.color)
+                    })
+            } else {
+                mt_kernel::images::open(&path).ok().map(|img| {
+                    let color = crate::image_entity::average_color(&img.to_rgb8());
+                    (Some(to_texture(&img)), color)
+                })
+            };
             self.tray_lib.thumbs.insert(path, thumb);
             ctx.request_repaint();
         }
@@ -1025,7 +1103,7 @@ impl App {
     }
 
     /// Makes material `i` current (Paint Bucket and the panel).
-    fn make_current_material(&mut self, i: usize) {
+    pub(crate) fn make_current_material(&mut self, i: usize) {
         self.current_material = Some(i);
         if let Some(t) = self.modify.as_mut() {
             t.set_material(Some(i));
@@ -1199,10 +1277,32 @@ impl App {
                 let Some(it) = self.tray_lib.item(0, collection, item) else {
                     return Ok(false);
                 };
+                if self.document.is_none() {
+                    return Ok(false);
+                }
+                // A `.skm` file: its own material (and name).
+                let skm = match &it {
+                    LibItem::File(_, path) if crate::skm::is_skm(path) => {
+                        match std::fs::read(path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|d| crate::errors::guard(|| crate::skm::read(&d)))
+                        {
+                            Ok(s) => Some(s.material),
+                            Err(e) => {
+                                self.file_error("open", path, e);
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    _ => None,
+                };
                 let Some(doc) = self.document.as_mut() else {
                     return Ok(false);
                 };
-                let name = it.name().to_owned();
+                let name = skm
+                    .as_ref()
+                    .map_or(it.name(), |m| m.name.as_str())
+                    .to_owned();
                 // A material of that name in the model is used again (unverified).
                 if let Some(i) = doc.model.materials.iter().position(|m| m.name == name) {
                     self.make_current_material(i);
@@ -1215,6 +1315,7 @@ impl App {
                     texture: None,
                 };
                 match it {
+                    _ if skm.is_some() => mat = skm.unwrap_or(mat),
                     LibItem::Color(_, c) => mat.color = c,
                     LibItem::File(_, path) => {
                         let file = path
@@ -1287,25 +1388,6 @@ impl App {
                     Some(LibItem::Style(s)) => Ok(self.add_and_apply_style(s.style)),
                     _ => Ok(false),
                 }
-            }
-            Event::StyleSaveFile(i) => {
-                let Some(style) = self
-                    .document
-                    .as_ref()
-                    .and_then(|d| d.model.styles.get(i).cloned())
-                else {
-                    return Ok(false);
-                };
-                let filters: [(&str, &[&str]); 1] = [("Styles (*.style)", &["style"])];
-                if let Some(path) =
-                    crate::filedialog::save(&filters, &format!("{}.style", style.name))
-                {
-                    match std::fs::write(&path, style_file_text(&style)) {
-                        Ok(()) => self.message = Some(format!("Saved {}.", path.display())),
-                        Err(e) => self.file_error("save", &path, e),
-                    }
-                }
-                Ok(false)
             }
             Event::StyleOpenFile => {
                 let filters: [(&str, &[&str]); 1] = [("Styles (*.style)", &["style"])];
@@ -1478,12 +1560,79 @@ mod tests {
         s.settings.face_style = mt_kernel::FaceStyle::HiddenLine;
         s.settings.modeling_extras.hidden_geometry = [4, 5, 6];
         s.settings.modeling_extras.inference.on_face = [7, 8, 9];
+        s.settings.watermarks = test_watermarks();
         let text = style_file_text(&s);
         let back = parse_style_file(&text).unwrap();
         assert_eq!(back.name, s.name);
         assert_eq!(back.description, s.description);
         assert_eq!(back.settings, s.settings);
         assert!(parse_style_file("hello").is_err());
+    }
+
+    /// A background and an overlay of every kind of placement.
+    pub(crate) fn test_watermarks() -> Vec<mt_kernel::style_extras::Watermark> {
+        use mt_kernel::style_extras::{Watermark, WatermarkMode};
+        vec![
+            Watermark {
+                name: "Paper; old\nworn".into(),
+                image: Arc::from(&b"\x89PNG paper"[..]),
+                overlay: false,
+                opacity: 0.25,
+                mode: WatermarkMode::Tiled { scale: 1.5 },
+                mask: true,
+            },
+            Watermark {
+                name: "Logo <&>".into(),
+                image: Arc::from(&b"\xFF\xD8 logo"[..]),
+                overlay: true,
+                opacity: 1.0,
+                mode: WatermarkMode::Positioned {
+                    anchor: [1.0, 0.5],
+                    scale: 0.75,
+                },
+                mask: false,
+            },
+            Watermark {
+                name: "Frame".into(),
+                image: Arc::from(&b"\x89PNG frame"[..]),
+                overlay: true,
+                opacity: 0.5,
+                mode: WatermarkMode::Stretched { lock_aspect: false },
+                mask: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn sketchup_style_round_trips_through_the_reader() {
+        let mut s = builtin_styles()
+            .into_iter()
+            .find(|s| s.name == "Blueprint")
+            .unwrap();
+        s.name = "Mine & \"yours\"".into();
+        s.description = "A <test>".into();
+        s.settings.fog.enabled = true;
+        s.settings.face_style = mt_kernel::FaceStyle::Monochrome;
+        s.settings.watermarks = test_watermarks();
+        let data = crate::style_zip::write(&s, Some(b"thumb")).unwrap();
+        let (back, thumb) = read_style_bytes(&data).unwrap();
+        assert_eq!(back.name, s.name);
+        assert_eq!(back.description, s.description);
+        // Backgrounds come first when read; the order within each kind is kept.
+        assert_eq!(back.settings, s.settings);
+        assert_eq!(thumb.as_deref(), Some(&b"thumb"[..]));
+        // Without our text file the items alone carry most of it.
+        let files: Vec<(String, Vec<u8>)> = crate::style_zip::entries(&data)
+            .unwrap()
+            .into_iter()
+            .filter(|(n, _)| n != "meshtard.style")
+            .collect();
+        let bare = crate::style_zip::zip_files(&files).unwrap();
+        let (b2, _) = read_style_bytes(&bare).unwrap();
+        assert_eq!(b2.settings.background.color, s.settings.background.color);
+        assert_eq!(b2.settings.edge_look.color, s.settings.edge_look.color);
+        assert_eq!(b2.settings.watermarks, s.settings.watermarks);
+        assert!(!b2.settings.fog.enabled);
     }
 
     #[test]

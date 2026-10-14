@@ -101,6 +101,8 @@ pub(crate) struct Thumbs {
     files: HashMap<PathBuf, Option<egui::TextureHandle>>,
     /// Rendered style thumbnails by key, with the settings they show.
     styles: HashMap<String, (StyleSettings, egui::TextureHandle)>,
+    /// The In Model styles' thumbnails as PNG (for `.style` files written).
+    style_pngs: HashMap<String, (StyleSettings, Vec<u8>)>,
     sample: Option<Model>,
 }
 
@@ -158,6 +160,12 @@ impl Thumbs {
         } else {
             self.styles.get(key).map(|s| s.1.id())
         }
+    }
+
+    /// The PNG of In Model style thumbnail `key` when it shows `settings`.
+    pub(crate) fn style_png(&self, key: &str, settings: &StyleSettings) -> Option<Vec<u8>> {
+        let (s, png) = self.style_pngs.get(key)?;
+        (s == settings).then(|| png.clone())
     }
 
     /// Forgets collection thumbnails (the collections are scanned again).
@@ -464,6 +472,15 @@ impl App {
         let scene = doc.scene();
         let img = th.render(&self.spec, rs, &scene, Some(&doc.model), STYLE_PX);
         let tex = to_texture(ctx, format!("mt_style_thumb_{key}"), &img);
+        if key.starts_with("model:") {
+            let mut png = Vec::new();
+            if img
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .is_ok()
+            {
+                th.style_pngs.insert(key.clone(), (settings.clone(), png));
+            }
+        }
         th.styles.insert(key, (settings, tex));
         true
     }

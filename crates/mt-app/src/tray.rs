@@ -184,6 +184,7 @@ impl App {
             from_edges: s.from_edges,
         };
         self.tray_data_extra(&mut data);
+        self.tray_data_files(&mut data);
         data
     }
 
@@ -500,7 +501,10 @@ impl App {
             }
             e => match self.tray_extra_event(e) {
                 Ok(rebuild) => rebuild,
-                Err(e) => self.tray_more_event(e),
+                Err(e) => match self.tray_files_event(e) {
+                    Ok(rebuild) => rebuild,
+                    Err(e) => self.tray_more_event(e),
+                },
             },
         }
     }
