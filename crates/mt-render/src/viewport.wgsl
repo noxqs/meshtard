@@ -514,12 +514,26 @@ fn back_line_vs(@builtin(vertex_index) vi: u32, s: Segment) -> LineOut {
 // snapped to a quarter-unit grid first, so an instanced edge (placed on the GPU)
 // jitters like the same edge placed on the CPU, whose ends differ in the last bits.
 // The grid's cells are offset so that round coordinates (whole, half, eighth units)
-// fall inside cells, not on their borders.
+// fall inside cells, not on their borders. The hash is on integers: a float hash
+// (`fract(sin(k) * big)`) magnifies the last-bit differences that a GPU's fused
+// multiply-adds make between two pipelines (Metal), so the same edge jittered apart.
+fn pcg(v: u32) -> u32 {
+    let st = v * 747796405u + 2891336453u;
+    let w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
 fn hash(s: Segment, seed: f32) -> f32 {
-    let a = floor(s.a * 4.0 + 0.3063) * 0.25;
-    let b = floor(s.b * 4.0 + 0.3063) * 0.25;
-    let k = dot(a + b * 1.37, vec3<f32>(12.9898, 78.233, 37.719)) + seed * 19.19;
-    return fract(sin(k) * 43758.5453);
+    let a = vec3<i32>(floor(s.a * 4.0 + 0.3063));
+    let b = vec3<i32>(floor(s.b * 4.0 + 0.3063));
+    var h = pcg(bitcast<u32>(a.x));
+    h = pcg(h ^ bitcast<u32>(a.y));
+    h = pcg(h ^ bitcast<u32>(a.z));
+    h = pcg(h ^ bitcast<u32>(b.x));
+    h = pcg(h ^ bitcast<u32>(b.y));
+    h = pcg(h ^ bitcast<u32>(b.z));
+    h = pcg(h ^ u32(seed));
+    return f32(h >> 8u) / 16777216.0;
 }
 
 // Vertices 0..5 draw the segment's quad; 6..11 a second, jittered stroke of model
