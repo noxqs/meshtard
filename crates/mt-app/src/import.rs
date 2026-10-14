@@ -177,6 +177,38 @@ pub(crate) fn read_mesh(
     Ok((materials, scene))
 }
 
+/// Moves `model` so its bounding box's low corner is at the origin. Place Component
+/// holds a definition by its origin, and a glTF scene can lie far from its own (a
+/// model exported from a drawing away from the origin): the copy would land that far
+/// from the click.
+pub(crate) fn origin_to_corner(model: &mut mt_kernel::Model) {
+    let mut lo = glam::DVec3::splat(f64::INFINITY);
+    let mut add = |p: glam::DVec3| lo = lo.min(p);
+    for (_, v) in model.root.vertices.iter() {
+        add(v.pos);
+    }
+    for i in &model.root.instances {
+        if let Some((a, b)) =
+            mt_kernel::instance_ops::definition_bounds(&model.definitions, i.definition)
+        {
+            for k in 0..8 {
+                let c = glam::DVec3::new(
+                    if k & 1 == 0 { a.x } else { b.x },
+                    if k & 2 == 0 { a.y } else { b.y },
+                    if k & 4 == 0 { a.z } else { b.z },
+                );
+                add(i.transform.transform_point3(c));
+            }
+        }
+    }
+    if lo.is_finite() && lo != glam::DVec3::ZERO {
+        model.root = mt_kernel::instance_ops::transform_entities(
+            &model.root,
+            glam::DMat4::from_translation(-lo),
+        );
+    }
+}
+
 /// Reads a `.gltf` / `.glb` file (buffers and images next to it) into a model, with
 /// textured materials given their image's average color and aspect ratio.
 pub(crate) fn read_gltf(path: &Path, merge: bool) -> Result<mt_kernel::Model, String> {
@@ -420,7 +452,10 @@ impl App {
                             Ok(m) if m.root.instances.is_empty() => {
                                 self.message = Some(format!("No faces in {}.", d.path.display()));
                             }
-                            Ok(m) => self.place_imported(m, &file_stem(&d.path), &device),
+                            Ok(mut m) => {
+                                origin_to_corner(&mut m);
+                                self.place_imported(m, &file_stem(&d.path), &device);
+                            }
                             Err(e) => self.file_error("import", &d.path, e),
                         },
                         Kind::Dxf => self.import_dxf(&d, &device),
@@ -693,6 +728,31 @@ mod tests {
         assert_eq!(ents.faces.len(), 1);
         assert_eq!(ents.faces.values().next().unwrap().attrs.material, Some(3));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn imported_gltf_is_held_by_its_low_corner() {
+        // A box 1 m wide, 50 m from the scene's origin.
+        let gltf = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+          "nodes":[{"mesh":0,"translation":[50,2,-3]}],
+          "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+          "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",
+            "min":[0,0,0],"max":[1,0,1]}],
+          "bufferViews":[{"buffer":0,"byteLength":36}],
+          "buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/"}]}"#;
+        let mut m = mt_kernel::gltf_io::import(gltf.as_bytes(), &|_| None, false).unwrap();
+        origin_to_corner(&mut m);
+        let i = &m.root.instances[0];
+        let (a, b) =
+            mt_kernel::instance_ops::definition_bounds(&m.definitions, i.definition).unwrap();
+        let (a, b) = (
+            i.transform.transform_point3(a),
+            i.transform.transform_point3(b),
+        );
+        let lo = a.min(b);
+        assert!(lo.abs().max_element() < 1e-9, "{lo}");
+        // Size is kept: 1 m in x.
+        assert!(((a - b).x.abs() - 1.0 / 0.0254).abs() < 1e-6);
     }
 
     #[test]
