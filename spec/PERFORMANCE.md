@@ -544,7 +544,8 @@ Reading the rows:
 - **undo snapshot (first)** copies every chunk (no snapshot to share with yet): same
   as before within noise (repeated runs: 128 to 172 ms before, 130 to 187 ms after).
 
-**Kernel operations.** Reads are `SlotMap`'s; writes set one flag. Repeated
+**Kernel operations.** Reads are `SlotMap`'s; writes set one flag (since replaced by
+the chunk version alone, LEFTOVERS item 32: ~3% fewer instructions than this). Repeated
 alternating runs (three each, same binary inputs): scene build, `import::from_skp`
 and the grid's Move commit are the same within noise (scene 316 to 327 ms vs 317 to
 322 ms minimum on a 400 x 400 grid); generating the grid (pure insertion and
@@ -852,9 +853,16 @@ Measured but not changed here, biggest first:
   the kernel import is bound by the kernel's own per-vertex and per-edge lists. VFF
   files copy every TLV leaf's payload (`tlv::parse_recursive`) and walk the tree
   several times (`geometry::collect_*`).
-- **Move commit on huge flat contexts** (grid: 7-8 s for 100k faces). Spread over
-  `transform_vertices`' welding: building the spatial index (`Entities::build_index`),
-  `set_vertex_positions` and its `edges_in` / `faces_in` / `edges_near_segment` queries.
+- **Move commit on huge flat contexts** (grid, a tenth moved: `transform_vertices`
+  ~3.1-4.1 s before, ~1.1-1.5 s now on 4 cores, `cargo run --release -p mt-kernel
+  --example move_bench`; the in-place checks run on threads, the index layers build
+  side by side, and grid cells and 8^3 blocks of cells keep their items' box for plane
+  queries). Left: re-indexing the moved items (`set_vertex_positions`, ~0.3 s) and, when
+  the Move welds (`MOVE_BENCH_WELD=1`, rebuild path), `edges_in_plane` /
+  `faces_near_plane`: on a nearly flat model every rebuilt face's plane meets
+  candidates along a line across the whole model, so the cost grows faster than the
+  model (grid 200: 121 s before, ~15 s now). Limiting those queries to the region
+  around the new edges would fix it.
 - **Undo right after a big edit in a huge flat context** (grid, after moving a tenth
   of it: ~20 to 25 ms, see "Fourth round"): the step of the edited state is taken
   first (comparing and copying every chunk the edit touched), then the changed chunks

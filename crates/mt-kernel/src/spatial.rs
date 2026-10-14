@@ -96,6 +96,16 @@ impl Aabb {
         (self.max - self.min).max_element()
     }
 
+    /// [`Aabb::meets_plane`] with some slack for rounding: true whenever it is for any
+    /// box inside this one.
+    fn may_meet_plane(&self, normal: DVec3, d: f64, tol: f64) -> bool {
+        let c = self.center();
+        let h = (self.max - self.min) / 2.0;
+        let r = h.dot(normal.abs());
+        let along = normal.dot(c);
+        (along - d).abs() <= r + tol + 1e-9 * (r + along.abs() + d.abs() + tol)
+    }
+
     /// Whether the box comes within `tol` of the plane `normal . p = d`.
     pub fn meets_plane(&self, normal: DVec3, d: f64, tol: f64) -> bool {
         let c = self.center();
@@ -145,24 +155,198 @@ impl Hasher for FxHasher {
 }
 
 type Cell = [i64; 3];
-type Cells<K> = HashMap<Cell, Vec<K>, BuildHasherDefault<FxHasher>>;
+
+/// The items of one occupied cell, the box of their boxes, and the cell's block (and
+/// where it is in the block's list).
+///
+/// Queries skip a cell whose items' box misses them: none of its items could match
+/// (each item's box lies in it), so the answers are the same as testing every item, only
+/// faster where cells are much bigger than what they hold (a flat model's plane queries).
+#[derive(Debug, Clone)]
+struct Bucket<K> {
+    cell: Cell,
+    items: Vec<K>,
+    bounds: Aabb,
+    block: u32,
+    block_at: u32,
+}
+
+/// Cells of a level grouped `2^BLOCK_SHIFT` to a side, so a plane query skips whole
+/// groups the plane misses instead of testing every occupied cell (a flat model's cells
+/// all lie in one or two slabs, which a slightly tilted plane crosses everywhere).
+const BLOCK_SHIFT: u32 = 3;
+
+/// The occupied cells of one block, a box holding all of their items' boxes (grown on
+/// insertion, never shrunk: still a bound after removals), and where the block is in
+/// each of its level's slabs (so emptying a block does not search a slab that may hold
+/// most of the level's blocks).
+#[derive(Debug, Clone)]
+struct Block {
+    at: Cell,
+    buckets: Vec<u32>,
+    bounds: Aabb,
+    slab_at: [u32; 3],
+}
+
+fn block_of(c: &Cell) -> Cell {
+    c.map(|x| x >> BLOCK_SHIFT)
+}
 
 /// Deepest level: cells of `cell * 2^MAX_LEVEL` hold anything.
 const MAX_LEVEL: usize = 62;
 
-/// One level of a layer: occupied cells, and the cells of each slab (cells with the same
-/// coordinate along an axis), so a plane query visits only the slabs the plane crosses.
+/// One level of a layer: occupied cells, their blocks, and the blocks of each slab
+/// (blocks with the same coordinate along an axis), so a plane query visits only the
+/// slabs the plane crosses and, in them, the blocks and cells whose items' boxes it
+/// meets. The cells are kept side by side in `buckets` (the map and blocks point into
+/// it), so visiting many of them reads one array.
 #[derive(Debug, Clone)]
 struct Level<K: Key> {
-    cells: Cells<K>,
-    slabs: [BTreeMap<i64, Vec<Cell>>; 3],
+    /// Each occupied cell's index in `buckets`.
+    cells: FxMap<Cell, u32>,
+    buckets: Vec<Bucket<K>>,
+    /// Each occupied block's index in `blocks`.
+    block_map: FxMap<Cell, u32>,
+    blocks: Vec<Block>,
+    slabs: [BTreeMap<i64, Vec<u32>>; 3],
 }
 
 impl<K: Key> Default for Level<K> {
     fn default() -> Self {
         Self {
-            cells: Cells::default(),
+            cells: FxMap::default(),
+            buckets: Vec::new(),
+            block_map: FxMap::default(),
+            blocks: Vec::new(),
             slabs: Default::default(),
+        }
+    }
+}
+
+impl<K: Key> Level<K> {
+    fn get(&self, c: &Cell) -> Option<&Bucket<K>> {
+        self.cells.get(c).map(|&i| &self.buckets[i as usize])
+    }
+
+    fn len(&self) -> usize {
+        self.buckets.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    /// The range of cells along `axis` that the occupied blocks span, if any.
+    fn cell_extent(&self, axis: usize) -> Option<(i64, i64)> {
+        let lo = *self.slabs[axis].first_key_value()?.0;
+        let hi = *self.slabs[axis].last_key_value()?.0;
+        Some((lo << BLOCK_SHIFT, ((hi + 1) << BLOCK_SHIFT) - 1))
+    }
+
+    /// Adds `k` with box `b` to cell `c`.
+    fn insert(&mut self, c: Cell, k: K, b: Aabb) {
+        let block = match self.cells.entry(c) {
+            Entry::Occupied(o) => {
+                let bucket = &mut self.buckets[*o.get() as usize];
+                bucket.items.push(k);
+                bucket.bounds = bucket.bounds.union(&b);
+                bucket.block
+            }
+            Entry::Vacant(v) => {
+                let bi = self.buckets.len() as u32;
+                v.insert(bi);
+                let at = block_of(&c);
+                let block = match self.block_map.entry(at) {
+                    Entry::Occupied(o) => *o.get(),
+                    Entry::Vacant(v) => {
+                        let n = self.blocks.len() as u32;
+                        v.insert(n);
+                        let mut slab_at = [0; 3];
+                        for (axis, slabs) in self.slabs.iter_mut().enumerate() {
+                            let slab = slabs.entry(at[axis]).or_default();
+                            slab_at[axis] = slab.len() as u32;
+                            slab.push(n);
+                        }
+                        self.blocks.push(Block {
+                            at,
+                            buckets: Vec::new(),
+                            bounds: Aabb::EMPTY,
+                            slab_at,
+                        });
+                        n
+                    }
+                };
+                let list = &mut self.blocks[block as usize].buckets;
+                self.buckets.push(Bucket {
+                    cell: c,
+                    items: vec![k],
+                    bounds: b,
+                    block,
+                    block_at: list.len() as u32,
+                });
+                list.push(bi);
+                block
+            }
+        };
+        let block = &mut self.blocks[block as usize];
+        block.bounds = block.bounds.union(&b);
+    }
+
+    /// Takes out the (emptied) bucket `bi`: its cell leaves the map and its block, and
+    /// the last bucket takes its place.
+    fn remove_bucket(&mut self, bi: usize) {
+        let (c, block, at) = {
+            let b = &self.buckets[bi];
+            (b.cell, b.block as usize, b.block_at as usize)
+        };
+        self.cells.remove(&c);
+        let list = &mut self.blocks[block].buckets;
+        debug_assert_eq!(list[at] as usize, bi);
+        list.swap_remove(at);
+        if let Some(&moved) = list.get(at) {
+            self.buckets[moved as usize].block_at = at as u32;
+        }
+        if list.is_empty() {
+            self.remove_block(block);
+        }
+        self.buckets.swap_remove(bi);
+        if let Some(moved) = self.buckets.get(bi) {
+            self.cells.insert(moved.cell, bi as u32);
+            self.blocks[moved.block as usize].buckets[moved.block_at as usize] = bi as u32;
+        }
+    }
+
+    /// Takes out the (emptied) block `k`: it leaves the map and the slabs, and the last
+    /// block takes its place.
+    fn remove_block(&mut self, k: usize) {
+        let at = self.blocks[k].at;
+        self.block_map.remove(&at);
+        for (axis, slabs) in self.slabs.iter_mut().enumerate() {
+            if let Some(slab) = slabs.get_mut(&at[axis]) {
+                // The block is in the slab once, at `slab_at` (what a search finds).
+                let i = self.blocks[k].slab_at[axis] as usize;
+                debug_assert_eq!(slab[i] as usize, k);
+                slab.swap_remove(i);
+                if let Some(&moved) = slab.get(i) {
+                    self.blocks[moved as usize].slab_at[axis] = i as u32;
+                }
+                if slab.is_empty() {
+                    slabs.remove(&at[axis]);
+                }
+            }
+        }
+        self.blocks.swap_remove(k);
+        if let Some(moved) = self.blocks.get(k) {
+            let m = moved.at;
+            self.block_map.insert(m, k as u32);
+            for (axis, slabs) in self.slabs.iter_mut().enumerate() {
+                if let Some(slab) = slabs.get_mut(&m[axis]) {
+                    slab[moved.slab_at[axis] as usize] = k as u32;
+                }
+            }
+            for &b in &moved.buckets {
+                self.buckets[b as usize].block = k as u32;
+            }
         }
     }
 }
@@ -205,17 +389,14 @@ fn in_range(c: &Cell, lo: &Cell, hi: &Cell) -> bool {
     (0..3).all(|i| lo[i] <= c[i] && c[i] <= hi[i])
 }
 
-/// A cell's box grown by half a cell: where the boxes of its items lie.
-fn grown_box(c: &Cell, cs: f64) -> Aabb {
-    let min = DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64) * cs;
-    Aabb {
-        min,
-        max: min + DVec3::splat(cs),
-    }
-    .expand(cs / 2.0)
-}
-
 impl<K: Key + Ord> Layer<K> {
+    fn with_capacity(items: usize) -> Self {
+        Self {
+            levels: Vec::new(),
+            loc: SecondaryMap::with_capacity(items),
+        }
+    }
+
     fn len(&self) -> usize {
         self.loc.len()
     }
@@ -236,16 +417,7 @@ impl<K: Key + Ord> Layer<K> {
         if self.levels.len() <= level {
             self.levels.resize_with(level + 1, Default::default);
         }
-        let lv = &mut self.levels[level];
-        match lv.cells.entry(c) {
-            Entry::Occupied(mut o) => o.get_mut().push(k),
-            Entry::Vacant(v) => {
-                v.insert(vec![k]);
-                for (axis, slabs) in lv.slabs.iter_mut().enumerate() {
-                    slabs.entry(c[axis]).or_default().push(c);
-                }
-            }
-        }
+        self.levels[level].insert(c, k, b);
         self.loc.insert(k, (level as u8, c, b));
     }
 
@@ -254,24 +426,20 @@ impl<K: Key + Ord> Layer<K> {
             return;
         };
         let lv = &mut self.levels[level as usize];
-        let Some(list) = lv.cells.get_mut(&c) else {
+        let Some(&bi) = lv.cells.get(&c) else {
             return;
         };
+        let bucket = &mut lv.buckets[bi as usize];
+        let list = &mut bucket.items;
         if let Some(i) = list.iter().position(|x| *x == k) {
             list.swap_remove(i);
         }
         if list.is_empty() {
-            lv.cells.remove(&c);
-            for (axis, slabs) in lv.slabs.iter_mut().enumerate() {
-                if let Some(slab) = slabs.get_mut(&c[axis]) {
-                    if let Some(i) = slab.iter().position(|x| *x == c) {
-                        slab.swap_remove(i);
-                    }
-                    if slab.is_empty() {
-                        slabs.remove(&c[axis]);
-                    }
-                }
-            }
+            lv.remove_bucket(bi as usize);
+        } else {
+            bucket.bounds = list
+                .iter()
+                .fold(Aabb::EMPTY, |b, x| b.union(&self.loc[*x].2));
         }
     }
 
@@ -279,26 +447,27 @@ impl<K: Key + Ord> Layer<K> {
     fn query(&self, cell: f64, b: &Aabb, out: &mut Vec<K>) {
         let keep = |k: &K| self.loc[*k].2.overlaps(b);
         for (level, lv) in self.levels.iter().enumerate() {
-            let cells = &lv.cells;
-            if cells.is_empty() {
+            if lv.is_empty() {
                 continue;
             }
             let cs = cell * (level as f64).exp2();
             let (lo, hi, count) = cell_range(b, cs);
-            if count <= cells.len() as f64 {
+            if count <= lv.len() as f64 {
                 for x in lo[0]..=hi[0] {
                     for y in lo[1]..=hi[1] {
                         for z in lo[2]..=hi[2] {
-                            if let Some(list) = cells.get(&[x, y, z]) {
-                                out.extend(list.iter().filter(|k| keep(k)));
+                            if let Some(list) = lv.get(&[x, y, z])
+                                && list.bounds.overlaps(b)
+                            {
+                                out.extend(list.items.iter().filter(|k| keep(k)));
                             }
                         }
                     }
                 }
             } else {
-                for (c, list) in cells {
-                    if in_range(c, &lo, &hi) {
-                        out.extend(list.iter().filter(|k| keep(k)));
+                for list in &lv.buckets {
+                    if in_range(&list.cell, &lo, &hi) && list.bounds.overlaps(b) {
+                        out.extend(list.items.iter().filter(|k| keep(k)));
                     }
                 }
             }
@@ -312,13 +481,12 @@ impl<K: Key + Ord> Layer<K> {
         let len = a.distance(b);
         let mut visit: Vec<Cell> = Vec::new();
         for (level, lv) in self.levels.iter().enumerate() {
-            let cells = &lv.cells;
-            if cells.is_empty() {
+            if lv.is_empty() {
                 continue;
             }
             let cs = cell * (level as f64).exp2();
             let pieces = (len / cs).ceil().max(1.0);
-            let budget = cells.len() as f64;
+            let budget = lv.len() as f64;
             visit.clear();
             let mut over = pieces * 8.0 > budget;
             if !over {
@@ -343,17 +511,19 @@ impl<K: Key + Ord> Layer<K> {
             let keep = |k: &K| self.loc[*k].2.overlaps(&whole);
             if over {
                 let (lo, hi, _) = cell_range(&whole, cs);
-                for (c, list) in cells {
-                    if in_range(c, &lo, &hi) {
-                        out.extend(list.iter().filter(|k| keep(k)));
+                for list in &lv.buckets {
+                    if in_range(&list.cell, &lo, &hi) && list.bounds.overlaps(&whole) {
+                        out.extend(list.items.iter().filter(|k| keep(k)));
                     }
                 }
             } else {
                 visit.sort_unstable();
                 visit.dedup();
                 for c in &visit {
-                    if let Some(list) = cells.get(c) {
-                        out.extend(list.iter().filter(|k| keep(k)));
+                    if let Some(list) = lv.get(c)
+                        && list.bounds.overlaps(&whole)
+                    {
+                        out.extend(list.items.iter().filter(|k| keep(k)));
                     }
                 }
             }
@@ -362,7 +532,8 @@ impl<K: Key + Ord> Layer<K> {
 
     /// Items whose box comes within `tol` of the plane `normal . p = d`, unsorted. Only
     /// the slabs (along the normal's main axis) that the plane crosses within the level's
-    /// occupied range are visited.
+    /// occupied range are visited, and in them only the blocks and cells whose items'
+    /// boxes the plane may meet.
     ///
     /// `rel` widens `tol` by that much per inch of distance from the origin, for planes
     /// that agree in direction only within an angle.
@@ -375,14 +546,13 @@ impl<K: Key + Ord> Layer<K> {
             return;
         }
         for (level, lv) in self.levels.iter().enumerate() {
-            if lv.cells.is_empty() {
+            if lv.is_empty() {
                 continue;
             }
             let cs = cell * (level as f64).exp2();
             let reach = (0..3)
                 .map(|i| {
-                    let lo = lv.slabs[i].first_key_value().map_or(0, |x| *x.0);
-                    let hi = lv.slabs[i].last_key_value().map_or(0, |x| *x.0);
+                    let (lo, hi) = lv.cell_extent(i).unwrap_or((0, 0));
                     ((lo as f64).abs().max((hi + 1) as f64).abs() + 1.0) * cs
                 })
                 .map(|x| x * x)
@@ -393,14 +563,11 @@ impl<K: Key + Ord> Layer<K> {
             // (grown) range, so the range of the main coordinate on the plane.
             let (mut lo, mut hi) = (d - tol, d + tol);
             for other in (0..3).filter(|&i| i != axis) {
-                let (Some(first), Some(last)) = (
-                    lv.slabs[other].first_key_value(),
-                    lv.slabs[other].last_key_value(),
-                ) else {
+                let Some((first, last)) = lv.cell_extent(other) else {
                     continue;
                 };
-                let a = *first.0 as f64 * cs - cs / 2.0;
-                let b = (*last.0 + 1) as f64 * cs + cs / 2.0;
+                let a = first as f64 * cs - cs / 2.0;
+                let b = (last + 1) as f64 * cs + cs / 2.0;
                 let (t0, t1) = (n[other] * a, n[other] * b);
                 lo -= t0.max(t1);
                 hi -= t0.min(t1);
@@ -410,16 +577,24 @@ impl<K: Key + Ord> Layer<K> {
             } else {
                 (hi / n[axis], lo / n[axis])
             };
-            let first = ((x0 - 1.5 * cs) / cs).floor() as i64;
-            let last = ((x1 + 0.5 * cs) / cs).ceil() as i64;
+            let first = ((x0 - 1.5 * cs) / cs).floor() as i64 >> BLOCK_SHIFT;
+            let last = ((x1 + 0.5 * cs) / cs).ceil() as i64 >> BLOCK_SHIFT;
             for (_, slab) in lv.slabs[axis].range(first..=last) {
-                for c in slab {
-                    if grown_box(c, cs).meets_plane(normal, d, tol) {
-                        out.extend(
-                            lv.cells[c]
-                                .iter()
-                                .filter(|k| self.loc[**k].2.meets_plane(normal, d, tol)),
-                        );
+                for &k in slab {
+                    // The boxes hold their items' boxes, which lie in the cells' grown
+                    // boxes: no need to test those too.
+                    let block = &lv.blocks[k as usize];
+                    if !block.bounds.may_meet_plane(normal, d, tol) {
+                        continue;
+                    }
+                    for &bi in &block.buckets {
+                        let bucket = &lv.buckets[bi as usize];
+                        if bucket.bounds.may_meet_plane(normal, d, tol) {
+                            out.extend(
+                                (bucket.items.iter())
+                                    .filter(|k| self.loc[**k].2.meets_plane(normal, d, tol)),
+                            );
+                        }
                     }
                 }
             }
@@ -512,6 +687,9 @@ impl Grid {
 /// treats as the same can differ.
 const COINCIDE_ANGLE: f64 = 1e-4;
 
+/// Items from which `Entities::build_index` builds its three layers on threads.
+const PARALLEL_BUILD: usize = 50_000;
+
 /// Sorts candidates into key (slot map) order.
 fn sorted<K: Ord>(mut v: Vec<K>) -> Vec<K> {
     v.sort_unstable();
@@ -585,23 +763,46 @@ impl Entities {
             *lens.select_nth_unstable_by(mid, f64::total_cmp).1
         }
         .max(16.0 * crate::TOL);
-        let mut g = Grid {
-            cell,
-            vertices: Layer::default(),
-            edges: Layer::default(),
-            faces: Layer::default(),
-            built_items: self.vertices.len() + self.edges.len() + self.faces.len(),
+        let built_items = self.vertices.len() + self.edges.len() + self.faces.len();
+        // The three layers are independent: a big model builds them side by side.
+        let vertices = || {
+            let mut l = Layer::with_capacity(self.vertices.len());
+            for (v, x) in &self.vertices {
+                l.insert(cell, v, Aabb::point(x.pos));
+            }
+            l
         };
-        for (v, x) in &self.vertices {
-            g.insert_vertex(v, x.pos);
-        }
-        for e in self.edges.keys() {
-            g.edges.insert(cell, e, self.edge_bounds(e));
-        }
-        for f in self.faces.keys() {
-            g.faces.insert(cell, f, self.face_bounds(f));
-        }
-        self.index.grid = Some(Box::new(g));
+        let edges = || {
+            let mut l = Layer::with_capacity(self.edges.len());
+            for e in self.edges.keys() {
+                l.insert(cell, e, self.edge_bounds(e));
+            }
+            l
+        };
+        let faces = || {
+            let mut l = Layer::with_capacity(self.faces.len());
+            for f in self.faces.keys() {
+                l.insert(cell, f, self.face_bounds(f));
+            }
+            l
+        };
+        let (vertices, edges, faces) = if built_items >= PARALLEL_BUILD {
+            std::thread::scope(|s| {
+                let e = s.spawn(edges);
+                let f = s.spawn(faces);
+                let v = vertices();
+                (v, e.join().unwrap(), f.join().unwrap())
+            })
+        } else {
+            (vertices(), edges(), faces())
+        };
+        self.index.grid = Some(Box::new(Grid {
+            cell,
+            vertices,
+            edges,
+            faces,
+            built_items,
+        }));
     }
 
     /// Updates the index entry of a face whose loops changed.
@@ -707,14 +908,15 @@ impl Entities {
         }
     }
 
-    /// Candidate edges within `tol` of the plane, in no particular order.
+    /// Candidate edges within `tol` of the plane, in key order (so what is built from
+    /// them does not depend on the index's layout, which depends on its history).
     pub fn edges_near_plane(&self, plane: &crate::geom::Plane, tol: f64) -> Vec<EdgeId> {
         match self.grid() {
             Some(g) => {
                 let mut out = Vec::new();
                 g.edges
                     .query_plane(g.cell, plane.normal, plane.d, tol, 0.0, &mut out);
-                out
+                sorted(out)
             }
             None => self.edges.keys().collect(),
         }
@@ -846,6 +1048,90 @@ mod tests {
         for (id, x) in &e.edges {
             if (e.pos(x.start).z > 0.0) != (e.pos(x.end).z > 0.0) {
                 assert!(on.contains(&id));
+            }
+        }
+    }
+
+    impl<K: Key> Level<K> {
+        /// Panics unless the map, the cells, the blocks and the slabs agree.
+        fn check(&self) {
+            assert_eq!(self.cells.len(), self.buckets.len());
+            assert_eq!(self.block_map.len(), self.blocks.len());
+            for (i, b) in self.buckets.iter().enumerate() {
+                assert!(!b.items.is_empty());
+                assert_eq!(self.cells[&b.cell] as usize, i);
+                let block = &self.blocks[b.block as usize];
+                assert_eq!(block.at, block_of(&b.cell));
+                assert_eq!(block.buckets[b.block_at as usize] as usize, i);
+                assert!(block.bounds.union(&b.bounds) == block.bounds);
+            }
+            for (k, block) in self.blocks.iter().enumerate() {
+                assert!(!block.buckets.is_empty());
+                assert_eq!(self.block_map[&block.at] as usize, k);
+                for axis in 0..3 {
+                    assert_eq!(
+                        self.slabs[axis][&block.at[axis]][block.slab_at[axis] as usize] as usize,
+                        k
+                    );
+                }
+            }
+            let listed: usize = (self.slabs.iter())
+                .map(|s| s.values().map(Vec::len).sum::<usize>())
+                .sum();
+            assert_eq!(listed, 3 * self.blocks.len());
+        }
+    }
+
+    #[test]
+    fn plane_queries_match_scans_after_edits() {
+        let mut s = 7u64;
+        let mut rnd = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        // A wavy, nearly flat sheet of points and small boxes, as a flat model's.
+        let mut sm: slotmap::SlotMap<VertexId, ()> = slotmap::SlotMap::with_key();
+        let mut layer: Layer<VertexId> = Layer::default();
+        let mut keys = Vec::new();
+        let cell = 1.0;
+        for _ in 0..3000 {
+            let k = sm.insert(());
+            let p = DVec3::new(rnd() * 60.0, rnd() * 60.0, rnd() * 0.5);
+            layer.insert(cell, k, Aabb::point(p).expand(rnd().abs() * 3.0));
+            keys.push(k);
+        }
+        for round in 0..6 {
+            // Remove and move some (emptying cells and blocks), then query.
+            for (i, &k) in keys.iter().enumerate() {
+                if (i + round) % 3 == 0 {
+                    layer.remove(k);
+                } else if (i + round) % 3 == 1 {
+                    let p = DVec3::new(rnd() * 60.0, rnd() * 60.0, rnd() * 0.5);
+                    layer.insert(cell, k, Aabb::point(p).expand(rnd().abs()));
+                }
+            }
+            for lv in &layer.levels {
+                lv.check();
+            }
+            for _ in 0..40 {
+                let normal = DVec3::new(rnd() * 0.1, rnd() * 0.1, 1.0).normalize();
+                let d = rnd() * 0.5;
+                let tol = rnd().abs() * 0.01;
+                let mut out = Vec::new();
+                layer.query_plane(cell, normal, d, tol, 0.0, &mut out);
+                for (k, (_, _, b)) in &layer.loc {
+                    if b.meets_plane(normal, d, tol) {
+                        assert!(out.contains(&k), "plane query missed an item");
+                    }
+                }
+            }
+            for &k in &keys {
+                if !layer.loc.contains_key(k) {
+                    let p = DVec3::new(rnd() * 60.0, rnd() * 60.0, rnd() * 0.5);
+                    layer.insert(cell, k, Aabb::point(p));
+                }
             }
         }
     }
